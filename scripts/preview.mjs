@@ -21,7 +21,7 @@ const server = http.createServer(async (request, response) => {
     if (urlPath === '/') urlPath = '/index.html';
     const parts = urlPath.split('/').slice(1);
     if (parts.some((part) => !part || part.startsWith('.'))) return fail(403);
-    const allowed = urlPath === '/index.html' || urlPath.startsWith('/src/') || urlPath.startsWith('/assets/') || urlPath.startsWith('/node_modules/pdfjs-dist/');
+    const allowed = urlPath === '/index.html' || urlPath === '/group.html' || urlPath.startsWith('/src/') || urlPath.startsWith('/assets/') || urlPath.startsWith('/node_modules/pdfjs-dist/');
     if (!allowed) return fail(404);
     const resolved = await realpath(path.join(root, ...parts));
     if (!resolved.startsWith(rootReal + path.sep)) return fail(403);

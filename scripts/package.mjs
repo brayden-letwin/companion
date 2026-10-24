@@ -12,7 +12,7 @@ const destination = path.resolve(releaseRoot, name);
 if (path.dirname(destination) !== releaseRoot) throw new Error('Invalid package destination.');
 const runtime = path.join(root, 'node_modules', 'electron', 'dist');
 const pdfjs = path.join(root, 'node_modules', 'pdfjs-dist');
-const sourceFiles = ['index.html', 'package.json'];
+const sourceFiles = ['index.html', 'group.html', 'package.json'];
 const sourceDirectories = ['src', 'electron'];
 const publicExtensions = new Set(['.js', '.mjs', '.cjs', '.json', '.css', '.html', '.svg', '.png', '.jpg', '.jpeg', '.webp', '.ico', '.woff', '.woff2', '.ttf', '.otf']);
 const privateNames = new Set(['secrets', 'credentials', 'tests', 'test-results', 'private', 'recordings', 'captures', 'screenshots', 'transcripts', 'user-notes', 'papers', 'node_modules']);
