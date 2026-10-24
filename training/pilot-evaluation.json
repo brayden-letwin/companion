@@ -1,0 +1,372 @@
+{
+  "run": "pilot-2",
+  "date": "2026-10-24",
+  "model": "Qwen/Qwen3.5-2B",
+  "base_revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+  "dataset_sha256": "8e29cd26ca4d398139001f714aa62f16ba7e704c080f9e516c12cdfa17b35cdb",
+  "trained": true,
+  "promoted_to_app": false,
+  "decision": "Rejected for mathematical errors and unsupported source claims.",
+  "evaluation": {
+    "examples": 8,
+    "generation": "Greedy decoding, same prompts before and after, max_new_tokens=256, thinking disabled.",
+    "scope": "Small synthetic smoke test with theorem families held out from the training set; not a benchmark or proof of broad quality.",
+    "reviewer": "Independent assistant reviewer plus training agent cross-check; no human mathematical sign-off.",
+    "limitations": [
+      "Exact EOS/length metadata was not captured in this executed revision; multiple answers visibly end mid-sentence or mid-formula and are treated as incomplete.",
+      "Current train.py now records generated token count and EOS/length termination for future runs.",
+      "Hostile source instructions were not tested.",
+      "Eight synthetic examples cannot establish statistical or real-paper performance.",
+      "This 2B adapter was compared to its own 2B base, not to the app's 4B inference model."
+    ],
+    "score_scale": "Each criterion: 0 wrong/missing, 1 partly met, 2 fully met. Subjective assistant smoke-test judgments; no aggregate improvement claim."
+  },
+  "training": {
+    "steps": 12,
+    "epochs": 1.0,
+    "train_runtime_seconds": 90.5207,
+    "total_elapsed_seconds": 288.125,
+    "mean_training_loss": 2.3252638479073844,
+    "peak_torch_allocated_bytes": 4852110848,
+    "trainable_parameters": 5455872,
+    "total_parameters": 2218697536,
+    "rank": 8,
+    "lora_alpha": 16,
+    "learning_rate": 5e-05,
+    "seed": 3407,
+    "max_sequence_length": 768,
+    "batch_size": 1,
+    "gradient_accumulation_steps": 2,
+    "versions": {
+      "torch": "2.14.1+cu130",
+      "transformers": "5.17.0",
+      "peft": "0.21.2",
+      "unsloth": "2026.10.8"
+    },
+    "gpu": "NVIDIA GeForce RTX 4070"
+  },
+  "adapter_verification": {
+    "adapter_bytes": 21851336,
+    "adapter_sha256": "195ae254a95bdc1e7a4b29b0b465eaf9e117b6ce6f4a69ae3155f4311e80054f",
+    "tensor_count": 192,
+    "parameter_count": 5455872,
+    "lora_b_tensor_count": 96,
+    "nonzero_lora_b_tensors": 96,
+    "lora_b_l2_norm": 0.25491865944087727,
+    "all_tensors_finite": true
+  },
+  "cases": [
+    {
+      "id": "ev01",
+      "family": "compact-extrema",
+      "passage": "A continuous real-valued function on a nonempty compact space attains its maximum.",
+      "question": "Why do we need compactness? I know continuous functions.",
+      "familiarity": {
+        "Continuity": "Comfortable"
+      },
+      "reference": "Compactness prevents the values from approaching an unattained endpoint: the continuous image is compact in R, hence bounded and closed, and contains its supremum. On (0,1), f(x)=x is continuous and bounded but has no maximum.",
+      "rubric": [
+        "Explains attainment, not only boundedness",
+        "Gives valid noncompact counterexample",
+        "Does not claim noncompact functions never attain maxima",
+        "Connects to stated familiarity"
+      ],
+      "before": {
+        "output": "You are already comfortable with the idea of a continuous function, which means you know that small changes in the input result in small changes in the output. This is the \"intuition\" you asked about.\n\nHowever, to prove that such a function *must* reach a highest value, we need a specific property of the space where the function lives. That property is called **compactness**.\n\nThink of a compact space as a space that is both \"closed\" and \"bounded\" in a way that prevents it from stretching out infinitely. If a function is continuous on such a space, it cannot \"escape\" to infinity; it must stay within a finite range.\n\nBecause the function cannot escape, it must eventually settle at a specific point where it stops increasing. This is the mathematical reason: **the Extreme Value Theorem**. It states that a continuous function on a compact set attains its maximum and minimum values.\n\nSo, compactness is the essential constraint that forces the function to stop growing forever and instead find a peak. Without it, the function could theoretically keep increasing indefinitely.",
+        "seconds": 51.797
+      },
+      "after": {
+        "output": "You are already comfortable with continuity, so we can skip the definition.\n\nCompactness is the property that guarantees a continuous function on a nonempty compact space will actually reach its maximum value. Without compactness, a continuous function might never attain a maximum, even if it is bounded.\n\nThis is a fundamental result in analysis.",
+        "seconds": 2.64
+      },
+      "review": {
+        "before_scores": {
+          "mathematical_correctness": 0,
+          "source_faithfulness": 1,
+          "teaching_usefulness": 0,
+          "calibration": 0
+        },
+        "after_scores": {
+          "mathematical_correctness": 2,
+          "source_faithfulness": 2,
+          "teaching_usefulness": 1,
+          "calibration": 2
+        },
+        "note": "After removes the false boundedness-to-attainment argument, but mostly restates the theorem without a proof or counterexample."
+      }
+    },
+    {
+      "id": "ev02",
+      "family": "group-cancellation",
+      "passage": "In a group, ab=ac implies b=c.",
+      "question": "I only know ordinary algebra. Why can we cancel a?",
+      "familiarity": {
+        "Groups": "New to me"
+      },
+      "reference": "Multiply both sides on the left by a inverse. Associativity yields (a inverse a)b=(a inverse a)c, then identity gives b=c. Order matters in noncommutative groups.",
+      "rubric": [
+        "Uses inverse on the correct side",
+        "Mentions associativity or shows its role",
+        "Does not assume commutativity",
+        "Explains in accessible language"
+      ],
+      "before": {
+        "output": "You are asking a great question because in everyday algebra, we often see things like $2x + 3 = 2x + 5$ and immediately cancel the $2x$ to get $3 = 5$, which is clearly false. This works because we are adding the same number to both sides.\n\nHowever, in a **group**, the operation is not just \"adding\" numbers; it is a specific kind of combination called a **group operation**. The rule you are looking at, $ab = ac \\implies b = c$, is a fundamental property of groups called **cancellation**.\n\nHere is the intuitive connection:\nImagine a group is a set of doors where you can only move from one door to another by pressing a specific button (the operation). If pressing the button twice to get from Door A to Door C is the same as pressing it once to get from Door A to Door C, then pressing it once must take you from Door A to Door B. If you didn't press it once, you wouldn't be able to reach Door B.\n\nThe mathematical reason is that groups are defined by a set of rules that ensure this \"one-to-one\" relationship. Specifically, the **Left Cancellation Law** states that if",
+        "seconds": 9.36
+      },
+      "after": {
+        "output": "You are right to be cautious. In ordinary algebra, we can cancel a number because it is a non-zero constant. In group theory, we can cancel an element because it is a non-identity element.\n\nThe statement \"ab = ac implies b = c\" is a fundamental property of groups. It is true because the group operation is a function. If you apply the inverse of a to both sides of the equation, you get b = c.\n\nThe hypothesis is that ab = ac. The conclusion is that b = c. The domain is the set of elements in the group.\n\nThe proof is:\n1. ab = ac\n2. Multiply both sides by a⁻¹ (the inverse of a).\n3. a⁻¹(ab) = a⁻¹(ac)\n4. (a⁻¹a)b = (a⁻¹a)c\n5. e b = e c\n6. b = c\n\nThe key is that a⁻¹a = e, the identity element. This is why we can cancel a.\n\nThe passage omits the crucial context that a is not the identity element. If a = e, then ab = ac is true for any b and c, but b",
+        "seconds": 9.656
+      },
+      "review": {
+        "before_scores": {
+          "mathematical_correctness": 0,
+          "source_faithfulness": 1,
+          "teaching_usefulness": 0,
+          "calibration": 0
+        },
+        "after_scores": {
+          "mathematical_correctness": 0,
+          "source_faithfulness": 0,
+          "teaching_usefulness": 1,
+          "calibration": 0
+        },
+        "note": "After includes a valid inverse calculation but falsely requires a nonidentity element and claims e*b=e*c for any b,c."
+      }
+    },
+    {
+      "id": "ev03",
+      "family": "conditional-probability",
+      "passage": "P(A given B)=P(A intersection B)/P(B).",
+      "question": "Does this work if P(B)=0?",
+      "familiarity": {
+        "Probability": "A little familiar"
+      },
+      "reference": "This elementary formula requires P(B)>0. When P(B)=0, the ratio is undefined; more advanced conditional probabilities need additional structure and cannot be obtained from this ratio alone.",
+      "rubric": [
+        "Rejects division by zero",
+        "States the missing assumption",
+        "Does not invent a unique answer on null events",
+        "Keeps answer concise"
+      ],
+      "before": {
+        "output": "You are asking whether the formula $P(A \\mid B) = \\frac{P(A \\cap B)}{P(B)}$ breaks down if the probability of event $B$ is zero.\n\n**Intuition:**\nImagine you are trying to calculate the chance of rolling a 6 on a standard die, given that the die was rolled on a specific side. If you know the die *must* have been on a side, and you ask, \"What is the chance it is a 6?\", the answer is simply \"1\" (certain), because the condition has already happened. The denominator $P(B)$ represents the likelihood of the condition being true. If the condition is guaranteed to be true, its probability is 1, not 0.\n\n**Mathematical Reason:**\nThe formula relies on dividing by $P(B)$. If $P(B) = 0$, we are dividing by zero, which is mathematically undefined. However, this does not mean the formula is false; it means the formula is **inapplicable** in that specific case.\n\nThe reason is that the conditional probability $P(A \\mid B)$ is defined as the probability of $A$ happening *given* that $B$",
+        "seconds": 10.062
+      },
+      "after": {
+        "output": "If $P(B) = 0$, the formula breaks down because division by zero is undefined.\n\nThis is a standard issue in probability theory. The formula $P(A \\cap B) = P(A) \\cdot P(B)$ is only valid when $P(B) > 0$. When $P(B) = 0$, the conditional probability $P(A|B)$ is not defined by this equation.\n\nInstead, we use the definition of conditional probability:\n$$P(A|B) = \\frac{P(A \\cap B)}{P(B)}$$\n\nIf $P(B) = 0$, then $P(A|B)$ is undefined. However, we can still evaluate the limit as $P(B)$ approaches 0.\n\nThe limit of $P(A|B)$ as $P(B) \\to 0$ is:\n$$\\lim_{P(B) \\to 0} \\frac{P(A \\cap B)}{P(B)} = \\lim_{P(B) \\to 0} \\frac{P(A \\cap B)}{P(B)} \\cdot \\frac{P(B)}{P(B)} = \\lim_{P(B) \\to 0} \\frac{P",
+        "seconds": 9.672
+      },
+      "review": {
+        "before_scores": {
+          "mathematical_correctness": 0,
+          "source_faithfulness": 1,
+          "teaching_usefulness": 0,
+          "calibration": 1
+        },
+        "after_scores": {
+          "mathematical_correctness": 0,
+          "source_faithfulness": 0,
+          "teaching_usefulness": 0,
+          "calibration": 0
+        },
+        "note": "Both notice division by zero. Before gives an invalid die intuition. After falsely substitutes positivity of P(B) for independence and invents an unsupported limit."
+      }
+    },
+    {
+      "id": "ev04",
+      "family": "ode-uniqueness",
+      "passage": "The right-hand side f is continuous, so the initial-value problem has a unique solution.",
+      "question": "Is continuity enough for uniqueness?",
+      "familiarity": {
+        "Differential equations": "A little familiar"
+      },
+      "reference": "Continuity alone generally supports local existence, not uniqueness. A local Lipschitz condition in the dependent variable is a common sufficient uniqueness hypothesis. For y'=2 sqrt(|y|), y(0)=0, both y=0 and y=t^2 for t>=0 solve forward in time.",
+      "rubric": [
+        "Distinguishes existence from uniqueness",
+        "Provides a correct extra sufficient assumption",
+        "Counterexample if given actually satisfies ODE and data",
+        "Avoids treating selected sentence as infallible"
+      ],
+      "before": {
+        "output": "You are asking whether the smoothness of a function guarantees that a differential equation has only one possible solution. Your intuition suggests that if the function is continuous, the answer should be yes.\n\nHowever, in the theory of differential equations, **continuity alone is not enough** to guarantee uniqueness.\n\nTo see why, consider the classic example of the differential equation $y' = y^{1/3}$ with the initial condition $y(0) = 0$.\n*   **The Solution:** One obvious solution is $y(x) = 0$ for all $x$.\n*   **The Problem:** If we try to find another solution, we can integrate $y' = y^{1/3}$ to get $\\frac{3}{2}y^{2/3} = x + C$. Setting $C=0$ gives $y = (\\frac{2}{3}x)^3$, which is zero at $x=0$. But if we try to find a solution that is not identically zero, we encounter a \"branch point\" where the derivative is undefined.\n\nThe reason continuity fails here is that the function $f(y) = y^{1/3}$ is continuous everywhere, yet it is not Lipsch",
+        "seconds": 9.547
+      },
+      "after": {
+        "output": "Continuity alone is not enough to guarantee uniqueness.\n\nThe statement that the right-hand side $f$ is continuous is a necessary condition for the existence of a solution, but it does not ensure that the solution is unique.\n\nTo see why, consider the differential equation $y' = y^{1/3}$ with the initial condition $y(0) = 0$. The function $f(y) = y^{1/3}$ is continuous everywhere, yet there are infinitely many solutions passing through $(0,0)$. For example, $y(x) = 0$ is one solution, but $y(x) = x^2$ is another, since its derivative at $x=0$ is also $0$.\n\nTherefore, additional conditions are required to rule out non-unique solutions.",
+        "seconds": 6.485
+      },
+      "review": {
+        "before_scores": {
+          "mathematical_correctness": 0,
+          "source_faithfulness": 1,
+          "teaching_usefulness": 0,
+          "calibration": 1
+        },
+        "after_scores": {
+          "mathematical_correctness": 0,
+          "source_faithfulness": 1,
+          "teaching_usefulness": 0,
+          "calibration": 1
+        },
+        "note": "Both correctly reject continuity as sufficient for uniqueness, but both give invalid explicit solutions to y'=y^(1/3). After also incorrectly calls continuity necessary for existence."
+      }
+    },
+    {
+      "id": "ev05",
+      "family": "convex-functions",
+      "passage": "For a convex function, f((x+y)/2) <= (f(x)+f(y))/2.",
+      "question": "What is the picture behind this?",
+      "familiarity": {
+        "Convexity": "New to me"
+      },
+      "reference": "The value at the midpoint sits no higher than the midpoint of the two endpoint heights: the graph lies below the connecting chord. This is one special case of the convexity inequality.",
+      "rubric": [
+        "Correct inequality direction",
+        "Accessible chord or midpoint picture",
+        "Identifies midpoint as special case",
+        "Does not claim midpoint convexity alone always implies full convexity"
+      ],
+      "before": {
+        "output": "### Intuitive Connection\nImagine you are drawing a smooth, bowl-shaped curve (a convex function) on a piece of paper. Now, take two points on this curve, say point $x$ and point $y$. If you draw a straight line connecting them, the curve itself will always sit *below* that line.\n\nThe statement you are looking at is a special case of this rule. It says that if you take the midpoint between $x$ and $y$, the value of the function at that midpoint is always less than or equal to the average of the values at $x$ and $y$. In other words, the curve doesn't \"bounce up\" faster than a straight line would predict.\n\n### Mathematical Reason\nThis is a direct consequence of the **definition of convexity**.\n\nMathematically, a function $f$ is convex if, for any two points $x$ and $y$ and any number $t$ between 0 and 1, the following inequality holds:\n$$f(tx + (1-t)y) \\leq tf(x) + (1-t)f(y)$$\n\nIn your specific case, the problem uses the midpoint. This means:\n*   The \"average\" point is the midpoint",
+        "seconds": 9.656
+      },
+      "after": {
+        "output": "The picture behind this inequality is the **slope of a line** connecting two points on a graph.\n\nImagine you have a convex function, like a bowl-shaped curve. Pick any two points on this curve, say $x$ and $y$. Now, draw a straight line connecting them. The slope of this line represents the average rate of change between those two points.\n\nThe inequality $f((x+y)/2) \\le (f(x)+f(y))/2$ says that the value of the function at the midpoint of $x$ and $y$ is less than or equal to the average of the function values at $x$ and $y$. In other words, the function value at the midpoint is always below the straight line connecting the two endpoints.\n\nThis is because a convex function curves **upward**. The straight line connecting two points on an upward-curving graph lies above the graph itself. Therefore, the midpoint of the interval $(x, y)$ must lie below the straight line segment connecting $x$ and $y$. Since the function is below the line, its value at the midpoint must be less than the average of the values at the endpoints.\n\nThis is a fundamental property of convex functions, often called the **Jensen's",
+        "seconds": 10.14
+      },
+      "review": {
+        "before_scores": {
+          "mathematical_correctness": 2,
+          "source_faithfulness": 2,
+          "teaching_usefulness": 2,
+          "calibration": 2
+        },
+        "after_scores": {
+          "mathematical_correctness": 1,
+          "source_faithfulness": 2,
+          "teaching_usefulness": 1,
+          "calibration": 1
+        },
+        "note": "Before gives a sound chord and convexity explanation though incomplete. After has the central non-strict inequality but distracts with slope and incorrectly says the value must be strictly less; affine functions give equality."
+      }
+    },
+    {
+      "id": "ev06",
+      "family": "complex-roots",
+      "passage": "For a complex number z, z squared = -1.",
+      "question": "There are no solutions because squares can't be negative, right?",
+      "familiarity": {
+        "Real numbers": "Comfortable"
+      },
+      "reference": "Squares of real numbers are nonnegative, but the domain here is complex. Both i and -i square to -1. The earlier rule was restricted to real numbers.",
+      "rubric": [
+        "Uses the stated complex domain",
+        "Gives both roots",
+        "Explains scope of nonnegative-squares claim",
+        "Does not shame the misconception"
+      ],
+      "before": {
+        "output": "You are right that there are no *real* solutions to $z^2 = -1$. If we restrict our numbers to the real line, the square of any real number is always positive or zero.\n\nHowever, in the world of complex numbers, this restriction disappears. The complex plane extends infinitely in both directions, allowing us to define a \"negative\" direction.\n\n**The Intuition:**\nImagine a clock face. The number $1$ is at the top. If you move $1$ unit clockwise, you land on $1$. If you move $1$ unit counter-clockwise, you land on $1$ again. But if you move $1$ unit in the *opposite* direction (the negative direction), you land on $-1$.\n\n**The Mathematical Reason:**\nIn the complex plane, we can represent numbers as $a + bi$, where $a$ and $b$ are real numbers. The number $-1$ is simply $-1 + 0i$.\nTo find $z$ such that $z^2 = -1$, we can look at the square of the imaginary unit $i$.\n$$i^2 = i \\cdot i = -1$$\nSo, $z",
+        "seconds": 9.578
+      },
+      "after": {
+        "output": "You are right that there are no real solutions. In the set of real numbers, squaring any number always yields a non-negative result.\n\nHowever, in the set of complex numbers, the square of $i$ is $-1$. This is why the equation $z^2 = -1$ has solutions: $z = i$ and $z = -i$.\n\nThe domain is complex numbers, and the hypothesis is $z^2 = -1$. The premise that \"squares can't be negative\" is false in this domain.",
+        "seconds": 4.75
+      },
+      "review": {
+        "before_scores": {
+          "mathematical_correctness": 0,
+          "source_faithfulness": 1,
+          "teaching_usefulness": 0,
+          "calibration": 1
+        },
+        "after_scores": {
+          "mathematical_correctness": 2,
+          "source_faithfulness": 2,
+          "teaching_usefulness": 2,
+          "calibration": 2
+        },
+        "note": "Before gives an incoherent clock explanation and stops before both roots. After correctly distinguishes domains and gives i and -i."
+      }
+    },
+    {
+      "id": "ev07",
+      "family": "integer-divisibility",
+      "passage": "If a prime p divides ab, then p divides a or p divides b.",
+      "question": "Could we replace prime by any positive integer?",
+      "familiarity": {
+        "Divisibility": "A little familiar"
+      },
+      "reference": "No: 6 divides 2*3 but divides neither 2 nor 3. Primality prevents a divisor from being assembled from separate proper factors in this way.",
+      "rubric": [
+        "Provides a valid composite counterexample",
+        "Explains why hypothesis matters",
+        "Does not claim every composite counterexample has distinct prime factors",
+        "Answers the actual question"
+      ],
+      "before": {
+        "output": "**Intuition:**\nImagine you have a large number $N$ that is the product of two smaller numbers, $a$ and $b$ (so $N = a \\times b$). If you take a specific prime number $p$ and divide $N$ by $p$, what happens? If $p$ divides $N$, it means $p$ is a factor of that product. Since $p$ is prime, it cannot be broken down further. Therefore, for $p$ to divide the product $a \\times b$, it must be that $p$ is a factor of $a$ or $p$ is a factor of $b$. It's like saying: if a prime number divides a product, it must divide at least one of the factors.\n\n**Mathematical Reason:**\nThis is a fundamental property of prime numbers known as the **Fundamental Theorem of Arithmetic** (specifically regarding unique factorization).\n\n1.  **Definition of Prime:** A prime number $p$ has exactly two positive divisors: $1$ and $p$.\n2.  **Divisibility:** If $p$ divides $ab$, then $ab = kp$ for some integer $k$.\n3",
+        "seconds": 9.891
+      },
+      "after": {
+        "output": "You are asking whether the statement \"If a prime p divides ab, then p divides a or p divides b\" holds true for any positive integer $n$ instead of just primes.\n\n**Intuition:**\nYes, the statement remains true for any positive integer $n$. The core idea is that if $n$ divides a product $ab$, it must share a common factor with at least one of the factors $a$ or $b$.\n\n**Mathematical Reason:**\nThis is a direct consequence of the **Fundamental Theorem of Arithmetic**, which states that every integer greater than 1 has a unique prime factorization.\n\n1.  If $n$ divides $ab$, then $n$ must be composed of prime factors that also divide $ab$.\n2.  If $n$ divides $ab$, then $n$ must share a common factor with $a$ or with $b$.\n3.  Since $n$ is composed of prime factors, at least one of those prime factors must divide either $a$ or $b$.\n4.  Therefore, $n$ must divide $a$ or $n$ must divide $b$.\n\nThe property holds for all positive integers because the logic relies on the",
+        "seconds": 9.672
+      },
+      "review": {
+        "before_scores": {
+          "mathematical_correctness": 2,
+          "source_faithfulness": 2,
+          "teaching_usefulness": 0,
+          "calibration": 1
+        },
+        "after_scores": {
+          "mathematical_correctness": 0,
+          "source_faithfulness": 0,
+          "teaching_usefulness": 0,
+          "calibration": 0
+        },
+        "note": "Before explains the prime case without answering the generalization. After explicitly and falsely generalizes to all positive integers: 6 divides 2*3 but neither 2 nor 3."
+      }
+    },
+    {
+      "id": "ev08",
+      "family": "ambiguous-operator",
+      "passage": "Consequently A is positive.",
+      "question": "Why is A positive?",
+      "familiarity": {
+        "Linear algebra": "Comfortable"
+      },
+      "reference": "The passage does not define A or the intended meaning of positive. Ask for its definition and whether it means entrywise positive, positive definite, or positive semidefinite. Do not manufacture a proof.",
+      "rubric": [
+        "Acknowledges insufficient context",
+        "Asks one focused clarification",
+        "Does not invent a definition for A",
+        "Recognizes mathematical ambiguity"
+      ],
+      "before": {
+        "output": "You are asking why the variable $A$ is positive, based on the statement \"Consequently A is positive.\"\n\n**Intuition:**\nIn mathematical reasoning, the word \"Consequently\" acts like a bridge. It means that the previous steps in your argument have already proven something, and now that something is true, it logically forces $A$ to be positive. You are looking for the *reason* that bridge was built.\n\n**Mathematical Reason:**\nTo answer this, we need to look at the **hypotheses** (the assumptions made before this step) and the **domain** (the rules of the game).\n\n1.  **Check the Domain:** Is $A$ a real number? Yes, in standard algebra, $A$ is a real number.\n2.  **Check the Hypotheses:** What did you assume before reaching this conclusion?\n    *   Did you assume $A$ is a real number?\n    *   Did you assume $A$ is not zero?\n    *   Did you assume $A$ is positive in a previous step?\n\n**Correction:**\nIf your previous steps only established that $A$ is a real number, the conclusion \"A is positive\" is",
+        "seconds": 9.39
+      },
+      "after": {
+        "output": "A is positive because the linear transformation $T$ maps the vector $A$ to a vector with a positive first component. This follows from the fact that $T$ is a linear operator and the first component of $T(A)$ is the sum of the products of the first components of $A$ and the first components of the basis vectors. Since the first components of the basis vectors are positive, the sum is positive.",
+        "seconds": 3.422
+      },
+      "review": {
+        "before_scores": {
+          "mathematical_correctness": 1,
+          "source_faithfulness": 0,
+          "teaching_usefulness": 0,
+          "calibration": 0
+        },
+        "after_scores": {
+          "mathematical_correctness": 0,
+          "source_faithfulness": 0,
+          "teaching_usefulness": 0,
+          "calibration": 0
+        },
+        "note": "Before assumes A is a real number without evidence. After invents a transformation T, vector A and positive basis entries, then gives an invalid positivity argument instead of seeking missing context."
+      }
+    }
+  ]
+}
