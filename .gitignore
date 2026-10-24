@@ -1,0 +1,46 @@
+# Node / Electron dependencies and generated output
+node_modules/
+dist/
+out/
+build/
+release/
+.vite/
+.cache/
+*.tsbuildinfo
+
+# Tests, logs, and temporary output
+coverage/
+test-results/
+playwright-report/
+*.log
+tmp/
+.tmp/
+
+# Secrets: keep only the intentionally public example template
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+*.pem
+*.key
+
+# Local app state and browser/runtime profiles
+.companion/
+user-data/
+runtime-profiles/
+preview-profile/
+.runtime/
+
+# Private reading and conversation artifacts
+recordings/
+captures/
+screenshots/
+transcripts/
+user-notes/
+papers/private/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
