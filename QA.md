@@ -4,10 +4,10 @@ This records what was actually checked for 0.1.0. It is not a claim that every p
 
 ## Passed
 
-- `pnpm test`: 25 tests covering restricted expression parsing, mathematical precedence/functions, domain errors, discontinuities, source pinning, document changes, cancellation, explicit familiarity, provider validation, and mocked API responses.
+- `pnpm test` on Node 24: 29 tests covering restricted expression parsing, mathematical precedence/functions, domain errors, discontinuities, source pinning, document changes, cancellation, explicit familiarity, provider validation, mocked API responses, and PDF task ownership. Four PDF lifecycle tests skip when Node lacks registerHooks (before 22.15).
 - `pnpm check`: renderer, Electron main, and preload syntax.
 - Browser UI: sample explanation, changed explanation after selecting “Comfortable” for Cauchy sequences, settings persistence after reload, source-linked note creation and persistence, enlargement, and a 1/x plot with separate branches around zero.
-- PDF UI: imported a synthetic three-page PDF, navigated pages, clicked a text run and enlarged its context, and selected a passage on a rotated page. Importing a new document cleared the prior conversation and pinned sample passage.
+- PDF UI: imported a synthetic three-page PDF, navigated pages, clicked a text run and enlarged its context, and selected a passage on a rotated page. Importing a new document cleared the prior conversation and pinned sample passage. Returning to the sample and reopening worked; rejecting a 21-page PDF preserved the previous valid document.
 - Native Electron launch: reader and separate collapsed corner appeared; Ctrl+Alt+Space expanded the corner and showed the accurate disconnected-voice state. The expanded window kept the composer and microphone visible.
 - Local preview access checks: source/PDF assets served; hidden files, credentials, Git data, Electron source, traversal, non-GET/HEAD requests, and foreign Host headers denied.
 - Windows packaging: created `release/Companion/Companion.exe` with supporting files; source copy matched the tested renderer. Private .env and tests excluded. An existing output directory is refused instead of overwritten.
