@@ -2,6 +2,8 @@
 
 ## Shared local reading room (0.4.0)
 
+- Simplified launch: the repository's `Start Companion.cmd` and the configured output folder's `Open Companion.cmd` open the same room. A cold start and repeated launch passed against a separate disposable room on port 4186; only that test server was stopped. The launcher finds the installed Node runtime and gives a direct install instruction when none is available.
+- The first-run screen now has three steps, plain account instructions, and reopening guidance. Verified on the current 731 × 1244 browser pane: no horizontal overflow and the setup button is visible. No account fields were filled or submitted during this check.
 - All 69 Node tests pass on Node 24.19.0, with no skips. The 18 new shared-room tests cover trusted membership, revision-specific reviews and resolutions, authorization, atomic conflicts, duplicate-request receipts, invite races, validation, session isolation, restart persistence, and loopback/static-file restrictions.
 - Live browser testing used two synthetic accounts in a disposable database on port 4175. A passage question and another member's explanation appeared across independent browser sessions. The author's private draft survived incoming changes.
 - Editing a contribution while a review was open disabled submission and preserved the review draft. A fresh review of r2 saved successfully. “Helped me,” a linked resolution, and another member's reasoned reopening remained separate records; the history retained the earlier resolution and its exact supporting revision.

@@ -1,0 +1,26 @@
+COMPANION — START HERE
+
+1. Double-click Start Companion.cmd in the Companion folder.
+   If you are in the parent outputs folder, Open Companion.cmd opens the same app.
+
+2. The first time, choose your reading-group name, your name, and a password.
+   Use at least 12 characters for the password.
+
+3. Select a passage in the sample paper and click Ask a question.
+   Add an explanation, review a contribution, or mark what helped you understand.
+
+NEXT TIME
+Double-click the same launcher. Sign in if asked.
+Closing the browser keeps your saved questions and discussions.
+
+This PC is already configured. No installation or terminal commands are needed.
+On a fresh checkout, install Node.js 24.15 or newer once, then use the same launcher.
+The shared reading room needs no AI key or additional server packages.
+
+CURRENT PILOT
+The app runs only on this PC and includes one original sample paper.
+Invite links can be tested in another browser on this PC. Colleagues on other
+computers will need a hosted version.
+
+Your personal math reader and the discussion design demo remain separate options.
+See README.md for advanced setup and development details.

@@ -1,16 +1,21 @@
 # Companion
 
-A small math companion for reading a paper, asking a question, and following the idea at your own pace.
+Read a paper, ask a question, and build an explanation together.
 
-**Version 0.4.0 — a local shared reading-room pilot alongside the personal math companion.** The shared room has member accounts, one-use invitations, server-saved discussions, and updates between signed-in sessions. The personal desktop reader still provides local AI, math tools, notes, and English speech transcription. The earlier Group discussion design demo remains available with simulated participants.
+## Start here
 
-| Interface | Open it with | Where its discussion data lives |
-| --- | --- | --- |
-| Shared reading room | `scripts/start-shared.ps1` or `npm run shared` | SQLite on this PC |
-| Group discussion design demo | `/group.html` through `npm run preview` | This browser/app profile |
-| Personal reader and corner | `scripts/start-local.ps1` | Personal app profile; selected AI provider answers questions |
+1. **Double-click `Start Companion.cmd`** in the Companion folder. It opens the reading room in your browser.
+2. **The first time, choose your group name, your name, and a password.** Use at least 12 characters for the password.
+3. **Select a passage and click “Ask a question.”** You can then add explanations, review contributions, and record what helped.
 
-## Start the shared reading room
+Next time, double-click the same file and sign in if asked. Closing the browser keeps your saved questions and discussions.
+
+**This PC is already configured.** You do not need to install anything or type terminal commands. On a fresh checkout, install **Node.js 24.15 or newer** once, then use the same launcher. The shared reading room needs no AI key or additional server packages.
+
+Version 0.4 currently runs on this PC with one sample paper. Colleagues on other computers will need a hosted version. The personal math reader and the earlier simulated discussion demo remain available for development below.
+
+<details>
+<summary>Advanced: shared-room launch options, storage, and limits</summary>
 
 Use **Node.js 24.15 or newer**; Node 24 LTS is the tested runtime. The shared server uses Node's built-in SQLite and crypto modules, with no extra server packages or AI key required. From the repository directory on Windows:
 
@@ -18,7 +23,7 @@ Use **Node.js 24.15 or newer**; Node 24 LTS is the tested runtime. The shared se
 .\scripts\start-shared.ps1
 ```
 
-The launcher starts the server in the background and opens **http://127.0.0.1:4174/room.html**. It reuses an already running Companion room on that port. Closing the browser leaves the server running. Pass `-NodePath '<path-to-node.exe>'` if Node is not on PATH, `-DataDirectory '<absolute-folder>'` for another data location, or `-NoOpen` to start without opening a browser.
+The launcher finds Node on PATH or in the configured Codex runtime, starts the server in the background, and opens **http://127.0.0.1:4174/room.html**. It reuses an already running Companion room on that port. Closing the browser leaves the server running. Pass `-NodePath '<path-to-node.exe>'` for a specific runtime, `-DataDirectory '<absolute-folder>'` for another data location, or `-NoOpen` to start without opening a browser.
 
 For a foreground development server, use this alternative and press **Ctrl+C** in its terminal to stop it:
 
@@ -32,13 +37,18 @@ On first opening, create a reading-group name and your administrator account. Ch
 
 **This server listens only on this PC. Invite links work in another browser on this computer; they cannot reach a colleague's computer until a hosted service is configured.** It currently supports one group, up to 50 members, and one original fixed-point sample paper. It has no university sign-in, account recovery, paper uploads, or AI answers in the shared room. The intended audience is the University of Washington theory group; no institutional service or endorsement is implied.
 
-Signed-in members can attach questions to passages, contribute explanations and counterexamples, edit their own contributions, review another member's exact revision, and request corrections. Question authors can record what helped them; authors or the administrator can resolve a question with a summary and linked contribution. Any member can reopen it with a reason. Earlier text, reviews, and resolutions remain in history.
-
-The server derives authorship from the signed-in session. An edit starts a new contribution revision and fresh review status. If another session changes the discussion before you submit, the latest room is loaded and your draft stays available for review and an explicit retry. An uncertain send offers **Retry sending**, which reuses its operation ID to prevent a duplicate contribution.
+The server derives authorship from the signed-in session. If another session changes the discussion before you submit, the latest room is loaded and your draft stays available for an explicit retry. An uncertain send offers **Retry sending**, which prevents a duplicate contribution. [DISCUSSION_FLOW.md](DISCUSSION_FLOW.md) explains contributions, review, and resolution history.
 
 Accounts, invitations, sessions, and discussion history are stored in `room.sqlite` in the data directory. Passwords are salted and hashed; sessions use HttpOnly cookies and expire after eight hours. Keep this directory private and out of Git. For a file-copy backup, stop the server before copying its data folder; copying only the database while SQLite is writing can miss recent changes. Automated backups and recovery are not implemented.
 
-## Open the configured local app
+</details>
+
+## Personal reader (optional)
+
+<details>
+<summary>Open, configure, or rebuild the personal reader and local AI</summary>
+
+### Open the configured local app
 
 If the portable runtime, model, speech environment, and packaged app have already been installed, run this from the repository:
 
@@ -52,7 +62,7 @@ The launcher selects `companion-math` at `127.0.0.1:11434`, sets `OLLAMA_NO_CLOU
 
 The speech environment defaults to the workspace `work` folder, three levels above the launcher directory. Use `-SpeechRuntimeRoot '<speech-work-folder>'` for another location, or `-SkipSpeech` for typed questions only. `-AppPath '<path-to-Companion.exe>'` selects another packaged build. Services remain running after the app closes.
 
-## Reading and asking
+### Reading and asking
 
 The reader and corner open together. Use **Open a PDF** for a paper, then hover over or select its text and ask a question. Starting a question pins its passage; moving to the microphone does not change the target. The × on the context chip releases the pin. The pointer supplies context only inside Companion's reader.
 
@@ -68,7 +78,7 @@ Try `plot x^2`, `define completeness`, `show this larger`, or `save note: My obs
 
 Recording automatically submits at 60 seconds. Spoken “stop” is processed after submission; use the visible **Stop** control or shortcut for immediate cancellation. Global shortcuts depend on system availability. Cancelling discards late results; an already running CPU operation may finish before the speech helper notices the disconnected request.
 
-## First setup: app and local math model
+### First setup: app and local math model
 
 Use Windows, Node.js **24.15 or newer**, pnpm, and several GB of free space for the portable runtime and model. The steps below use a new runtime directory outside the repository. Downloads require internet access; local questions do not after setup. The tested machine has an RTX 4070 with 12 GB VRAM and 32 GB system RAM. Performance on other hardware has not been measured.
 
@@ -122,7 +132,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Companion model creation failed.' }
 
 [`local/Modelfile`](local/Modelfile) configures the math teaching instructions and generation limits. `companion-math` uses the downloaded Qwen weights with those instructions; creating the alias does not train new weights. Model tags can change upstream, so retain the installed model files and record `ollama list`/`ollama show companion-math` when comparing runs. Ollama documents [local-only mode and server settings](https://docs.ollama.com/faq#how-do-i-disable-ollamas-cloud-features).
 
-## First setup: local English voice
+### First setup: local English voice
 
 Voice input uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) with the official [Systran base.en model](https://huggingface.co/Systran/faster-whisper-base.en), on **CPU with int8 computation**. It does not compete for the GPU's model memory. Use Python 3.12 and [uv](https://docs.astral.sh/uv/); install packages into a dedicated environment. The example keeps the environment, downloads, and caches outside the repository:
 
@@ -163,11 +173,13 @@ After setup, launch everything together:
 .\scripts\start-local.ps1 -RuntimeRoot $runtimeRoot -SpeechRuntimeRoot $speechWork
 ```
 
-## Direct launch or optional OpenAI
+### Direct launch or optional OpenAI
 
 The local launcher sets the app's configuration without a `.env` file. For direct development launch with `pnpm start`, or double-clicking `Companion.exe`, copy `.env.example` to a private `.env` in the repository or beside the executable. Keep `COMPANION_PROVIDER=local` and `COMPANION_LOCAL_MODEL=companion-math`; start the local services first, then restart the app. A `.env` selects the provider but does not start services.
 
 OpenAI remains an explicit alternative. Set `COMPANION_PROVIDER=openai`, add your own `OPENAI_API_KEY`, and restart. Reasoning defaults to `gpt-6.1-sol` through `COMPANION_MODEL`; submitted audio uses `gpt-transcribe`. This mode sends submitted content to OpenAI and requires internet access, API credit, and model access. The app never switches from local mode to cloud mode automatically. Real OpenAI calls have not been validated with user credentials.
+
+</details>
 
 ## Group discussion design demo
 
@@ -179,7 +191,13 @@ The prototype keeps an original fixed-point passage beside questions, attributed
 
 For development, dictate requests into this Codex chat and describe independent tasks together. Codex can explore the interface and discussion design in parallel. Companion's own microphone currently routes mathematical questions to its selected provider; the app has no command bridge to this Codex conversation.
 
-## Scope and development
+## Development and interfaces
+
+| Interface | Open it with | Where its discussion data lives |
+| --- | --- | --- |
+| Shared reading room | `Start Companion.cmd` | SQLite on this PC |
+| Group discussion design demo | `/group.html` through `npm run preview` | This browser/app profile |
+| Personal reader and corner | `scripts/start-local.ps1` | Personal app profile; selected AI provider answers questions |
 
 - Local PDFs up to **10 MB and 20 pages**, selectable text, and page navigation. Extracted notation can be imperfect; scanned pages have no OCR.
 - Explicit familiarity settings for Cauchy sequences, completeness, geometric series, and metric spaces. AI questions receive the settings; sample walkthroughs use the relevant prepared variations.
