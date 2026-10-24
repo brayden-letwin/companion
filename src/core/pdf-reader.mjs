@@ -19,6 +19,7 @@ export function createPdfReader({ canvas, textLayer, onContext = () => {}, onSta
   }
 
   let documentProxy = null;
+  let documentTask = null;
   let operation = 0;
   let loadingTask = null;
   let renderTask = null;
@@ -28,6 +29,15 @@ export function createPdfReader({ canvas, textLayer, onContext = () => {}, onSta
   let highlighted = null;
   let contexts = new WeakMap();
   let state = { page: 0, pages: 0, name: '', loading: false, message: '' };
+  const disposedTasks = new WeakSet();
+
+  function disposeTask(task) {
+    if (!task || disposedTasks.has(task)) return;
+    disposedTasks.add(task);
+    // PDF.js 6 exposes destruction on the loading task, not PDFDocumentProxy.
+    // Keep the task for the entire lifetime of the successfully loaded paper.
+    void Promise.resolve().then(() => task.destroy()).catch(() => {});
+  }
 
   function report(update) {
     state = { ...state, ...update };
@@ -49,7 +59,7 @@ export function createPdfReader({ canvas, textLayer, onContext = () => {}, onSta
     if (loadingTask) {
       const task = loadingTask;
       loadingTask = null;
-      void task.destroy().catch(() => {});
+      disposeTask(task);
     }
   }
 
@@ -223,10 +233,11 @@ export function createPdfReader({ canvas, textLayer, onContext = () => {}, onSta
       }
       const prepared = await preparePage(candidate, 1, id);
       if (!prepared || !current(id)) return false;
-      const previous = documentProxy;
+      const previousTask = documentTask;
+      documentTask = task;
       loadingTask = null;
       commitPage(prepared, candidate, file.name, 1);
-      if (previous && previous !== candidate) void previous.destroy().catch(() => {});
+      disposeTask(previousTask);
       return true;
     } catch (error) {
       if (current(id)) {
@@ -235,7 +246,7 @@ export function createPdfReader({ canvas, textLayer, onContext = () => {}, onSta
       return false;
     } finally {
       clearTimeout(timeout);
-      if (task && candidate !== documentProxy) void task.destroy().catch(() => {});
+      if (task && task !== documentTask) disposeTask(task);
       if (loadingTask === task) loadingTask = null;
     }
   }
@@ -262,7 +273,8 @@ export function createPdfReader({ canvas, textLayer, onContext = () => {}, onSta
     destroyed = true;
     operation += 1;
     cancelPending();
-    if (documentProxy) void documentProxy.destroy().catch(() => {});
+    disposeTask(documentTask);
+    documentTask = null;
     documentProxy = null;
     textLayer.removeEventListener('pointerover', pointerOver);
     textLayer.removeEventListener('pointerout', pointerOut);
