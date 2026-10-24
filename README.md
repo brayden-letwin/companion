@@ -157,7 +157,7 @@ The browser preview offers the prepared sample, local tools, and PDF reading. Li
 
 ## Training experiment
 
-[`training/README.md`](training/README.md) describes a separate LoRA pilot using Qwen3.5-2B, original synthetic examples, and held-out before/after prompts. It does not automatically replace the app's Qwen3.5-4B model. The pilot is experimental; no improvement in mathematical accuracy is established. Review generated answers against [`training/rubric.md`](training/rubric.md) before any promotion. Training output and model weights stay out of Git.
+[`training/README.md`](training/README.md) describes a separate LoRA pilot using Qwen3.5-2B, original synthetic examples, and held-out before/after prompts. The first run completed 12 training steps and saved real adapter weights, but **failed mathematical quality review and was not activated**. The app keeps its separate Qwen3.5-4B model. See [`training/RESULTS.md`](training/RESULTS.md) for measured results and errors. Training output and model weights stay out of Git.
 
 ## Data, privacy, and verification limits
 
