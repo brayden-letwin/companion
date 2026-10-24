@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, globalShortcut, session, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, session, screen, shell } = require('electron');
 const path = require('node:path');
 const { fileURLToPath } = require('node:url');
 const { createProvider, validateContext } = require('./provider.cjs');
@@ -9,6 +9,7 @@ const { createLocalProvider } = require('./local-provider.cjs');
 const root = path.resolve(__dirname, '..');
 const indexPath = path.join(root, 'index.html');
 const groupPath = path.join(root, 'group.html');
+const sharedRoomURL = 'http://127.0.0.1:4174/room.html';
 const envDirectory = app.isPackaged ? path.dirname(app.getPath('exe')) : root;
 try { process.loadEnvFile?.(path.join(envDirectory, '.env')); }
 catch (error) { if (error.code !== 'ENOENT') console.warn('Companion could not read .env. Environment variables will still be used.'); }
@@ -57,7 +58,9 @@ function secureWindow(window) {
   trusted.add(contents.id);
   contents.setWindowOpenHandler(() => ({ action: 'deny' }));
   contents.on('will-navigate', (event) => event.preventDefault());
-  contents.on('will-frame-navigate', (event) => event.preventDefault());
+  // Electron emits this before will-navigate. Keep subframes blocked here;
+  // main-frame links must reach the deny-all handler and fixed-target routing.
+  contents.on('will-frame-navigate', (event) => { if (!event.isMainFrame) event.preventDefault(); });
   contents.on('will-attach-webview', (event) => event.preventDefault());
   const ownerId = String(contents.id);
   contents.on('destroyed', () => {
@@ -101,6 +104,7 @@ function openGroup() {
     secureWindow(groupWindow);
     groupWindow.webContents.on('will-navigate', (event, url) => {
       if (isAppURL(url)) { event.preventDefault(); openReader(); }
+      if (url === sharedRoomURL) { event.preventDefault(); shell.openExternal(sharedRoomURL).catch(() => console.warn('Could not open the local shared room.')); }
     });
     groupWindow.once('ready-to-show', () => groupWindow.show());
     groupWindow.on('closed', () => { groupWindow = null; });
@@ -203,6 +207,7 @@ else {
     });
     on('companion:open-reader', openReader);
     on('companion:open-group', openGroup);
+    handle('companion:open-shared-room', async () => { await shell.openExternal(sharedRoomURL); return { opened: true }; });
     on('companion:minimize', (event) => BrowserWindow.fromWebContents(event.sender)?.minimize());
 
     createReader();
