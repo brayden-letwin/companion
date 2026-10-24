@@ -53,3 +53,8 @@ training/runs/
 training/.cache/
 *.safetensors
 *.gguf
+
+# Shared room accounts, sessions, invites, discussions and SQLite sidecars
+*.sqlite
+*.sqlite-*
+.companion-shared/

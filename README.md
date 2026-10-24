@@ -2,7 +2,41 @@
 
 A small math companion for reading a paper, asking a question, and following the idea at your own pace.
 
-**Version 0.3.0 — Windows prototype with local AI and a group discussion design demo.** The app includes an always-on-top corner control, a PDF reader, local math tools, typed questions answered by Qwen, and English voice transcription with Whisper. The new Group discussion view explores how a reading group can contribute explanations and review mathematical claims. Group content is a local simulation; there are no shared accounts or server synchronization. Local inference and computer-generated speech have been exercised; actual Companion microphone capture still needs a user test. Answers can contain mathematical errors.
+**Version 0.4.0 — a local shared reading-room pilot alongside the personal math companion.** The shared room has member accounts, one-use invitations, server-saved discussions, and updates between signed-in sessions. The personal desktop reader still provides local AI, math tools, notes, and English speech transcription. The earlier Group discussion design demo remains available with simulated participants.
+
+| Interface | Open it with | Where its discussion data lives |
+| --- | --- | --- |
+| Shared reading room | `scripts/start-shared.ps1` or `npm run shared` | SQLite on this PC |
+| Group discussion design demo | `/group.html` through `npm run preview` | This browser/app profile |
+| Personal reader and corner | `scripts/start-local.ps1` | Personal app profile; selected AI provider answers questions |
+
+## Start the shared reading room
+
+Use **Node.js 24.15 or newer**; Node 24 LTS is the tested runtime. The shared server uses Node's built-in SQLite and crypto modules, with no extra server packages or AI key required. From the repository directory on Windows:
+
+```powershell
+.\scripts\start-shared.ps1
+```
+
+The launcher starts the server in the background and opens **http://127.0.0.1:4174/room.html**. It reuses an already running Companion room on that port. Closing the browser leaves the server running. Pass `-NodePath '<path-to-node.exe>'` if Node is not on PATH, `-DataDirectory '<absolute-folder>'` for another data location, or `-NoOpen` to start without opening a browser.
+
+For a foreground development server, use this alternative and press **Ctrl+C** in its terminal to stop it:
+
+```powershell
+npm run shared
+```
+
+Both launch methods default to the configured workspace's `work/companion-shared` data directory. The server reads `COMPANION_SHARED_DATA_DIR` and optional `COMPANION_SHARED_PORT` for a custom location or port. Choose a data folder outside the source checkout. Use a different port **and** data directory for a separate QA room so test accounts and discussions stay separate.
+
+On first opening, create a reading-group name and your administrator account. Choose your own member name and a password of 12–128 characters. No human account or default password is supplied. The administrator can create a one-use invite link that expires after 24 hours; the invited person uses it to create their own member account. Copy and share links yourself; the app sends no email.
+
+**This server listens only on this PC. Invite links work in another browser on this computer; they cannot reach a colleague's computer until a hosted service is configured.** It currently supports one group, up to 50 members, and one original fixed-point sample paper. It has no university sign-in, account recovery, paper uploads, or AI answers in the shared room. The intended audience is the University of Washington theory group; no institutional service or endorsement is implied.
+
+Signed-in members can attach questions to passages, contribute explanations and counterexamples, edit their own contributions, review another member's exact revision, and request corrections. Question authors can record what helped them; authors or the administrator can resolve a question with a summary and linked contribution. Any member can reopen it with a reason. Earlier text, reviews, and resolutions remain in history.
+
+The server derives authorship from the signed-in session. An edit starts a new contribution revision and fresh review status. If another session changes the discussion before you submit, the latest room is loaded and your draft stays available for review and an explicit retry. An uncertain send offers **Retry sending**, which reuses its operation ID to prevent a duplicate contribution.
+
+Accounts, invitations, sessions, and discussion history are stored in `room.sqlite` in the data directory. Passwords are salted and hashed; sessions use HttpOnly cookies and expire after eight hours. Keep this directory private and out of Git. For a file-copy backup, stop the server before copying its data folder; copying only the database while SQLite is writing can miss recent changes. Automated backups and recovery are not implemented.
 
 ## Open the configured local app
 
@@ -12,7 +46,7 @@ If the portable runtime, model, speech environment, and packaged app have alread
 .\scripts\start-local.ps1 -RuntimeRoot '<portable-runtime-root>'
 ```
 
-Replace the placeholder with the folder containing `runtime/ollama.exe` and `models/`. The launcher starts the local services and opens `release/Companion-0.3.0/Companion.exe`. The configured development installation also provides **Start Companion.cmd** in its adjacent `companion-local` folder. Close any existing Companion instance first: focus the corner and press **Alt+F4**. An already running instance keeps its previous configuration.
+Replace the placeholder with the folder containing `runtime/ollama.exe` and `models/`. The launcher starts the local services and opens `release/Companion-0.4.0/Companion.exe`. The configured development installation also provides **Start Companion.cmd** in its adjacent `companion-local` folder. Close any existing Companion instance first: focus the corner and press **Alt+F4**. An already running instance keeps its previous configuration.
 
 The launcher selects `companion-math` at `127.0.0.1:11434`, sets `OLLAMA_NO_CLOUD=1`, and uses the speech helper at `127.0.0.1:8178`. No API key is needed. **Preferences → Refresh connection** checks model and microphone transcription availability separately. If voice is unavailable, typed questions still work. A model's first question can take longer while weights load.
 
@@ -36,14 +70,14 @@ Recording automatically submits at 60 seconds. Spoken “stop” is processed af
 
 ## First setup: app and local math model
 
-Use Windows, Node.js **22.12 or newer**, pnpm, and several GB of free space for the portable runtime and model. The steps below use a new runtime directory outside the repository. Downloads require internet access; local questions do not after setup. The tested machine has an RTX 4070 with 12 GB VRAM and 32 GB system RAM. Performance on other hardware has not been measured.
+Use Windows, Node.js **24.15 or newer**, pnpm, and several GB of free space for the portable runtime and model. The steps below use a new runtime directory outside the repository. Downloads require internet access; local questions do not after setup. The tested machine has an RTX 4070 with 12 GB VRAM and 32 GB system RAM. Performance on other hardware has not been measured.
 
 Build the app from the repository directory:
 
 ```powershell
 pnpm install
 node node_modules/electron/install.js
-node scripts/package.mjs Companion-0.3.0
+node scripts/package.mjs Companion-0.4.0
 ```
 
 The explicit Electron command installs its runtime. Packaging creates an unsigned development build, not an installer. Keep the whole output folder together. The packager excludes private `.env` files and refuses to replace an existing output directory; choose a new package name if needed, then pass its executable through `-AppPath`.
@@ -141,7 +175,7 @@ Choose **Group discussion** in the reader, or open `/group.html` in the local br
 
 The prototype keeps an original fixed-point passage beside questions, attributed contributions, review, and resolution history. Try contributing an explanation, reviewing a particular revision, resolving a question, then reopening it when a gap appears. The **Demo member** selector simulates participants on one device. It is not authentication or a permission boundary. Data stays in this browser/app profile, separately from personal notes and familiarity settings.
 
-[DISCUSSION_FLOW.md](DISCUSSION_FLOW.md) describes the proposed flow, including private voice drafts and future group sharing. The interactive demo has its own implemented controls; real memberships, synchronization, paper uploads, and voice drafting in group discussions remain later work. AI draft provenance and mathematical review should stay visible as the product develops.
+[DISCUSSION_FLOW.md](DISCUSSION_FLOW.md) describes the flow and which parts are implemented. The separate shared room now provides real local accounts and server-saved collaboration. This design demo keeps its simulated participants and browser-only data. Paper uploads and voice drafting in group discussions remain later work; its prepared AI-style example is a labeled illustration rather than a live answer.
 
 For development, dictate requests into this Codex chat and describe independent tasks together. Codex can explore the interface and discussion design in parallel. Companion's own microphone currently routes mathematical questions to its selected provider; the app has no command bridge to this Codex conversation.
 
@@ -159,11 +193,14 @@ The implementation uses Electron, plain JavaScript ES modules, HTML/CSS, and PDF
 
 ```powershell
 pnpm preview  # Browser preview at http://127.0.0.1:4173
-pnpm test     # Math, tutor, PDF lifecycle, provider, and training-data checks
+npm run shared # Shared room at http://127.0.0.1:4174/room.html
+pnpm test     # Math, tutor, PDF, provider, discussion, server and training-data checks
 pnpm check    # JavaScript syntax checks
 ```
 
-The browser preview offers the prepared sample, local tools, and PDF reading. Live AI, microphone transcription, and the native corner require Electron. Model weights, Ollama, the Python environment, and the speech helper are separate from the packaged app; retain the source checkout and runtime folders for the launch scripts.
+The browser preview offers the prepared sample, local tools, PDF reading, and the group design demo. The authenticated room runs through its separate server. Live personal AI, microphone transcription, and the native corner require Electron. Model weights, Ollama, the Python environment, speech helper, and shared server are separate from the packaged app; retain the source checkout and runtime folders for the launch scripts.
+
+The shared core and HTTP API have 18 automated tests covering member permissions, invitation races and expiry, revision conflicts, duplicate sends, restart persistence, and request boundaries. Test accounts use temporary or in-memory databases. See [QA.md](QA.md) for the final combined test run and browser checks, and [CONTRIBUTING.md](CONTRIBUTING.md) for development and contribution guidance.
 
 ## Training experiment
 
@@ -174,6 +211,8 @@ The browser preview offers the prepared sample, local tools, and PDF reading. Li
 Opening a PDF and moving the pointer do not upload it. An explicit AI question sends the pinned passage, paper name/page, question, recent conversation, and familiarity settings to the selected provider. In local mode, those requests go to the loopback model service; recordings go to the loopback speech helper. There is no automatic cloud fallback. Initial package and model downloads contact their public repositories.
 
 Audio stays in memory and the app/helper do not save recordings or transcripts to disk. Saved notes and preferences remain in the local app profile. Local read-aloud requires an offline device voice; optional cloud mode may use a system voice that requires a network connection. In OpenAI mode, submitted questions and audio are sent to OpenAI. Keep credentials, private papers, recordings, screenshots, and personal notes out of this public repository.
+
+Shared-room questions, source passages, contributions, reviews, and resolutions are saved on the local server and visible to its authenticated members. The room does not read personal notes or familiarity settings, record audio, or call an AI service. Draft text stays in the page until submitted and is not a durable backup. Hosting, HTTPS, operational backups, and a membership policy must be chosen before colleagues can use a remote service.
 
 The local model has answered test questions, but observed answers include proof gaps and an incorrect example detail. These checks establish working inference, not mathematical reliability. Speech was checked using computer-generated WAV and WebM/Opus recordings, including invalid-input and size-limit tests; actual microphone hardware, accents, and noisy-room performance still need testing. [QA.md](QA.md) records the checks and their limits.
 

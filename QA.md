@@ -1,5 +1,16 @@
 # Prototype verification — 24 October 2026
 
+## Shared local reading room (0.4.0)
+
+- All 69 Node tests pass on Node 24.19.0, with no skips. The 18 new shared-room tests cover trusted membership, revision-specific reviews and resolutions, authorization, atomic conflicts, duplicate-request receipts, invite races, validation, session isolation, restart persistence, and loopback/static-file restrictions.
+- Live browser testing used two synthetic accounts in a disposable database on port 4175. A passage question and another member's explanation appeared across independent browser sessions. The author's private draft survived incoming changes.
+- Editing a contribution while a review was open disabled submission and preserved the review draft. A fresh review of r2 saved successfully. “Helped me,” a linked resolution, and another member's reasoned reopening remained separate records; the history retained the earlier resolution and its exact supporting revision.
+- Same-document invitation navigation now switches an anonymous tab to Join and clears the earlier password input. Signing out in a second tab clears the first tab's private draft and visible discussion.
+- Syntax checks and PowerShell parsing pass. The Windows 0.4.0 folder was packaged locally; it opens the shared room in a browser through a fixed loopback URL. The server and Node runtime remain separate from that folder. This build was not subjected to a new full native-window interaction test.
+- The real pilot server on port 4174 was started with an untouched first-run database. No human account, password, or university identity was created during verification.
+
+This is a local pilot with one original sample paper. Remote hosting, university sign-in, account recovery, real-paper group uploads, shared AI responses, group microphone capture, broader responsive/accessibility testing, and production operations remain future work. The 0.3 design demo remains a separate simulation.
+
 ## Group discussion design update (0.3.0)
 
 - 51 Node tests pass, including six new discussion state tests: passage anchors, review/understanding separation, author constraints in the simulation, revision invalidation, retained resolution/reopen history, event limits, and malformed local data rejection. Renderer/main/preload/preview syntax passes.
@@ -9,7 +20,7 @@
 - At a 1280 × 720 browser viewport, the final layout has no page overflow; the contribution composer ends at y=697 and the question list shows both seeded questions. The paper and discussion scroll independently.
 - Independent code review checked safe text rendering, one separate group storage key, no network requests, no reads of personal familiarity/notes, and explicit simulated-participant / prepared AI-style labels. The native group window has no preload bridge or microphone/model privileges.
 
-This is an interactive design demo on one device. Real accounts, group synchronization, collaboration permissions, real-paper source anchoring, and group voice drafting are not implemented. Broader responsive and accessibility checks remain. The personal Companion microphone and this Codex chat's dictation are separate input routes; no command bridge or global Codex voice shortcut was added.
+This records the separate interactive design demo on one device. It does not use the real accounts or synchronized server state added in 0.4. Real-paper source anchoring and group voice drafting are not implemented. Broader responsive and accessibility checks remain. The personal Companion microphone and this Codex chat's dictation are separate input routes; no command bridge or global Codex voice shortcut was added.
 
 ## Local AI update (0.2.0)
 

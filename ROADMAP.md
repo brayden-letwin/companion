@@ -28,10 +28,24 @@ Checked items mean the feature has an implementation. They do not establish that
 - [x] Local browser preview and automated math, tutor-state, and mocked-provider tests.
 - [x] Windows unpacked packaging that excludes private `.env` files and refuses to overwrite an existing build.
 - [x] A local Group discussion design demo with passage-linked questions, simulated contributors, contribution revisions, mathematical review, and resolution/reopening.
+- [x] A separate local shared room with administrator setup, member accounts, expiring one-use invitations, and session-derived authorship.
+- [x] SQLite persistence for accounts, sessions, invitations, discussions, and operation receipts, with atomic updates and restart checks.
+- [x] Updates between sessions, room-revision conflicts that preserve drafts, and duplicate-send protection.
+- [x] Real author/reviewer constraints, revision-specific reviews, source snapshots, linked resolutions, and reasoned reopening.
 
 ## Group reading pilot
 
-[DISCUSSION_FLOW.md](DISCUSSION_FLOW.md) describes the proposed reading-group workflow. The interactive demo is a single-device simulation. The next collaborative implementation needs authenticated membership, shared storage and synchronization, source-version anchoring, and attributed review history. Personal familiarity and notes remain private unless a member explicitly shares specific content. No university service or endorsement is implied.
+[DISCUSSION_FLOW.md](DISCUSSION_FLOW.md) describes the workflow and its remaining design proposals. The `/group.html` demo remains a single-device simulation. The new shared room at `127.0.0.1:4174/room.html` has real local member accounts, server storage, updates between sessions, source snapshots, and attributed history. It supports up to 50 members around one original sample paper, using Node 24.15 or newer.
+
+The server binds only to loopback, so its invitation links work in browsers on the same PC. A hosted service is still needed for colleagues on other computers. Personal familiarity and notes remain separate. No university service or endorsement is implied.
+
+- [ ] Choose the first actual paper and confirm permission to share its source text.
+- [ ] Add paper import, source-version management, and anchor correction when a source changes.
+- [ ] Choose hosting, a domain, HTTPS, backups, and the group's membership policy.
+- [ ] Add account recovery and decide whether to integrate university sign-in.
+- [ ] Check browser behavior with multiple human members, wider accessibility needs, and longer sessions.
+- [ ] Add private voice drafting and explicit sharing to the group workflow.
+- [ ] Evaluate whether shared AI drafts are useful before adding a model connection.
 
 ## Verification before relying on live use
 
