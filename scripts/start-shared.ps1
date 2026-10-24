@@ -9,16 +9,7 @@ $ErrorActionPreference = 'Stop'
 $DataDirectory = [IO.Path]::GetFullPath($DataDirectory)
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $serverPath = Join-Path $sourceRoot 'server\room-server.mjs'
-if (-not $NodePath) {
-    $nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
-    if (-not $nodeCommand) { throw 'Node.js 24.15 or newer is required. Install Node 24 LTS or pass -NodePath with its executable.' }
-    $NodePath = $nodeCommand.Source
-}
-$NodePath = [IO.Path]::GetFullPath($NodePath)
-if (-not (Test-Path -LiteralPath $NodePath -PathType Leaf)) { throw "Node executable not found: $NodePath" }
 if (-not (Test-Path -LiteralPath $serverPath -PathType Leaf)) { throw "Shared-room source not found: $serverPath" }
-$nodeVersion = (& $NodePath -p 'process.versions.node').Trim()
-if ($LASTEXITCODE -ne 0 -or [version]$nodeVersion -lt [version]'24.15.0') { throw 'The shared room requires Node.js 24.15 or newer; Node 24 LTS is the tested runtime.' }
 $origin = "http://127.0.0.1:$Port"
 $ready = $false
 try {
@@ -30,6 +21,27 @@ try {
 }
 
 if (-not $ready) {
+    if (-not $NodePath) {
+        $nodeCandidates = @()
+        $nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+        if ($nodeCommand) { $nodeCandidates += $nodeCommand.Source }
+        # This development installation already includes Node with Codex. A
+        # downloaded checkout can instead use an ordinary Node 24 installation.
+        $nodeCandidates += Join-Path ([Environment]::GetFolderPath('UserProfile')) '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
+        foreach ($candidate in ($nodeCandidates | Select-Object -Unique)) {
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+            try {
+                $candidateVersion = (& $candidate -p 'process.versions.node').Trim()
+                if ($LASTEXITCODE -eq 0 -and [version]$candidateVersion -ge [version]'24.15.0') { $NodePath = $candidate; break }
+            } catch { }
+        }
+        if (-not $NodePath) { throw 'Install Node.js 24 LTS from https://nodejs.org, then double-click Start Companion.cmd again. No API key is needed.' }
+    }
+    $NodePath = [IO.Path]::GetFullPath($NodePath)
+    if (-not (Test-Path -LiteralPath $NodePath -PathType Leaf)) { throw "Node executable not found: $NodePath" }
+    $nodeVersion = (& $NodePath -p 'process.versions.node').Trim()
+    if ($LASTEXITCODE -ne 0 -or [version]$nodeVersion -lt [version]'24.15.0') { throw 'Install Node.js 24 LTS from https://nodejs.org, then double-click Start Companion.cmd again.' }
+    Write-Output 'Starting your reading room...'
     New-Item -ItemType Directory -Force -Path $DataDirectory | Out-Null
     $variables = @{ COMPANION_SHARED_DATA_DIR = $DataDirectory; COMPANION_SHARED_PORT = "$Port" }
     $previous = @{}
@@ -57,6 +69,8 @@ if (-not $ready) {
     }
 }
 if (-not $ready) { throw 'The shared room did not become ready.' }
-Write-Output "Companion shared room: $origin/room.html"
-Write-Output 'This local pilot is available on this PC. Closing the browser keeps the server running.'
+Write-Output "Companion is ready: $origin/room.html"
+Write-Output 'First visit: choose a group name, your name, and a password.'
+Write-Output 'Next visit: double-click Start Companion.cmd and sign in.'
+Write-Output 'Your discussions stay saved when you close the browser. This room runs on this PC.'
 if (-not $NoOpen) { Start-Process "$origin/room.html" | Out-Null }
