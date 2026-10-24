@@ -76,12 +76,14 @@ function showAuth() {
 }
 function renderAuth() {
   const setup = authMode === 'setup', join = authMode === 'join';
-  $('auth-heading').textContent = setup ? 'Start your reading room.' : join ? 'Join the reading room.' : 'Welcome back.';
-  $('auth-description').textContent = setup ? 'Create the group and your facilitator account. You can invite members once you are inside.' : join ? 'Your invitation creates one member account. Choose the name and password you will use to sign in.' : 'Sign in with the member name and password you chose for this local room.';
+  $('auth-heading').textContent = setup ? 'Set up your reading room' : join ? 'Join your reading group' : 'Sign in to your reading room';
+  $('auth-description').textContent = setup ? 'Choose a group name, your name, and a password once. Then select a passage and ask your first question.' : join ? 'This invitation creates your account. Choose a name and password, then join the discussion.' : 'Use the name and password you chose. Your saved discussions will be here.';
+  $('start-step-one').textContent = setup || join ? 'Create your account' : 'Sign in';
+  $('start-step-one-detail').textContent = setup ? 'Choose a group name, your name, and a password once.' : join ? 'Use your invitation to choose a name and password.' : 'Use your Companion name and password.';
   $('group-name-field').hidden = !setup; $('group-name').required = setup;
   $('account-password').minLength = setup || join ? 12 : 1;
   $('account-password').autocomplete = setup || join ? 'new-password' : 'current-password';
-  $('password-note').textContent = setup || join ? 'Use at least 12 characters.' : '';
+  $('password-note').textContent = setup || join ? 'Choose a password for Companion with at least 12 characters.' : '';
   $('auth-submit').textContent = setup ? 'Create reading room ↗' : join ? 'Join reading room ↗' : 'Sign in ↗';
   $('auth-fields').hidden = false; $('auth-switch').hidden = setup || !inviteToken;
   $('auth-switch').textContent = join ? 'Use an existing account instead' : 'Join with this invitation instead';
@@ -115,8 +117,8 @@ async function loadSession() {
     if (data.user) await beginSession(data); else showAuth();
   } catch (error) {
     $('auth-view').hidden = false; $('room-view').hidden = true; $('auth-fields').hidden = true;
-    $('auth-heading').textContent = 'Connect to your reading room.';
-    $('auth-description').textContent = 'This page needs the local shared-room server. Start it on this computer, then reconnect.';
+    $('auth-heading').textContent = 'Open Companion to get started';
+    $('auth-description').textContent = 'Double-click Start Companion.cmd on this computer, then choose Try again.';
     $('auth-error').textContent = error.message; $('retry-session').hidden = false;
   }
 }
