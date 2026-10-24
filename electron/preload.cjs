@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('companionDesktop', Object.freeze({
   },
   setExpanded: (expanded) => ipcRenderer.send('companion:expanded', expanded),
   openReader: () => ipcRenderer.send('companion:open-reader'),
+  openGroup: () => ipcRenderer.send('companion:open-group'),
   minimize: () => ipcRenderer.send('companion:minimize'),
   onToggleMic: (callback) => subscribe('companion:toggle-mic', callback),
   onStop: (callback) => subscribe('companion:stop', callback),

@@ -8,6 +8,7 @@ const { createLocalProvider } = require('./local-provider.cjs');
 
 const root = path.resolve(__dirname, '..');
 const indexPath = path.join(root, 'index.html');
+const groupPath = path.join(root, 'group.html');
 const envDirectory = app.isPackaged ? path.dirname(app.getPath('exe')) : root;
 try { process.loadEnvFile?.(path.join(envDirectory, '.env')); }
 catch (error) { if (error.code !== 'ENOENT') console.warn('Companion could not read .env. Environment variables will still be used.'); }
@@ -18,6 +19,7 @@ const provider = providerName === 'local'
   : createProvider({ apiKey: process.env.OPENAI_API_KEY, model: process.env.COMPANION_MODEL });
 let readerWindow;
 let companionWindow;
+let groupWindow;
 let latestContext;
 let quitting = false;
 let shortcutAvailable = false;
@@ -83,6 +85,30 @@ function openReader() {
   readerWindow.show();
   if (readerWindow.isMinimized()) readerWindow.restore();
   readerWindow.focus();
+}
+
+function openGroup() {
+  if (!groupWindow || groupWindow.isDestroyed()) {
+    // Group contributions are a local design demo. This window receives no
+    // preload bridge, model access, microphone access, or desktop actions.
+    const { preload: _unusedPreload, ...preferences } = windowPreferences();
+    groupWindow = new BrowserWindow({
+      title: 'Companion — Group discussion', width: 1280, height: 900,
+      minWidth: 820, minHeight: 600, backgroundColor: '#f4f3ee',
+      show: false, webPreferences: preferences,
+    });
+    groupWindow.setMenuBarVisibility(false);
+    secureWindow(groupWindow);
+    groupWindow.webContents.on('will-navigate', (event, url) => {
+      if (isAppURL(url)) { event.preventDefault(); openReader(); }
+    });
+    groupWindow.once('ready-to-show', () => groupWindow.show());
+    groupWindow.on('closed', () => { groupWindow = null; });
+    groupWindow.loadFile(groupPath);
+  }
+  groupWindow.show();
+  if (groupWindow.isMinimized()) groupWindow.restore();
+  groupWindow.focus();
 }
 
 function windowPreferences() {
@@ -176,6 +202,7 @@ else {
         && event.sender.id === companionWindow.webContents.id) companionWindow.setBounds(cornerBounds(expanded));
     });
     on('companion:open-reader', openReader);
+    on('companion:open-group', openGroup);
     on('companion:minimize', (event) => BrowserWindow.fromWebContents(event.sender)?.minimize());
 
     createReader();
