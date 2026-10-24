@@ -9,7 +9,8 @@ if (desktop) document.body.classList.add('desktop');
 const SAMPLE = 'A first look at fixed points';
 const SAMPLE_CONTEXT = { id: 'complete', documentId: 'sample', paper: SAMPLE, page: 1, text: document.querySelector('[data-target="complete"]').textContent.trim() };
 const state = new TurnState(SAMPLE_CONTEXT);
-let service = { aiConfigured: false, desktop: Boolean(desktop) };
+let service = { aiConfigured: false, reasoningReady: false, transcriptionReady: false, provider: desktop ? 'unknown' : 'preview', desktop: Boolean(desktop) };
+let connectionCheck = null;
 let familiarity = cleanFamiliarity(readStored('familiarity', {}));
 let speak = Boolean(readStored('readAloud', false));
 let expanded = !desktop || mode !== 'companion';
@@ -44,6 +45,53 @@ function toast(message) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 4500);
 }
 function status(message = '') { $('inline-status').textContent = message; }
+function readerHint() {
+  if (service.provider === 'local') return 'Point to a passage to give Companion context. Local questions and selected text stay on this PC.';
+  if (service.provider === 'openai') return 'Opening a paper stays local. Asking the cloud AI sends only the selected passage and question context.';
+  return 'Point to a passage to give Companion context. This browser preview reads papers locally.';
+}
+function renderConnection() {
+  const ready = service.reasoningReady;
+  const local = service.provider === 'local';
+  const cloud = service.provider === 'openai';
+  $('connection-label').textContent = local ? (ready ? 'LOCAL MODEL' : 'AI OFFLINE') : cloud ? (ready ? 'CLOUD AI' : 'AI OFFLINE') : desktop ? 'AI OFFLINE' : 'LOCAL SAMPLE';
+  $('settings-connection').textContent = local ? (ready ? 'Local model is ready' : 'Local model is offline') : cloud ? (ready ? 'Cloud AI is connected' : 'Cloud AI is not connected') : desktop ? 'AI connection unavailable' : 'Browser preview';
+  if (local) {
+    $('settings-connection-detail').textContent = `${service.model || 'Companion’s local model'} runs on this PC. ${ready ? 'You can type a question now.' : service.unavailableReason || 'Start the local model, then refresh the connection.'} ${service.transcriptionReady ? 'Local voice input is available.' : 'Local voice input is not connected yet.'}`;
+    $('connection-privacy').textContent = 'Your questions, selected passages, recent chat and familiarity settings are processed on this PC. Companion does not switch to a cloud service when the local model is unavailable. No background listening.';
+    $('read-aloud-detail').textContent = 'Local mode uses an offline device voice only. If none is available, answers stay as text.';
+  } else if (cloud) {
+    $('settings-connection-detail').textContent = ready ? `Questions use ${service.model}. ${service.transcriptionReady ? 'Voice questions are transcribed when you finish recording.' : 'Voice input is unavailable.'} Live requests may incur API charges.` : service.unavailableReason || 'Connect the cloud service to ask open-ended questions. Local reading, plots and notes still work.';
+    $('connection-privacy').textContent = 'When you ask, OpenAI receives your question, chosen passage, recent chat and stated familiarity. Submitted recordings go to OpenAI for transcription. Opening a PDF does not upload it. No background listening.';
+    $('read-aloud-detail').textContent = 'Uses your device’s available synthetic voices; some voices may require a network connection.';
+  } else {
+    $('settings-connection-detail').textContent = desktop ? service.unavailableReason || 'The desktop connection could not be checked. Local tools still work.' : 'The sample paper includes prepared explanations. Plotting, notes and PDF reading work locally. Open the desktop app to use a connected model.';
+    $('connection-privacy').textContent = 'The browser preview has no AI service connection. Papers, notes and familiarity settings stay in this local preview. Microphone transcription requires the desktop app.';
+    $('read-aloud-detail').textContent = 'Uses your device’s available synthetic voices; some voices may require a network connection.';
+  }
+  $('refresh-connection').hidden = !desktop;
+  if (currentPaper === 'sample') $('reader-hint').textContent = readerHint();
+  if (desktop) $('mic-button').title = !service.transcriptionReady ? (local ? 'Local voice input is not connected. You can type a question.' : 'Voice input is not connected.') : service.shortcutAvailable ? 'Ctrl + Alt + Space to start or finish' : 'Global microphone shortcut unavailable. Use this button.';
+}
+async function refreshConnection(announce = false) {
+  if (!desktop) { renderConnection(); return service; }
+  if (connectionCheck) return connectionCheck;
+  $('refresh-connection').disabled = true;
+  $('refresh-connection').textContent = 'Checking…';
+  connectionCheck = (async () => {
+    try {
+      const value = await desktop.getStatus();
+      service = { ...value, reasoningReady: value.reasoningReady ?? Boolean(value.aiConfigured), transcriptionReady: value.transcriptionReady ?? (value.provider !== 'local' && Boolean(value.aiConfigured)), provider: value.provider || 'openai' };
+    } catch {
+      service = { ...service, aiConfigured: false, reasoningReady: false, transcriptionReady: false, unavailableReason: 'Could not check the desktop connection. Local tools still work.' };
+    }
+    renderConnection();
+    if (announce) toast(service.reasoningReady ? `${service.provider === 'local' ? 'Local model' : 'Cloud AI'} is ready.` : 'AI is offline. Check the connection details.');
+    return service;
+  })();
+  try { return await connectionCheck; }
+  finally { connectionCheck = null; $('refresh-connection').disabled = false; $('refresh-connection').textContent = 'Refresh connection'; }
+}
 function setExpanded(value) {
   expanded = Boolean(value);
   $('companion').classList.toggle('expanded', expanded);
@@ -119,6 +167,12 @@ function readAloud(text) {
   const version = ++speechVersion;
   speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text); utterance.rate = .95;
+  if (service.provider === 'local') {
+    const voices = speechSynthesis.getVoices().filter(voice => voice.localService === true);
+    const voice = voices.find(item => item.lang.toLowerCase().startsWith('en')) || voices[0];
+    if (!voice) { status('No offline voice is available on this device. Your answer is shown as text.'); return; }
+    utterance.voice = voice; utterance.lang = voice.lang;
+  }
   $('stop-button').hidden = false;
   const finish = () => { if (version === speechVersion && !activeId && recorder?.state !== 'recording') $('stop-button').hidden = true; };
   utterance.onend = finish; utterance.onerror = finish;
@@ -161,14 +215,20 @@ async function ask(question, existingTurn = null) {
     const text = definitions[intent.concept];
     addMessage('assistant', text, 'Local glossary', context); finishTurn(turn); readAloud(text); return;
   }
-  if (!service.aiConfigured) {
+  if (desktop) {
+    $('stop-button').hidden = false;
+    $('companion-status').textContent = 'Checking the connection…';
+    await refreshConnection();
+    if (!state.isCurrent(turn)) return;
+  }
+  if (!service.reasoningReady) {
     if (context.documentId === 'sample') {
       const text = sampleExplanation(context, familiarity);
       addMessage('assistant', text, 'Sample walkthrough · prepared', context);
-      status('This is a prepared passage walkthrough. Connect AI for open-ended questions.');
+      status(service.provider === 'local' ? 'The local model is offline. This is a prepared passage walkthrough.' : 'This is a prepared passage walkthrough. Connect AI for open-ended questions.');
       finishTurn(turn); readAloud(text); return;
     } else {
-      addMessage('assistant', 'Your passage is selected. To reason about this paper or use voice, connect AI in the desktop app. You can already enlarge text, plot a function, use the local glossary, and save your thoughts.', 'AI not connected', context);
+      addMessage('assistant', service.provider === 'local' ? `Your passage is selected, but the local model is unavailable. ${service.unavailableReason || 'Start it and refresh the connection in Preferences.'} Your question has not been sent to a cloud service. You can still enlarge text, plot functions, and save notes.` : 'Your passage is selected. Connect AI in the desktop app to ask about this paper. You can already enlarge text, plot a function, use the local glossary, and save your thoughts.', 'AI not connected', context);
     }
     finishTurn(turn); return;
   }
@@ -178,7 +238,7 @@ async function ask(question, existingTurn = null) {
   try {
     const result = await desktop.ask({ id, question, context, familiarity, history: history.slice(-8) });
     if (!state.isCurrent(turn)) return;
-    finishTurn(turn); addMessage('assistant', result.text, 'Companion · AI', context);
+    finishTurn(turn); addMessage('assistant', result.text, service.provider === 'local' ? 'Companion · local AI' : 'Companion · cloud AI', context);
     history.push({ role: 'user', text: question }, { role: 'assistant', text: result.text.slice(0, 6000) }); history = history.slice(-8);
     readAloud(result.text);
   } catch (error) { if (state.isCurrent(turn)) { finishTurn(turn); status(error.message.replace(/^Error invoking remote method '[^']+': Error: /, '')); } }
@@ -188,12 +248,15 @@ async function toggleMic() {
   setExpanded(true);
   if (recorder?.state === 'recording') { recorder.stop(); return; }
   if (micOpening) return;
-  if (!service.aiConfigured) { status('Voice needs AI connected in the desktop app. You can type a question or try the sample now.'); return; }
-  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) { status('Microphone recording is unavailable in this browser. Use the desktop app.'); return; }
   stopEverything(''); micOpening = true;
   const turn = state.start(); recordingTurn = turn; updateContext();
+  $('stop-button').hidden = false;
   let acquiredStream = null;
   try {
+    if (desktop) await refreshConnection();
+    if (!state.isCurrent(turn)) return;
+    if (!service.transcriptionReady) { finishTurn(turn); status(service.provider === 'local' ? `${service.transcriptionUnavailableReason || 'Local voice input is not connected yet.'} You can type your question.` : 'Voice needs a transcription service connected in the desktop app. You can type a question or try the sample now.'); return; }
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) { finishTurn(turn); status('Microphone recording is unavailable in this browser. Use the desktop app.'); return; }
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     acquiredStream = stream;
     if (!state.isCurrent(turn)) { stream.getTracks().forEach(track => track.stop()); return; }
@@ -350,7 +413,7 @@ function returnSample() {
   $('pdf-view').hidden = true; $('sample-paper').hidden = false; $('return-sample').hidden = true;
   document.querySelector('.outline').hidden = false; $('paper-name').textContent = SAMPLE; $('document-label').textContent = SAMPLE;
   $('document-tag').textContent = 'SAMPLE PAPER'; $('page-label').textContent = '1 / 1'; $('prev-page').disabled = true; $('next-page').disabled = true;
-  $('reader-hint').textContent = 'Point to a passage to give Companion context. Your paper stays on this device until you ask the connected AI.';
+  $('reader-hint').textContent = readerHint();
   history = []; latestAnswer = null; state.release(); point(SAMPLE_CONTEXT);
 }
 
@@ -369,6 +432,7 @@ $('save-action').addEventListener('click', () => saveNote(latestAnswer?.text || 
 $('notes-nav').addEventListener('click', () => { renderNotes(); showDialog('notes-dialog'); });
 $('export-notes').addEventListener('click', exportNotes);
 for (const id of ['settings-nav', 'corner-settings']) $(id).addEventListener('click', () => { renderPreferences(); showDialog('settings-dialog'); });
+$('refresh-connection').addEventListener('click', () => void refreshConnection(true));
 $('forget-profile').addEventListener('click', () => { familiarity = cleanFamiliarity({}); store('familiarity', familiarity); renderPreferences(); toast('Familiarity preferences cleared.'); });
 $('read-aloud').addEventListener('change', event => { speak = event.target.checked; store('readAloud', speak); if (!speak) window.speechSynthesis?.cancel(); });
 $('import-pdf').addEventListener('click', () => $('pdf-file').click());
@@ -384,15 +448,7 @@ window.addEventListener('storage', event => { if (event.key === 'companion.famil
 window.addEventListener('beforeunload', () => { stopEverything(''); pdfReader?.destroy(); });
 if (desktop) {
   desktop.onContext(context => point(context, false)); desktop.onToggleMic(toggleMic); desktop.onStop(() => stopEverything());
-  try {
-    service = await desktop.getStatus();
-    if (service.aiConfigured) {
-      $('connection-label').textContent = 'AI CONNECTED'; $('settings-connection').textContent = 'AI is connected';
-      $('settings-connection-detail').textContent = `Questions use ${service.model}. Microphone questions are transcribed when you finish recording. Live requests may incur API charges.`;
-    }
-    if (!service.shortcutAvailable) $('mic-button').title = 'Global microphone shortcut unavailable. Use this button.';
-    else $('mic-button').title = 'Ctrl + Alt + Space to start or finish';
-  } catch { status('Desktop connection unavailable. Local tools still work.'); }
+  await refreshConnection();
 }
-setExpanded(expanded); updateContext(); updateNoteCount(); renderPreferences();
+setExpanded(expanded); updateContext(); updateNoteCount(); renderPreferences(); renderConnection();
 if (desktop && mode === 'reader') desktop.publishContext(SAMPLE_CONTEXT);
