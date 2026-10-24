@@ -1,5 +1,18 @@
 # Prototype verification — 24 October 2026
 
+## Local AI update (0.2.0)
+
+- 45 Node tests pass, including local model verification, independent speech readiness, cancellation before prompt dispatch, stale response suppression, redirect refusal, output bounds, WebM compatibility, and held-out training families. Syntax and PowerShell parsing pass.
+- Ollama 0.40.11 runs on loopback with cloud disabled. The downloaded Qwen3.5-4B GGUF is configured as `companion-math`; this alias is a prompt/configuration, not a fine-tune. RTX 4070, 12 GB VRAM, 32 GB RAM.
+- Three original passage questions completed through the actual provider. First model load plus answer: 52.9 seconds; two warm answers: 2.2 and 2.5 seconds. These are individual observations, not a benchmark or a latency guarantee.
+- Mathematical review: it explained the role of completeness and correctly rejected continuity implying differentiability for |x| at zero. It identified the missing closedness hypothesis for a sequence limit, but its example `1 - 1/n` in `(0,1)` incorrectly claimed membership for every n (n=1 gives 0). It also exceeded requested brevity and sometimes emitted raw LaTeX. Treat explanations as material to check, not verified proofs.
+- Offline faster-whisper base.en (CPU int8) passed 14 helper checks, including WAV and WebM/Opus transcription of computer-generated speech, silence, malformed audio, decoded duration, byte limits, and Host/Origin rejection. The synthetic sentence was “Why is every convergent sequence bounded?” No user microphone was recorded.
+- A new unpacked Windows build was created at `release/Companion-0.2.0`; 641 files, 390.2 MiB. Model weights and the isolated speech runtime remain external. The launcher refuses an existing Companion instance so it cannot silently retain a previous cloud configuration.
+
+Actual microphone capture, read-aloud, broader mathematical evaluation, and long-session reliability still need user hardware testing. Local service tests do not establish transcription quality for every accent, equation, or paper. The separate training pilot has its own manifest and before/after evaluation; a training loss alone is not evidence of better explanations.
+
+## Earlier prototype (0.1.0)
+
 This records what was actually checked for 0.1.0. It is not a claim that every planned feature is complete.
 
 ## Passed

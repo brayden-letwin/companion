@@ -44,3 +44,12 @@ papers/private/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Downloaded local models, isolated runtimes, and training output
+.local/
+.venv*/
+__pycache__/
+training/runs/
+training/.cache/
+*.safetensors
+*.gguf

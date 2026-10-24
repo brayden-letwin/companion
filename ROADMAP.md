@@ -16,6 +16,9 @@ Checked items mean the feature has an implementation. They do not establish that
 - [x] A labeled, prepared walkthrough for the original sample when AI is not configured.
 - [x] Reviewable familiarity levels for four concepts, saved locally with a reset control.
 - [x] Optional API-backed questions with a configurable reasoning model and no model-operated PC tools.
+- [x] Local Qwen3.5 inference via Ollama, separate offline Whisper speech, and local/cloud connection labels.
+- [x] Local mode with no cloud fallback, installed-model validation, and a launcher for isolated services.
+- [x] A separate BF16 LoRA training workflow with original teaching examples and held-out before/after questions. Deployment requires review; configuring a model alias is not training.
 - [x] Toggle-to-talk, transcription on submission, a 60-second recording limit, and optional device read-aloud.
 - [x] Visible cancellation plus global recording and stop shortcuts, with unavailable-shortcut reporting.
 - [x] Passage enlargement with paper/page metadata and a six-concept local glossary.
@@ -27,7 +30,7 @@ Checked items mean the feature has an implementation. They do not establish that
 
 ## Verification before relying on live use
 
-Provider tests use mocked responses. **Real API calls and native microphone capture are not yet verified with a key and microphone.** Browser preview checks do not establish native voice behavior.
+Local inference has completed real passage questions, and local transcription has processed synthetic audio. OpenAI calls and native microphone capture remain unverified. Browser preview checks do not establish native voice behavior. See QA.md for concrete results and observed mathematical mistakes.
 
 - [ ] Configure a private API key and confirm project access to both models.
 - [ ] Submit a real spoken mathematical question; check transcript accuracy, the pinned passage, and the explanation.
