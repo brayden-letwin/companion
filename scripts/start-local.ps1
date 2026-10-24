@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$RuntimeRoot,
     [string]$SpeechRuntimeRoot = (Join-Path $PSScriptRoot '..\..\..\work'),
-    [string]$AppPath = (Join-Path $PSScriptRoot '..\release\Companion-0.3.0\Companion.exe'),
+    [string]$AppPath = (Join-Path $PSScriptRoot '..\release\Companion-0.4.0\Companion.exe'),
     [switch]$SkipSpeech
 )
 
@@ -10,7 +10,7 @@ $RuntimeRoot = [IO.Path]::GetFullPath($RuntimeRoot)
 $AppPath = [IO.Path]::GetFullPath($AppPath)
 $ollamaPath = Join-Path $RuntimeRoot 'runtime\ollama.exe'
 if (-not (Test-Path -LiteralPath $ollamaPath -PathType Leaf)) { throw "Local Ollama runtime missing: $ollamaPath. See README local setup." }
-if (-not (Test-Path -LiteralPath $AppPath -PathType Leaf)) { throw "Companion build missing: $AppPath. Package Companion-0.3.0 first." }
+if (-not (Test-Path -LiteralPath $AppPath -PathType Leaf)) { throw "Companion build missing: $AppPath. Package Companion-0.4.0 first." }
 $developmentElectron = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\node_modules\electron\dist\electron.exe'))
 $existing = Get-Process -Name Companion,electron -ErrorAction SilentlyContinue | Where-Object {
     $_.ProcessName -eq 'Companion' -or $_.Path -eq $developmentElectron
