@@ -189,4 +189,4 @@ function createProvider({ apiKey = '', model = DEFAULT_MODEL, fetchImpl = global
   };
 }
 
-module.exports = { createProvider, validateAsk, validateAudio, validateContext, requestId, DEFAULT_MODEL, TRANSCRIPTION_MODEL, MAX_AUDIO_BYTES };
+module.exports = { createProvider, validateAsk, validateAudio, validateContext, requestId, INSTRUCTIONS, DEFAULT_MODEL, TRANSCRIPTION_MODEL, MAX_AUDIO_BYTES };

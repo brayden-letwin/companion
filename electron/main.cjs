@@ -4,13 +4,18 @@ const { app, BrowserWindow, ipcMain, globalShortcut, session, screen } = require
 const path = require('node:path');
 const { fileURLToPath } = require('node:url');
 const { createProvider, validateContext } = require('./provider.cjs');
+const { createLocalProvider } = require('./local-provider.cjs');
 
 const root = path.resolve(__dirname, '..');
 const indexPath = path.join(root, 'index.html');
 const envDirectory = app.isPackaged ? path.dirname(app.getPath('exe')) : root;
 try { process.loadEnvFile?.(path.join(envDirectory, '.env')); }
 catch (error) { if (error.code !== 'ENOENT') console.warn('Companion could not read .env. Environment variables will still be used.'); }
-const provider = createProvider({ apiKey: process.env.OPENAI_API_KEY, model: process.env.COMPANION_MODEL });
+const providerName = process.env.COMPANION_PROVIDER || 'openai';
+if (!['local', 'openai'].includes(providerName)) throw new Error('COMPANION_PROVIDER must be local or openai.');
+const provider = providerName === 'local'
+  ? createLocalProvider({ model: process.env.COMPANION_LOCAL_MODEL })
+  : createProvider({ apiKey: process.env.OPENAI_API_KEY, model: process.env.COMPANION_MODEL });
 let readerWindow;
 let companionWindow;
 let latestContext;
@@ -147,7 +152,15 @@ else {
       });
     });
 
-    handle('companion:status', () => ({ desktop: true, ...provider.getStatus(), shortcutAvailable, stopShortcutAvailable }));
+    handle('companion:status', async () => {
+      const status = await provider.getStatus();
+      return {
+        desktop: true, provider: providerName, reasoningReady: status.aiConfigured,
+        transcriptionReady: providerName === 'openai' && status.aiConfigured,
+        unavailableReason: status.aiConfigured ? null : 'OpenAI is not connected. Configure its API key or select the local provider.',
+        ...status, shortcutAvailable, stopShortcutAvailable,
+      };
+    });
     handle('companion:ask', (event, payload) => provider.ask(String(event.sender.id), payload));
     handle('companion:transcribe', (event, payload) => provider.transcribe(String(event.sender.id), payload));
     on('companion:cancel', (event, id) => provider.cancel(String(event.sender.id), id));
