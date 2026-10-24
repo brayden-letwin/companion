@@ -440,6 +440,7 @@ $('pdf-file').addEventListener('change', event => void loadPdf(event.target.file
 $('prev-page').addEventListener('click', () => pdfReader?.previous()); $('next-page').addEventListener('click', () => pdfReader?.next());
 $('return-sample').addEventListener('click', returnSample);
 $('reading-nav').addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+$('group-nav').addEventListener('click', () => desktop ? desktop.openGroup() : window.location.assign('group.html'));
 document.querySelectorAll('[data-section]').forEach(button => button.addEventListener('click', () => $(button.dataset.section).scrollIntoView({ behavior: 'smooth', block: 'center' })));
 document.querySelectorAll('.close-dialog').forEach(button => button.addEventListener('click', () => button.closest('dialog').close()));
 document.querySelectorAll('dialog').forEach(dialog => dialog.addEventListener('click', event => { if (event.target === dialog) { const b = dialog.getBoundingClientRect(); if (event.clientX < b.left || event.clientX > b.right || event.clientY < b.top || event.clientY > b.bottom) dialog.close(); } }));
