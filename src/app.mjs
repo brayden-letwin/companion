@@ -441,6 +441,11 @@ $('prev-page').addEventListener('click', () => pdfReader?.previous()); $('next-p
 $('return-sample').addEventListener('click', returnSample);
 $('reading-nav').addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
 $('group-nav').addEventListener('click', () => desktop ? desktop.openGroup() : window.location.assign('group.html'));
+$('shared-nav').addEventListener('click', async () => {
+  if (!desktop) { window.location.assign('http://127.0.0.1:4174/room.html'); return; }
+  try { await desktop.openSharedRoom(); }
+  catch { toast('Could not open the shared room. Start its local server, then open http://127.0.0.1:4174/room.html.'); }
+});
 document.querySelectorAll('[data-section]').forEach(button => button.addEventListener('click', () => $(button.dataset.section).scrollIntoView({ behavior: 'smooth', block: 'center' })));
 document.querySelectorAll('.close-dialog').forEach(button => button.addEventListener('click', () => button.closest('dialog').close()));
 document.querySelectorAll('dialog').forEach(dialog => dialog.addEventListener('click', event => { if (event.target === dialog) { const b = dialog.getBoundingClientRect(); if (event.clientX < b.left || event.clientX > b.right || event.clientY < b.top || event.clientY > b.bottom) dialog.close(); } }));
