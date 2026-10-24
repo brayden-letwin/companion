@@ -1,6 +1,6 @@
 {
   "name": "companion-math",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "A small desktop companion for understanding mathematics.",
   "main": "electron/main.cjs",
@@ -8,7 +8,7 @@
     "start": "electron .",
     "preview": "node scripts/preview.mjs",
     "test": "node --test tests/*.test.mjs tests/*.test.cjs",
-    "check": "node --check src/app.mjs && node --check electron/main.cjs && node --check electron/preload.cjs",
+    "check": "node --check src/app.mjs && node --check src/group.mjs && node --check electron/main.cjs && node --check electron/preload.cjs",
     "package": "node scripts/package.mjs"
   },
   "dependencies": { "pdfjs-dist": "6.4.299" },

@@ -2,7 +2,7 @@
 
 A small math companion for reading a paper, asking a question, and following the idea at your own pace.
 
-**Version 0.2.0 — runnable Windows prototype with local AI.** The app includes an always-on-top corner control, a PDF reader, local math tools, typed questions answered by Qwen, and English voice transcription with Whisper. The sample walkthrough has labeled prepared explanations. Local inference and computer-generated speech have been exercised; real microphone capture still needs a user test. Answers can contain mathematical errors.
+**Version 0.3.0 — Windows prototype with local AI and a group discussion design demo.** The app includes an always-on-top corner control, a PDF reader, local math tools, typed questions answered by Qwen, and English voice transcription with Whisper. The new Group discussion view explores how a reading group can contribute explanations and review mathematical claims. Group content is a local simulation; there are no shared accounts or server synchronization. Local inference and computer-generated speech have been exercised; actual Companion microphone capture still needs a user test. Answers can contain mathematical errors.
 
 ## Open the configured local app
 
@@ -12,7 +12,7 @@ If the portable runtime, model, speech environment, and packaged app have alread
 .\scripts\start-local.ps1 -RuntimeRoot '<portable-runtime-root>'
 ```
 
-Replace the placeholder with the folder containing `runtime/ollama.exe` and `models/`. The launcher starts the local services and opens `release/Companion-0.2.0/Companion.exe`. The configured development installation also provides **Start Companion.cmd** in its adjacent `companion-local` folder. Close any existing Companion instance first: focus the corner and press **Alt+F4**. An already running instance keeps its previous configuration.
+Replace the placeholder with the folder containing `runtime/ollama.exe` and `models/`. The launcher starts the local services and opens `release/Companion-0.3.0/Companion.exe`. The configured development installation also provides **Start Companion.cmd** in its adjacent `companion-local` folder. Close any existing Companion instance first: focus the corner and press **Alt+F4**. An already running instance keeps its previous configuration.
 
 The launcher selects `companion-math` at `127.0.0.1:11434`, sets `OLLAMA_NO_CLOUD=1`, and uses the speech helper at `127.0.0.1:8178`. No API key is needed. **Preferences → Refresh connection** checks model and microphone transcription availability separately. If voice is unavailable, typed questions still work. A model's first question can take longer while weights load.
 
@@ -43,7 +43,7 @@ Build the app from the repository directory:
 ```powershell
 pnpm install
 node node_modules/electron/install.js
-node scripts/package.mjs Companion-0.2.0
+node scripts/package.mjs Companion-0.3.0
 ```
 
 The explicit Electron command installs its runtime. Packaging creates an unsigned development build, not an installer. Keep the whole output folder together. The packager excludes private `.env` files and refuses to replace an existing output directory; choose a new package name if needed, then pass its executable through `-AppPath`.
@@ -134,6 +134,16 @@ After setup, launch everything together:
 The local launcher sets the app's configuration without a `.env` file. For direct development launch with `pnpm start`, or double-clicking `Companion.exe`, copy `.env.example` to a private `.env` in the repository or beside the executable. Keep `COMPANION_PROVIDER=local` and `COMPANION_LOCAL_MODEL=companion-math`; start the local services first, then restart the app. A `.env` selects the provider but does not start services.
 
 OpenAI remains an explicit alternative. Set `COMPANION_PROVIDER=openai`, add your own `OPENAI_API_KEY`, and restart. Reasoning defaults to `gpt-6.1-sol` through `COMPANION_MODEL`; submitted audio uses `gpt-transcribe`. This mode sends submitted content to OpenAI and requires internet access, API credit, and model access. The app never switches from local mode to cloud mode automatically. Real OpenAI calls have not been validated with user credentials.
+
+## Group discussion design demo
+
+Choose **Group discussion** in the reader, or open `/group.html` in the local browser preview. The intended pilot is one paper with the University of Washington theory group; no institutional endorsement or university service is implied.
+
+The prototype keeps an original fixed-point passage beside questions, attributed contributions, review, and resolution history. Try contributing an explanation, reviewing a particular revision, resolving a question, then reopening it when a gap appears. The **Demo member** selector simulates participants on one device. It is not authentication or a permission boundary. Data stays in this browser/app profile, separately from personal notes and familiarity settings.
+
+[DISCUSSION_FLOW.md](DISCUSSION_FLOW.md) describes the proposed flow, including private voice drafts and future group sharing. The interactive demo has its own implemented controls; real memberships, synchronization, paper uploads, and voice drafting in group discussions remain later work. AI draft provenance and mathematical review should stay visible as the product develops.
+
+For development, dictate requests into this Codex chat and describe independent tasks together. Codex can explore the interface and discussion design in parallel. Companion's own microphone currently routes mathematical questions to its selected provider; the app has no command bridge to this Codex conversation.
 
 ## Scope and development
 

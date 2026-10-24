@@ -1,5 +1,16 @@
 # Prototype verification — 24 October 2026
 
+## Group discussion design update (0.3.0)
+
+- 51 Node tests pass, including six new discussion state tests: passage anchors, review/understanding separation, author constraints in the simulation, revision invalidation, retained resolution/reopen history, event limits, and malformed local data rejection. Renderer/main/preload/preview syntax passes.
+- Browser flow checked: create a question on a selected passage, contribute an explanation, review a particular revision with a scope note, mark it helpful, resolve with a linked contribution and summary, reopen with a reason, and inspect the earlier resolution in history.
+- Editing the contribution produced an unreviewed r2, cleared the earlier helpful mark, and preserved the r1 text and review in history. New questions and contributions persisted after reload.
+- Drafts stayed with their question and simulated participant when switching. Automatically selected threads keep the matching passage highlighted.
+- At a 1280 × 720 browser viewport, the final layout has no page overflow; the contribution composer ends at y=697 and the question list shows both seeded questions. The paper and discussion scroll independently.
+- Independent code review checked safe text rendering, one separate group storage key, no network requests, no reads of personal familiarity/notes, and explicit simulated-participant / prepared AI-style labels. The native group window has no preload bridge or microphone/model privileges.
+
+This is an interactive design demo on one device. Real accounts, group synchronization, collaboration permissions, real-paper source anchoring, and group voice drafting are not implemented. Broader responsive and accessibility checks remain. The personal Companion microphone and this Codex chat's dictation are separate input routes; no command bridge or global Codex voice shortcut was added.
+
 ## Local AI update (0.2.0)
 
 - 45 Node tests pass, including local model verification, independent speech readiness, cancellation before prompt dispatch, stale response suppression, redirect refusal, output bounds, WebM compatibility, and held-out training families. Syntax and PowerShell parsing pass.

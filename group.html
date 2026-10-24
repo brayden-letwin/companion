@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'">
+  <title>Companion — understanding, together</title>
+  <link rel="stylesheet" href="src/group.css">
+</head>
+<body>
+  <aside class="group-sidebar">
+    <a class="group-brand" href="index.html" aria-label="Companion personal reading"><span class="brand-mark">↝</span>companion<span>.</span></a>
+    <div class="group-space"><span class="eyebrow">THEORY READING GROUP</span><h2>A shared<br>understanding.</h2><p>One paper.<br>Many ways in.</p></div>
+    <div class="sidebar-label">IN THIS PAPER</div>
+    <nav id="passage-nav" aria-label="Paper passages"></nav>
+    <div class="sidebar-bottom"><a href="index.html" class="personal-link">← Personal reading</a><p>Your familiarity and private notes stay in your personal space.</p><button id="reset-demo" class="quiet-button">Reset local demo</button></div>
+  </aside>
+  <main class="group-main">
+    <header class="group-topbar"><div class="breadcrumb">Reading together <span>/</span> <b>Fixed points</b></div><div class="demo-identity"><label for="demo-person">Try as</label><select id="demo-person" aria-label="Demo participant"></select><span class="avatar" id="actor-avatar">YO</span></div></header>
+    <div class="group-heading"><div><span class="eyebrow">THE GROUP READING ROOM</span><h1>Make room for each other’s <em>why.</em></h1></div><span class="demo-badge"><i></i> LOCAL DESIGN DEMO</span></div>
+    <div class="demo-notice">Explore the discussion flow. Changes are saved only in this browser profile; participants and reviews are simulated.</div>
+    <div class="group-workspace">
+      <section class="reading-panel" aria-label="Shared paper">
+        <div class="panel-toolbar"><span><i class="green-dot"></i> A first look at fixed points</span><span class="tiny-label">ORIGINAL SAMPLE · P. 1</span></div>
+        <article class="group-paper"><header><div class="paper-kicker">COMPANION READING NOTES · 001</div><h2>A first look at<br>fixed points</h2><p>How repeatedly doing the same thing<br>can lead somewhere new.</p><div class="paper-meta">Analysis <span>·</span> A short introduction</div></header><div id="paper-passages"></div><footer>ORIGINAL DEMONSTRATION TEXT <span>1</span></footer></article>
+        <div class="reading-footnote">Choose a passage to see its questions. A question always keeps its source.</div>
+      </section>
+      <section class="discussion-panel" aria-label="Paper discussion">
+        <header class="discussion-header"><div><span class="eyebrow">THINKING TOGETHER</span><h2>Discussion <span id="question-count">2</span></h2></div><button id="new-question" class="primary-button">Ask a question <span>+</span></button></header>
+        <div class="question-filters" role="group" aria-label="Question filter"><button id="filter-all" class="active" aria-pressed="true">All questions</button><button id="filter-open" aria-pressed="false">Unresolved <span id="open-count">2</span></button><button id="filter-passage" aria-pressed="false">This passage</button></div>
+        <div id="question-list" class="question-list" aria-label="Questions"></div>
+        <div id="thread-content" class="thread-content"></div>
+        <form id="contribution-form" class="contribution-form"><div class="reply-heading"><label for="contribution-text">Add to the understanding</label><select id="contribution-kind" aria-label="Contribution type"><option>Explanation</option><option>Proof detail</option><option>Counterexample</option><option>Follow-up</option></select></div><textarea id="contribution-text" maxlength="4000" rows="3" placeholder="A picture, a missing step, a useful example…" required></textarea><div class="reply-footer"><span id="contributing-as">Posting as You · demo</span><button class="primary-button" type="submit">Contribute <span>↗</span></button></div></form>
+      </section>
+    </div>
+  </main>
+  <dialog id="question-dialog"><form id="new-question-form"><header><div><span class="eyebrow">A QUESTION IS A CONTRIBUTION</span><h2>Where does the idea lose you?</h2></div><button class="close-dialog" type="button" aria-label="Close question">×</button></header><label class="field-label" for="question-passage">Attach to a passage</label><select id="question-passage"></select><blockquote id="question-source"></blockquote><label class="field-label" for="new-question-text">Your question</label><textarea id="new-question-text" rows="4" maxlength="1200" placeholder="I can follow this step, but I’m wondering why…" required></textarea><p class="form-note">This will be a simulated group question in this local demo. Your personal notes and familiarity are not attached.</p><div class="dialog-footer"><span id="question-author"></span><button class="primary-button" type="submit">Post question <span>↗</span></button></div><p class="form-error" id="question-error" role="alert"></p></form></dialog>
+  <dialog id="review-dialog"><form id="review-form"><header><div><span class="eyebrow">MAKE THE CHECK VISIBLE</span><h2>Review the mathematics.</h2></div><button class="close-dialog" type="button" aria-label="Close review">×</button></header><p id="review-target" class="form-note"></p><blockquote id="review-text"></blockquote><label class="field-label" for="review-result">Your review</label><select id="review-result"><option value="reviewed">Reviewed — the argument checks out</option><option value="correction">Needs correction — something is missing or wrong</option></select><label class="field-label" for="review-note">What did you check?</label><textarea id="review-note" rows="3" maxlength="1400" placeholder="Name the assumptions, calculation, or correction." required></textarea><p class="form-note">A review applies to this exact revision. “Helped me” records understanding and does not validate the mathematics.</p><div class="dialog-footer"><span id="review-author"></span><button class="primary-button" type="submit">Save demo review</button></div><p class="form-error" id="review-error" role="alert"></p></form></dialog>
+  <dialog id="edit-dialog"><form id="edit-form"><header><div><span class="eyebrow">KEEP THE REASONING TRACEABLE</span><h2>Revise your contribution.</h2></div><button class="close-dialog" type="button" aria-label="Close edit">×</button></header><label class="field-label" for="edit-text">Contribution</label><textarea id="edit-text" rows="7" maxlength="4000" required></textarea><p class="form-note">Earlier text and reviews stay in the history. The new revision starts unreviewed.</p><div class="dialog-footer"><span id="edit-author"></span><button class="primary-button" type="submit">Save revision</button></div><p class="form-error" id="edit-error" role="alert"></p></form></dialog>
+  <dialog id="history-dialog"><header><div><span class="eyebrow">A VISIBLE TRAIL OF THOUGHT</span><h2>Discussion history.</h2></div><button class="close-dialog" aria-label="Close history">×</button></header><div id="history-content"></div></dialog>
+  <dialog id="resolution-dialog"><form id="resolution-form"><header><div><span class="eyebrow">MAKE THE CONNECTION EXPLICIT</span><h2 id="resolution-heading">What made it click?</h2></div><button class="close-dialog" type="button" aria-label="Close resolution">×</button></header><div id="resolution-link-field"><label class="field-label" for="resolution-link">Explanation that helped</label><select id="resolution-link"></select></div><label class="field-label" id="resolution-summary-label" for="resolution-summary">Your understanding, in a sentence</label><textarea id="resolution-summary" rows="3" maxlength="600" required></textarea><p class="form-note" id="resolution-note">Resolution records your understanding of this question. It does not certify the linked contribution’s mathematics.</p><div class="dialog-footer"><span id="resolution-author"></span><button class="primary-button" id="resolution-submit" type="submit">Mark resolved</button></div><p class="form-error" id="resolution-error" role="alert"></p></form></dialog>
+  <dialog id="reset-dialog"><header><div><span class="eyebrow">LOCAL DEMO</span><h2>Start the sample again?</h2></div><button class="close-dialog" aria-label="Close reset">×</button></header><p class="form-note">This clears the questions, contributions, and reviews you added to this local discussion demo. Your personal reader notes are separate.</p><div class="reset-actions"><button class="secondary-button close-dialog">Keep my discussion</button><button id="confirm-reset" class="primary-button">Reset discussion demo</button></div></dialog>
+  <div id="group-toast" class="group-toast" role="status" hidden></div>
+  <script type="module" src="src/group.mjs"></script>
+</body>
+</html>

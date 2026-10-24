@@ -27,6 +27,11 @@ Checked items mean the feature has an implementation. They do not establish that
 - [x] API credentials in the main process, validated renderer requests, and limited permissions/navigation.
 - [x] Local browser preview and automated math, tutor-state, and mocked-provider tests.
 - [x] Windows unpacked packaging that excludes private `.env` files and refuses to overwrite an existing build.
+- [x] A local Group discussion design demo with passage-linked questions, simulated contributors, contribution revisions, mathematical review, and resolution/reopening.
+
+## Group reading pilot
+
+[DISCUSSION_FLOW.md](DISCUSSION_FLOW.md) describes the proposed reading-group workflow. The interactive demo is a single-device simulation. The next collaborative implementation needs authenticated membership, shared storage and synchronization, source-version anchoring, and attributed review history. Personal familiarity and notes remain private unless a member explicitly shares specific content. No university service or endorsement is implied.
 
 ## Verification before relying on live use
 
