@@ -1,0 +1,81 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { cp, copyFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const name = process.argv[2] || 'Companion';
+if (process.argv.length > 3 || !/^Companion(?:-[A-Za-z0-9][A-Za-z0-9._-]{0,59})?$/.test(name)) {
+  throw new Error('Usage: node scripts/package.mjs [Companion-version]. Output stays inside release/.');
+}
+const releaseRoot = path.join(root, 'release');
+const destination = path.resolve(releaseRoot, name);
+if (path.dirname(destination) !== releaseRoot) throw new Error('Invalid package destination.');
+const runtime = path.join(root, 'node_modules', 'electron', 'dist');
+const pdfjs = path.join(root, 'node_modules', 'pdfjs-dist');
+const sourceFiles = ['index.html', 'package.json'];
+const sourceDirectories = ['src', 'electron'];
+const publicExtensions = new Set(['.js', '.mjs', '.cjs', '.json', '.css', '.html', '.svg', '.png', '.jpg', '.jpeg', '.webp', '.ico', '.woff', '.woff2', '.ttf', '.otf']);
+const privateNames = new Set(['secrets', 'credentials', 'tests', 'test-results', 'private', 'recordings', 'captures', 'screenshots', 'transcripts', 'user-notes', 'papers', 'node_modules']);
+
+async function copySourceDirectory(source, target) {
+  await mkdir(target, { recursive: true });
+  for (const item of await readdir(source, { withFileTypes: true })) {
+    if (item.name.startsWith('.') || privateNames.has(item.name.toLowerCase())) continue;
+    if (item.isSymbolicLink()) throw new Error(`Source links are not packaged: ${path.relative(root, path.join(source, item.name))}`);
+    const from = path.join(source, item.name);
+    const to = path.join(target, item.name);
+    if (item.isDirectory()) await copySourceDirectory(from, to);
+    else if (item.isFile() && publicExtensions.has(path.extname(item.name).toLowerCase())) await copyFile(from, to);
+  }
+}
+
+async function directorySize(directory) {
+  let bytes = 0;
+  let files = 0;
+  for (const item of await readdir(directory, { withFileTypes: true })) {
+    const location = path.join(directory, item.name);
+    if (item.isDirectory()) {
+      const nested = await directorySize(location);
+      bytes += nested.bytes;
+      files += nested.files;
+    } else if (item.isFile()) {
+      bytes += (await stat(location)).size;
+      files += 1;
+    }
+  }
+  return { bytes, files };
+}
+
+// Preflight before creating an output directory. This packages the installed
+// Windows runtime without a download, shell invocation, or build service.
+try { await stat(path.join(runtime, 'electron.exe')); }
+catch { throw new Error('Windows Electron runtime not found. Install dependencies on Windows before packaging.'); }
+await stat(path.join(pdfjs, 'build', 'pdf.mjs'));
+for (const name of [...sourceFiles, ...sourceDirectories, '.env.example']) await stat(path.join(root, name));
+const metadata = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+await mkdir(releaseRoot, { recursive: true });
+try { await mkdir(destination); }
+catch (error) {
+  if (error.code === 'EEXIST') throw new Error(`${destination} already exists. Move or remove that folder yourself, or use a new name such as Companion-${metadata.version}-2. The packager never replaces an existing build.`);
+  throw error;
+}
+
+try {
+  for (const entry of await readdir(runtime)) {
+    await cp(path.join(runtime, entry), path.join(destination, entry), { recursive: true, dereference: true, force: false, errorOnExist: true });
+  }
+  await rename(path.join(destination, 'electron.exe'), path.join(destination, 'Companion.exe'));
+  const appDirectory = path.join(destination, 'resources', 'app');
+  await mkdir(appDirectory, { recursive: true });
+  for (const file of sourceFiles) await copyFile(path.join(root, file), path.join(appDirectory, file));
+  for (const directory of sourceDirectories) await copySourceDirectory(path.join(root, directory), path.join(appDirectory, directory));
+  await mkdir(path.join(appDirectory, 'node_modules'), { recursive: true });
+  await cp(pdfjs, path.join(appDirectory, 'node_modules', 'pdfjs-dist'), { recursive: true, dereference: true, force: false, errorOnExist: true });
+  await copyFile(path.join(root, '.env.example'), path.join(destination, '.env.example'));
+  await writeFile(path.join(destination, 'README-launch.txt'), `Companion ${metadata.version} — Windows prototype\n\nDouble-click Companion.exe to open the reader and corner companion. Keep this entire folder together; its supporting files are required.\n\nTo quit, focus the small corner window and press Alt+F4. Closing the reader hides it; the corner stays available.\n\nThe local reader, function plots, and notes work without an API key. For live questions and microphone transcription, copy .env.example to .env in this folder, replace the placeholder with your own OpenAI API key, then restart Companion. Keep .env private. API access and an internet connection are required for those features.\n\nThis is an unsigned development prototype, not an installer.\n`, 'utf8');
+  const size = await directorySize(destination);
+  console.log(JSON.stringify({ path: destination, version: metadata.version, ...size, megabytes: Number((size.bytes / 1024 / 1024).toFixed(1)) }, null, 2));
+} catch (error) {
+  console.error(`Packaging stopped. Partial files remain in ${destination}; choose a new package name after fixing the error.`);
+  throw error;
+}
