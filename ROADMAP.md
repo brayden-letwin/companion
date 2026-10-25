@@ -62,7 +62,8 @@ The app can edit its own application source. It does not instantly acquire arbit
 - [ ] Check device changes, long/noisy recording, pauses, accents, and read-aloud interruption.
 - [ ] Exercise longer sessions, multiple tabs, keyboard-only use, Windows scaling, and narrow screens.
 - [x] Check a normal native launcher run with a fresh default profile, visible white-outline corner, and ready GPT.
-- [ ] Check repeated launch, source-native Settings relaunch, and fresh-machine installation separately.
+- [x] Source-native Settings desktop restart reopened the blank corner in an isolated 0.18 profile; narrow connection details and actions were visually checked there.
+- [ ] Check repeated launch and fresh-machine installation separately.
 
 Provider protocol tests use mocks unless a dated QA entry says otherwise. A saved API key is configuration, not proof that a live account or model can complete requests.
 
