@@ -1,5 +1,5 @@
 import { windowContextReference } from './window-context.mjs';
-import { projectReference, projectEditReference, projectReadReference } from './project-files-context.mjs';
+import { projectReference, projectEditReference, projectReadReference, projectSearchReference } from './project-files-context.mjs';
 import {continuationReference} from './continuation-context.mjs';
 
 const STATUSES=new Set(['queued','running','completed','failed','cancelled','interrupted','waiting_for_review']);
@@ -38,6 +38,7 @@ function references(source,depth=0){
   if(source.continuation)result.continuation=continuationReference(source.continuation);
   if(source.projectFileEdit)result.projectFileEdit=projectEditReference(source.projectFileEdit);
   if(source.projectFileRead||source.sourceTrust==='untrusted_project_file')result.projectFileRead=projectReadReference(source.projectFileRead||source);
+  if(source.projectFileSearch||source.sourceTrust==='untrusted_project_search')result.projectFileSearch=projectSearchReference(source.projectFileSearch||source);
   if(source.sourceType==='selected_window_accessibility')Object.assign(result,{sourceType:source.sourceType,sourceOmitted:true,readable:source.readable===true});
   for(const key of ['hostActions','steps'])if(Array.isArray(source[key])){
     if(source[key].length>12)throw fail('The recorded action sequence exceeds its supported bound.',502);

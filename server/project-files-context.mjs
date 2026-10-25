@@ -38,3 +38,17 @@ export function projectReadReference(value){
   else if(Number.isSafeInteger(value.returnedCharacters)&&value.returnedCharacters>=0)result.returnedCharacters=value.returnedCharacters;
   return result;
 }
+export function projectSearchReference(value){
+  const project=projectReference(value);
+  if(!project||typeof value.searchId!=='string'||!UUID.test(value.searchId)||value.sourceTrust!=='untrusted_project_search')return null;
+  const result={...project,searchId:value.searchId,sourceTrust:'untrusted_project_search',sourceOmitted:true,snapshot:false};
+  if(typeof value.path==='string'&&value.path.length<=240&&!/[\\:\u0000-\u001f]/u.test(value.path))result.path=value.path;
+  for(const key of ['startedAt','observedAt'])if(typeof value[key]==='string'&&Number.isFinite(Date.parse(value[key])))result[key]=new Date(value[key]).toISOString();
+  for(const key of ['complete','scanHasMore'])if(typeof value[key]==='boolean')result[key]=value[key];
+  if(value.stopReason===null||typeof value.stopReason==='string'&&value.stopReason.length<=100)result.stopReason=value.stopReason;
+  if(Number.isSafeInteger(value.returned)&&value.returned>=0&&value.returned<=20)result.returned=value.returned;
+  for(const [key,allowed]of [['scanned',['directories','entries','files','bytes']],['skipped',['protected','unavailable','binary','oversized']]])if(object(value[key]))result[key]=Object.fromEntries(allowed.filter(name=>Number.isSafeInteger(value[key][name])&&value[key][name]>=0).map(name=>[name,value[key][name]]));
+  const hits=Array.isArray(value.matches)?value.matches:Array.isArray(value.files)?value.files:[];
+  result.files=hits.slice(0,20).flatMap(hit=>{if(typeof hit?.hash!=='string'||!/^[a-f\d]{64}$/.test(hit.hash))return[];const reference=projectReadReference({...hit,...project,sourceTrust:'untrusted_project_file'});return reference?[{path:reference.path,hash:reference.hash,...(reference.readAt?{readAt:reference.readAt}:{}),...(Number.isSafeInteger(hit.line)&&hit.line>=1?{line:hit.line}:{})}]:[];});
+  return result;
+}

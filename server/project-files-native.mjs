@@ -7,7 +7,7 @@ import { StringDecoder } from 'node:string_decoder';
 const UUID=/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const MUTATIONS=new Set(['write','replace','undo']);
 const COMMON=['root','rootIdentity','path','protectedRoots'];
-const FIELDS={inspectRoot:['path','protectedRoots'],list:COMMON,read:COMMON,write:[...COMMON,'operationId','editDirectory','expectedHash','content'],replace:[...COMMON,'operationId','editDirectory','expectedHash','oldText','newText'],undo:[...COMMON,'operationId','editDirectory','expectedHash','originalEditDirectory'],recover:[...COMMON,'operationId','editDirectory','terminalOnly'],inspect:[...COMMON,'operationId','editDirectory','part']};
+const FIELDS={inspectRoot:['path','protectedRoots'],list:COMMON,scanDirectory:[...COMMON,'cursor'],closeScan:['cursor'],read:COMMON,write:[...COMMON,'operationId','editDirectory','expectedHash','content'],replace:[...COMMON,'operationId','editDirectory','expectedHash','oldText','newText'],undo:[...COMMON,'operationId','editDirectory','expectedHash','originalEditDirectory'],recover:[...COMMON,'operationId','editDirectory','terminalOnly'],inspect:[...COMMON,'operationId','editDirectory','part']};
 const fail=(code,message,statusCode=503,extra={})=>Object.assign(new Error(message),{code,statusCode,...extra});
 const stopped=()=>Object.assign(fail('request_cancelled','Project access was stopped.',499),{name:'AbortError'});
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
@@ -67,12 +67,13 @@ export async function createProjectFileNative({root,dataDirectory}={}){
   }
   function validate(action,fields){
     if(!Object.hasOwn(FIELDS,action)||!object(fields)||Object.keys(fields).some(key=>!FIELDS[action].includes(key)))throw fail('invalid_project_input','Use a supported fixed project operation.',400);
+    if(action==='closeScan'&&(typeof fields.cursor!=='string'||!UUID.test(fields.cursor))||action==='scanDirectory'&&fields.cursor!==undefined&&(typeof fields.cursor!=='string'||!UUID.test(fields.cursor)))throw fail('invalid_project_input','Use the private directory cursor returned by this helper.',400);
     for(const key of ['editDirectory','originalEditDirectory'])if(fields[key]!==undefined){const directory=path.resolve(fields[key]);if(!UUID.test(path.basename(directory))||path.dirname(directory)!==path.join(storage,'project-files','edits')||key==='editDirectory'&&path.basename(directory)!==fields.operationId)throw fail('invalid_project_input','Use an owned private edit directory.',400);}
     return structuredClone(fields);
   }
   function run(action,fields,{signal}={}){
     let input;try{input=validate(action,fields);}catch(error){return Promise.reject(error);}
-    const operation=queue.then(async()=>{ensureWindows();if(signal?.aborted)throw stopped();const record=await startBroker();if(signal?.aborted||closed)throw stopped();const result=await send(record,action,input,signal);if(signal?.aborted&&!MUTATIONS.has(action))throw stopped();return result;});queue=operation.catch(()=>{});return operation;
+    const operation=queue.then(async()=>{ensureWindows();if(signal?.aborted)throw stopped();if(action==='closeScan'&&(!broker||broker.exited))return{closed:true};const record=await startBroker();if(signal?.aborted||closed)throw stopped();const result=await send(record,action,input,signal);if(signal?.aborted&&!MUTATIONS.has(action)){if(action==='scanDirectory'&&UUID.test(result.nextCursor))await send(record,'closeScan',{cursor:result.nextCursor}).catch(()=>{});throw stopped();}return result;});queue=operation.catch(()=>{});return operation;
   }
   async function chooseFolder({signal}={}){
     ensureWindows();if(signal?.aborted)throw stopped();const file=await fixedScript('project-folder-picker.ps1');if(signal?.aborted||closed)throw stopped();

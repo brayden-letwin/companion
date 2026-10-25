@@ -30,6 +30,7 @@ const ASSETS = new Map([
   ['/src/assistant.mjs', ['src/assistant.mjs', 'text/javascript; charset=utf-8']],
   ['/src/voice-session.mjs', ['src/voice-session.mjs', 'text/javascript; charset=utf-8']],
   ['/src/project-files.mjs', ['src/project-files.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/project-file-search.mjs', ['src/project-file-search.mjs', 'text/javascript; charset=utf-8']],
   ['/src/build-continuation.mjs', ['src/build-continuation.mjs', 'text/javascript; charset=utf-8']],
   ['/src/build-attempts.mjs', ['src/build-attempts.mjs', 'text/javascript; charset=utf-8']],
   ['/src/provider-checks.mjs', ['src/provider-checks.mjs', 'text/javascript; charset=utf-8']],

@@ -28,7 +28,7 @@ function fields(body, allowed) { if (!body || typeof body !== 'object' || Array.
 function text(value, limit, label, empty = false) { if (typeof value !== 'string' || value.length > limit || (!empty && !value.trim())) throw fail(400, 'invalid_input', `${label} must contain ${empty ? '0' : '1'}–${limit} characters.`); return value.trim(); }
 function workQuery(req,detail=false){const query=new URL(req.url,'http://localhost').searchParams,allowed=detail?['textOffset','textLimit','actionOffset','actionLimit']:['offset','limit'],result={};for(const key of query.keys()){const value=query.get(key);if(!allowed.includes(key)||query.getAll(key).length!==1||!/^\d{1,7}$/.test(value))throw fail(400,'invalid_work_query','Use the returned work paging offsets and bounded limits.');result[key]=Number(value);}return result;}
 function sourceFileQuery(req){const query=new URL(req.url,'http://localhost').searchParams,result={};for(const key of query.keys()){const value=query.get(key);if(!['path','expectedHash','offset','limit'].includes(key)||query.getAll(key).length!==1)throw fail(400,'invalid_source_query','Use one source path and its returned paging fields.');if(['offset','limit'].includes(key)){if(!/^\d{1,6}$/.test(value))throw fail(400,'invalid_source_query','Use bounded source paging integers.');result[key]=Number(value);}else result[key]=value;}return validateSourceReadOptions(result);}
-function projectQuery(req,allowed){const query=new URL(req.url,'http://localhost').searchParams,result={};for(const key of query.keys()){const value=query.get(key);if(!allowed.includes(key)||query.getAll(key).length!==1)throw fail(400,'invalid_project_query','Use one project binding and the returned paging fields.');if(['grantEpoch','offset','limit'].includes(key)){if(!/^\d{1,16}$/.test(value)||!Number.isSafeInteger(Number(value)))throw fail(400,'invalid_project_query','Use bounded integer project paging fields.');result[key]=Number(value);}else result[key]=value;}return result;}
+function projectQuery(req,allowed){const query=new URL(req.url,'http://localhost').searchParams,result={};for(const key of query.keys()){const value=query.get(key);if(!allowed.includes(key)||query.getAll(key).length!==1)throw fail(400,'invalid_project_query','Use one project binding and the returned paging fields.');if(['grantEpoch','offset','limit'].includes(key)){if(!/^\d{1,16}$/.test(value)||!Number.isSafeInteger(Number(value)))throw fail(400,'invalid_project_query','Use bounded integer project paging fields.');result[key]=Number(value);}else if(key==='caseSensitive'){if(!['true','false'].includes(value))throw fail(400,'invalid_project_query','Choose true or false for case-sensitive search.');result[key]=value==='true';}else result[key]=value;}return result;}
 function conversationPage(conversation, before) {
   let end = conversation.turns.length;
   if (before !== undefined) {
@@ -80,7 +80,7 @@ const routeMatches = route => backupRouteMatches(route)||['/chat','/work','/cont
   || /^\/api\/assistant\/provider-checks\/[a-f\d-]+(?:\/cancel)?$/i.test(route)
   || /^\/api\/assistant\/features\/[a-f\d-]+\/attempts\/[0-9]+$/i.test(route)
   || /^\/api\/assistant\/continuations\/[a-f\d-]+(?:\/(?:continue|cancel))?$/i.test(route)
-  || /^\/api\/assistant\/projects\/[a-f\d-]+(?:\/(?:files|file|history|edit|revoke|edits\/[a-f\d-]+))?$/i.test(route)
+  || /^\/api\/assistant\/projects\/[a-f\d-]+(?:\/(?:files|file|search|history|edit|revoke|edits\/[a-f\d-]+|search\/[a-f\d-]+\/close))?$/i.test(route)
   || /^\/api\/assistant\/(?:work\/[a-f\d-]+(?:\/cancel)?|context\/[a-f\d-]+\/clear|conversations\/[a-f\d-]+|features\/[a-f\d-]+(?:\/(?:apply|rollback|cancel))?|workspace\/workflows\/[a-f\d-]+\/run|desktop\/actions\/[a-f\d-]+\/(?:approve|cancel))$/i.test(route);
 
 /** Lazy initialization keeps the legacy reader and protocol tests independent. */
@@ -325,15 +325,15 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
           const continuation=/^\/api\/assistant\/continuations\/([a-f\d-]+)$/i.exec(route);
           if(continuation){if(!services.continuations)throw fail(503,'continuation_unavailable','Linked original requests are unavailable.');json(res,200,await services.continuations.get(continuation[1]));return true;}
           if(route===BASE+'/projects'){projectQuery(req,[]);if(!services.projectFiles)throw fail(503,'project_files_unavailable','Project folders are unavailable.');json(res,200,await services.projectFiles.projects({includeLocalPaths:true}));return true;}
-          const projectRoute=/^\/api\/assistant\/projects\/([a-f\d-]+)(?:\/(files|file|history|edits\/([a-f\d-]+)))?$/i.exec(route);
+          const projectRoute=/^\/api\/assistant\/projects\/([a-f\d-]+)(?:\/(files|file|search|history|edits\/([a-f\d-]+)))?$/i.exec(route);
           if(projectRoute){
             if(!services.projectFiles)throw fail(503,'project_files_unavailable','Project folders are unavailable.');
-            const kind=projectRoute[2],allowed=kind==='files'?['grantEpoch','path','offset','limit','expectedDirectoryHash']:kind==='file'?['grantEpoch','path','offset','limit','expectedHash']:kind==='history'?['grantEpoch','offset','limit']:kind?.startsWith('edits/')?['grantEpoch','part','offset','limit','expectedHash']:['grantEpoch'];
+            const kind=projectRoute[2],allowed=kind==='files'?['grantEpoch','path','offset','limit','expectedDirectoryHash']:kind==='file'?['grantEpoch','path','offset','limit','expectedHash']:kind==='search'?['grantEpoch','path','query','caseSensitive','searchId','cursor']:kind==='history'?['grantEpoch','offset','limit']:kind?.startsWith('edits/')?['grantEpoch','part','offset','limit','expectedHash']:['grantEpoch'];
             const query=projectQuery(req,allowed),project=normalizeProjectBinding({projectId:projectRoute[1],grantEpoch:query.grantEpoch}),{grantEpoch,...paging}=query;
             const result=await guardedRequest(req,res,session,randomUUID(),async signal=>{
               if(!kind){const validated=await services.projectFiles.validateBinding(project);const current=projectReference(validated);if(!current||current.projectId!==project.projectId||current.grantEpoch!==project.grantEpoch)throw fail(409,'project_binding_changed','This project access changed. Choose it again.');return{project:{...current,available:true,mode:'read_write'}};}
               if(kind.startsWith('edits/'))return services.projectFiles.getEdit(projectRoute[3],{binding:project,...paging});
-              return services.projectFiles.execute({action:kind==='files'?'list':kind==='file'?'read':'history',...project,...paging},{binding:project,operationId:randomUUID(),signal});
+              return services.projectFiles.execute({action:kind==='files'?'list':kind==='file'?'read':kind==='search'?'search':'history',...project,...paging},{binding:project,operationId:randomUUID(),signal});
             },project);
             json(res,200,result);return true;
           }
@@ -388,6 +388,8 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         const continuationAction=/^\/api\/assistant\/continuations\/([a-f\d-]+)\/(continue|cancel)$/i.exec(route);
         if(continuationAction){fields(body,[]);if(!services.continuations)throw fail(503,'continuation_unavailable','Linked original requests are unavailable.');const id=continuationAction[1];json(res,200,continuationAction[2]==='cancel'?await services.continuations.cancel(id):await guardedRequest(req,res,session,id,signal=>services.continuations.continue(id,{signal})));return true;}
         if(route===BASE+'/projects/choose'){fields(body,[]);if(!services.projectFiles)throw fail(503,'project_files_unavailable','Project folders are unavailable.');json(res,200,await guardedRequest(req,res,session,randomUUID(),signal=>services.projectFiles.choose({signal})));return true;}
+        const projectSearchClose=/^\/api\/assistant\/projects\/([a-f\d-]+)\/search\/([a-f\d-]+)\/close$/i.exec(route);
+        if(projectSearchClose){fields(body,['grantEpoch']);if(typeof services.projectFiles?.closeSearch!=='function')throw fail(503,'project_files_unavailable','Project search is unavailable.');const project=normalizeProjectBinding({projectId:projectSearchClose[1],grantEpoch:body.grantEpoch});json(res,200,await guardedRequest(req,res,session,randomUUID(),()=>services.projectFiles.closeSearch(projectSearchClose[2],{binding:project}),project));return true;}
         const projectAction=/^\/api\/assistant\/projects\/([a-f\d-]+)\/(edit|revoke)$/i.exec(route);
         if(projectAction){
           if(!services.projectFiles)throw fail(503,'project_files_unavailable','Project folders are unavailable.');
@@ -409,17 +411,20 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         if (route === BASE + '/stop') {
           fields(body, []);
           for (const controller of active.values()) controller.abort();
-          const providerChecks=await services.providerChecks?.stopAll?.();
-          const continuations=await services.continuations?.stopAll?.();
-          const work=await services.work.stopAll();
-          const desktop = await services.desktop?.cancelAll();
-          const builds = services.builder.stopPending ? (await services.builder.stopPending(OWNER)).builds : [];
-          if (!services.builder.stopPending) for (const job of await services.builder.list(OWNER)) {
-            if (!['queued','generating','validating'].includes(job.status)) continue;
-            try { const result = await services.builder.cancel(job.id, OWNER); builds.push({ id: job.id, status: result.status }); }
-            catch { builds.push({ id: job.id, status: 'check_required' }); }
-          }
-          json(res, 200, { stopped: true, desktop: desktop || null, builds,work,...(continuations?{continuations}:{}),...(providerChecks?{providerChecks}:{}) }); return true;
+          // Initiate every Stop participant before awaiting any cleanup. A file
+          // reader may take time to settle; unrelated Work must stop immediately.
+          const initiate=stop=>{try{return Promise.resolve(stop());}catch(error){return Promise.reject(error);}};
+          const stopping=await Promise.allSettled([
+            initiate(()=>services.work.stopAll()),
+            initiate(()=>services.providerChecks?.stopAll?.()),
+            initiate(()=>services.continuations?.stopAll?.()),
+            initiate(()=>services.desktop?.cancelAll()),
+            initiate(async()=>{if(services.builder.stopPending)return(await services.builder.stopPending(OWNER)).builds;const builds=[];for(const job of await services.builder.list(OWNER)){if(!['queued','generating','validating'].includes(job.status))continue;try{const result=await services.builder.cancel(job.id,OWNER);builds.push({id:job.id,status:result.status});}catch{builds.push({id:job.id,status:'check_required'});}}return builds;}),
+            initiate(()=>services.projectFiles?.stopSearches?.()),
+          ]);
+          const failure=stopping.find(result=>result.status==='rejected');if(failure)throw failure.reason;
+          const[work,providerChecks,continuations,desktop,builds,searches]=stopping.map(result=>result.value);
+          json(res, 200, { stopped: true, desktop: desktop || null, builds,work,...(continuations?{continuations}:{}),...(providerChecks?{providerChecks}:{}),...(searches?{searches}:{}) }); return true;
         }
         if (route === BASE + '/desktop/stop') {
           fields(body, []);

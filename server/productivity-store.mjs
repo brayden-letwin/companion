@@ -4,7 +4,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { builtinCatalog, validateWorkflowSteps } from './capability-registry.mjs';
 import { windowContextReference } from './window-context.mjs';
-import { projectReference, projectEditReference, projectReadReference } from './project-files-context.mjs';
+import { projectReference, projectEditReference, projectReadReference, projectSearchReference } from './project-files-context.mjs';
 import {continuationReference} from './continuation-context.mjs';
 import { installWorkStore } from './work-store.mjs';
 import { workflowDefinitionHash } from './workflow-queries.mjs';
@@ -293,6 +293,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
     if(source.projectFileEdit)result.projectFileEdit=projectEditReference(source.projectFileEdit);
     if(source.continuation)result.continuation=continuationReference(source.continuation);
     if(source.projectFileRead||source.sourceTrust==='untrusted_project_file')result.projectFileRead=projectReadReference(source.projectFileRead||source);
+    if(source.projectFileSearch||source.sourceTrust==='untrusted_project_search')result.projectFileSearch=projectSearchReference(source.projectFileSearch||source);
     for(const key of ['task','note','workflow','featureJob','desktopAction','desktopReceipt','workJob'])if(source[key]&&typeof source[key]==='object')result[key]={id:source[key].id,...(source[key].status?{status:source[key].status}:{}),...(key==='workJob'?{conversationId:source[key].conversationId,providerId:source[key].providerId}:{}),...(typeof source[key].outcomeUnknown==='boolean'?{outcomeUnknown:source[key].outcomeUnknown}:{}),...(key==='desktopAction'?{requiresFreshPreview:true}:{})};
     if(source.capability)result.capability={id:source.capability.id,name:source.capability.name,version:source.capability.version,hash:source.capability.hash};
     if(Array.isArray(source.hostActions))result.hostActions=source.hostActions.slice(0,12).map(action=>({id:action.id,tool:action.tool,status:action.status,result:minimalResult(action.result,depth+1)}));
@@ -309,6 +310,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
     if(key==='projectFileEdit')return projectEditReference(value);
     if(key==='continuation')return continuationReference(value);
     if(key==='projectFileRead'||value?.sourceTrust==='untrusted_project_file')return projectReadReference(value);
+    if(key==='projectFileSearch'||value?.sourceTrust==='untrusted_project_search')return projectSearchReference(value);
     if(value?.sourceType==='selected_window_accessibility')return{...minimalResult(value),readable:value.readable===true,sourceType:'selected_window_accessibility',trust:'untrusted_source_data',sourceOmitted:true};
     if (typeof value === 'string') return value.length > size ? value.slice(0, size) + '… [details truncated]' : value;
     if(key==='hostActions'&&Array.isArray(value))return minimalResult({hostActions:value}).hostActions;
