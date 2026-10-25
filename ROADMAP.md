@@ -79,7 +79,8 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 - [x] Work with explicitly chosen project files; broader binary formats and multi-file search remain separate work.
 - [ ] Add project organization and better task scheduling; extend the retained conversation/context foundation where real use needs it.
 - [x] Paginated task reads, explicit completeness metadata, complete detail sections, and actual full-set/project counts for larger workspaces.
-- [ ] Improve workflow editing and failure recovery while keeping each action's outcome visible.
+- [x] Edit existing routines through voice/chat with actual IDs, bounded exact-definition reads, revision/hash checks, preserved disabled state and capability pins. Explicit UI enable/disable and failed-step receipts keep outcomes visible; new runs still start at step one.
+- [ ] Broader workflow recovery and targeted step editing for very large definitions, without replaying completed effects.
 - [ ] Add export, backup, restore, and migration for productivity data and build history.
 - [ ] Keep the main interface simple as new tools are added; test whether people can find and use them by voice.
 

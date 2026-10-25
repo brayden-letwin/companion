@@ -12,6 +12,9 @@ COMPANION — START HERE
         Save a note: the next meeting needs an agenda.
         Start 25 minutes of focus time.
    You can also edit Tasks and Notes directly.
+   Workflows saves reusable routines. Ask to edit, rename, pause or enable one;
+   Companion keeps its existing ID. Saving or enabling does not run it.
+   A fresh Run starts at step one and can repeat earlier completed actions.
    Computer can search/open apps and read a window you choose.
    Tools > Files lets you choose a project folder for text/code work.
    Save requested edits, inspect Recent edits, and Undo recent changes.

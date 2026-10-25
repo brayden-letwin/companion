@@ -26,6 +26,8 @@ For a function needed by voice/chat, workflows, panels and external AI tools, us
 
 Workflow saves and runs validate every step against that same catalog. Retain custom version/hash pins and require explicit reselection after a capability changes. A terminal run receipt belongs to its original definition; retrying it must not execute newly appended steps, resume interrupted work or repeat completed effects. Keep the shared per-request execution budget across nested calls.
 
+Workflow maintenance targets the actual saved ID and current workspace revision. Bound discovery and exact-definition pages, retain their hashes and Unicode-safe cursors, preserve omitted fields and custom action pins, and never turn an edit into a run. Explicit enable/disable changes metadata without revalidating unavailable steps; actual execution still validates them. Store the original workflow mutation result atomically with its operation receipt so retries report that original outcome after later edits or restart. Legacy receipts without an original definition must say so rather than borrow today's definition. Disabled routines stay disabled when edited unless explicitly enabled.
+
 After an uncertain workflow response, retain only its workflow ID and operation ID in browser storage. Offer an explicit Check last run with that same identity across reload; never automatically resend, substitute a new operation ID, or validate a changed definition before reading the original receipt. Distinguish live running, restart-interrupted, and terminal results.
 
 ## Build follow-through

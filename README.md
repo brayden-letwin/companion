@@ -33,7 +33,9 @@ Teach a lasting preference explicitly, such as “Remember that I prefer short r
 
 New callable functions now share one registry. Voice/chat discovers them, panels call them, saved workflows retain their exact versions, and connected AI tools see the same schemas and results. Open **Tools** to find successfully loaded panels and their spoken names. An unavailable or ambiguous name opens the catalog for a choice. A panel alone is not a callable function: [CAPABILITIES.md](docs/CAPABILITIES.md) describes the actual executor, test cases, guarded runtime, review and restart contract.
 
-Each workflow run retains its original definition and real partial results. An exact retry returns that run's receipt even if the workflow was later edited or disabled. Changed or removed custom actions require review before a fresh run; they are never silently replaced. Generated capability behavior checks execute actual code with fixture-only host effects. Those checks supplement concrete review and live acceptance rather than proving every possible feature correct.
+Ask Companion to edit, rename, pause or enable an existing routine by voice or chat; it keeps the actual saved ID and checks the current revision. **Workflows** also has direct edit and enable/disable controls. A paused routine stays paused when edited. Saving or enabling it does not run it. [Saved routines](docs/WORKFLOWS.md) explains exact edits, changed actions and recovery.
+
+Each workflow run retains its original definition and real partial results. An exact retry returns that run's receipt even if the workflow was later edited or disabled. A fresh run starts at step one and can repeat earlier effects, including actions completed inside a failed step. Changed or removed custom actions require review before a fresh run; they are never silently replaced. Generated capability behavior checks execute actual code with fixture-only host effects. Those checks supplement concrete review and live acceptance rather than proving every possible feature correct.
 
 **Tools → Files** connects a folder you choose to chat, voice, Work and connected AI tools. Read and save requested UTF-8 text/code files, inspect actual edit history, and Undo recent edits. Each request keeps its original folder; removing access stops dependent future operations. Companion’s own source and private data stay on the Build/review path. See [Project files](docs/PROJECT_FILES.md) for access, recovery and size limits.
 
@@ -155,7 +157,9 @@ npm test
 npm run check
 ```
 
-The 0.18 update passed **713 Node tests** and **66 source syntax checks**. Real GPT and local Ollama completion tests passed through Settings in an isolated app; reload and service restart preserved their original results without another model request. The desktop corner and its own restart control were inspected, and narrow connection cards now put actions below readable details. The primary app serves 0.18 with its saved workspace unchanged. [QA.md](QA.md) records the live evidence and remaining human-voice and API-key-account checks.
+The 0.19 update passed **745 Node tests** and **67 source syntax checks**. Real GPT edited one existing paused routine without duplicating or running it. The actual browser renamed, enabled, ran and disabled it; a service restart preserved its exact state and single note. The primary app serves 0.19 with all eight original productivity tables unchanged from its backup. [QA.md](QA.md) records live evidence separately from human-voice and account checks still open.
+
+The 0.18 update passed **713 Node tests** and **66 source syntax checks**. Real GPT and local Ollama completion tests passed through Settings in an isolated app; reload and service restart preserved their original results without another model request. The desktop corner and its own restart control were inspected, and narrow connection cards now put actions below readable details.
 
 The 0.17 update passed **656 Node tests** and **64 source syntax checks**. In an isolated app, a seeded failing duration tool received one real GPT correction, passed its unchanged acceptance cases, ran through GPT after reviewed activation, and rolled back to all 156 original source files. The first failure remains inspectable.
 
