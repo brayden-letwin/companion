@@ -1,4 +1,5 @@
 import { createVoiceSession } from './voice-session.mjs';
+import { createProjectFilesUI } from './project-files.mjs';
 const $ = id => document.getElementById(id);
 const shellCandidate = window.companionShell;
 const nativeShell = shellCandidate?.desktop===true&&['corner','workspace'].includes(shellCandidate.mode)
@@ -21,6 +22,7 @@ let desktopStatus=null, desktopActions=[], desktopRefreshPromise=null, desktopEp
 let desktopExecutionGeneration=0, activeDesktopRequest=null, desktopStopPromise=null, desktopSnapshot=null, desktopReview=null, desktopInputTarget=null;
 let desktopReviewGeneration=0;
 let selectedWindowContext=null,windowContextGeneration=0,windowContextRenderKey='';
+let projectFilesUI=null,selectedProject=null,projectSelectionGeneration=0,projectAccessPending=null,projectRestored=false;
 let voiceDialogOverride=false;
 let voiceSession=null,voiceSessionState={enabled:false,optedIn:false,visible:true,status:'off'},voiceCaptureContext=null,voiceFirstContext=null,activeVoiceSegment=null,voiceOwnershipRequest=null,voiceOwnsCapture=false;
 let chatOpen=false,memoryBusy=false;
@@ -82,7 +84,7 @@ function renderConversationControls(){
   $('conversation-error').textContent=conversationError;
   $('conversation-earlier').hidden=!conversationHasEarlier;$('conversation-load-earlier').disabled=!!conversationEarlierRequest||!!runtimeReconnectPromise;$('conversation-load-earlier').textContent=conversationEarlierRequest?'Loading…':'Load earlier';
   const contextBlocked=!!selectedWindowContext&&selectedWindowContext.status!=='ready';
-  const cannotSend=turnBusy||!!runtimeReconnectPromise||runtimeRestartSubmitting||desktopToolBusy||desktopMutationBusy||conversationLoading||running||!!uncertain||contextBlocked;
+  const cannotSend=turnBusy||!!runtimeReconnectPromise||runtimeRestartSubmitting||desktopToolBusy||desktopMutationBusy||conversationLoading||running||!!uncertain||contextBlocked||!projectReady();
   $('send-question').disabled=cannotSend;
   for(const open of $('work-detail').querySelectorAll('.work-conversation-open'))open.disabled=busy;
   if(running||uncertain||conversationLoading||contextBlocked)$('mic-button').disabled=true;
@@ -110,8 +112,8 @@ function renderSavedConversation(){
   const labels={running:'Working…',failed:'Could not finish',cancelled:'Stopped',interrupted:'Interrupted'};
   for(const turn of turns){
     const user=addMessage('user',typeof turn.message==='string'?turn.message:'');user.dataset.turnId=turn.id;
-    if(turn.reply&&typeof turn.reply.text==='string'){const provider=providers.find(item=>item.id===(turn.reply.providerId||turn.providerId));const answer=addMessage('assistant',turn.reply.text,'Companion'+(provider?' · '+provider.label:''));renderActionReceipts(answer,turn.reply.actions,{historical:true});appendWindowContextProvenance(answer,turn.reply.windowContext);attachSavedFeatureLink(answer,turn.reply.featureJob);appendWorkLink(answer,turn.reply.workJob);}
-    else if(turn.status!=='completed'){const fallback=turn.status==='interrupted'?'Companion restarted before this request finished. Check completed actions before sending a new request.':turn.status==='cancelled'?'Stopped. Actions already completed remain saved.':turn.status==='failed'?'This request did not finish. Completed actions remain saved.':'This request is saved and running.';user.append(element('p','saved-turn-status status-'+turn.status,labels[turn.status]||turn.status),element('p','saved-turn-detail',turn.error?.message||fallback));renderActionReceipts(user,turn.error?.actions,{historical:true});appendWindowContextProvenance(user,turn.error?.windowContext);}
+    if(turn.reply&&typeof turn.reply.text==='string'){const provider=providers.find(item=>item.id===(turn.reply.providerId||turn.providerId));const answer=addMessage('assistant',turn.reply.text,'Companion'+(provider?' · '+provider.label:''));renderActionReceipts(answer,turn.reply.actions,{historical:true});appendWindowContextProvenance(answer,turn.reply.windowContext);appendProjectProvenance(answer,turn.reply.projectContext);attachSavedFeatureLink(answer,turn.reply.featureJob);appendWorkLink(answer,turn.reply.workJob);}
+    else if(turn.status!=='completed'){const fallback=turn.status==='interrupted'?'Companion restarted before this request finished. Check completed actions before sending a new request.':turn.status==='cancelled'?'Stopped. Actions already completed remain saved.':turn.status==='failed'?'This request did not finish. Completed actions remain saved.':'This request is saved and running.';user.append(element('p','saved-turn-status status-'+turn.status,labels[turn.status]||turn.status),element('p','saved-turn-detail',turn.error?.message||fallback));renderActionReceipts(user,turn.error?.actions,{historical:true});appendWindowContextProvenance(user,turn.error?.windowContext);appendProjectProvenance(user,turn.error?.projectContext);}
   }
   updateCornerPreview(turns.at(-1)?.reply?.text||turns.at(-1)?.message||'');renderCorner();
   if(!nearBottom&&!localChatTurn)scroll.scrollTop=previousTop;
@@ -197,14 +199,15 @@ function setChatOpen(value){chatOpen=!!value;document.body.classList.toggle('cha
 $('chat-toggle').addEventListener('click',()=>setChatOpen(!chatOpen));
 $('voice-home').addEventListener('click',()=>setChatOpen(false));
 function showView(view) {
-  if(!['today','tasks','notes','workflows','build','settings','desktop','work'].includes(view)&&!extensions.has(view))return;
+  if(!['today','tasks','notes','workflows','build','settings','desktop','work','files'].includes(view)&&!extensions.has(view))return;
   currentView=view;document.body.classList.toggle('tools-open',view!=='today');$('voice-home').setAttribute('aria-pressed',String(view==='today'&&!chatOpen));
   document.querySelectorAll('.view-panel').forEach(panel=>panel.hidden=panel.id!==view+'-view');
   document.querySelectorAll('[data-view]').forEach(item=>{item.classList.toggle('active',item.dataset.view===view);item.setAttribute('aria-current',item.dataset.view===view?'page':'false');});
-  $('view-title').textContent=extensions.get(view)?.title||({today:'Chat',tasks:'Tasks',notes:'Notes',workflows:'Workflows',build:'Build a feature',settings:'Settings',desktop:'Computer',work:'Work'})[view];
+  $('view-title').textContent=extensions.get(view)?.title||({today:'Chat',tasks:'Tasks',notes:'Notes',workflows:'Workflows',build:'Build a feature',settings:'Settings',desktop:'Computer',work:'Work',files:'Files'})[view];
   $('content-scroll').scrollTop=0;
   if(view==='settings'){renderMemory();renderProviders();renderRuntime();if(!mcpConfiguration)void loadIntegrations();void refreshDesktop().catch(error=>{$('desktop-settings-status').textContent=error.message;});}
   if(view==='build'){renderJobs();refreshJobsSafely();}
+  if(view==='files')void projectFilesUI?.refresh();
   if(view==='workflows')void refreshToolCatalog({quiet:true});
   if(view==='work'){ensureCornerExpanded();$('tools-menu').open=false;renderWork();void refreshWork({quiet:true});}
   if(view==='desktop')void refreshDesktop().catch(error=>{$('desktop-error').textContent=error.message;});
@@ -220,10 +223,47 @@ async function api(path,options={}) {
   try{response=await fetch('/api/assistant/'+path,{...rest,headers,credentials:'same-origin',cache:'no-store',redirect:'error',signal});}
   catch(error){if(error.name==='AbortError')throw error;throw new Error('Companion’s service could not be reached. Double-click Start Companion.cmd, then check again.');}
   let data;try{data=await response.json();}catch{throw new Error('The service returned an unreadable response. Check the connection and try again.');}
-  if(!response.ok){const error=new Error(data?.error?.message||'This request could not be completed.');error.code=data?.error?.code;error.status=response.status;error.workspace=data?.workspace;error.actions=data?.actions;error.conversation=data?.conversation;error.conversationId=data?.conversationId;error.hostActions=data?.hostActions;error.capability=data?.capability;error.workJob=data?.workJob;throw error;}
+  if(!response.ok){const error=new Error(data?.error?.message||'This request could not be completed.');error.code=data?.error?.code;error.status=response.status;error.workspace=data?.workspace;error.actions=data?.actions;error.conversation=data?.conversation;error.conversationId=data?.conversationId;error.hostActions=data?.hostActions;error.capability=data?.capability;error.workJob=data?.workJob;error.projectFileEdit=data?.projectFileEdit;error.projectContext=data?.projectContext;throw error;}
   return data;
 }
 async function boundedApi(path,options={},milliseconds=15000){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),milliseconds);try{return await api(path,{...options,signal:controller.signal});}catch(error){if(error.name==='AbortError')throw new Error('This request took too long. Check the connection and try again.');throw error;}finally{clearTimeout(timeout);}}
+function validProjectSelection(value){return!!value&&typeof value.projectId==='string'&&/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(value.projectId)&&Number.isSafeInteger(value.grantEpoch)&&value.grantEpoch>0;}
+function projectBinding(value=selectedProject){return value?{projectId:value.projectId,grantEpoch:value.grantEpoch}:null;}
+function projectReady(){return!selectedProject||selectedProject.status==='ready';}
+function captureProjectContext(){return{project:projectBinding(),generation:projectSelectionGeneration};}
+function currentProjectContext(context){return!!context&&context.generation===projectSelectionGeneration&&context.project?.projectId===selectedProject?.projectId&&context.project?.grantEpoch===selectedProject?.grantEpoch;}
+function renderProjectContext(){const pill=$('selected-project-context');pill.hidden=!selectedProject;if(selectedProject){$('project-context-label').textContent='Folder: '+(selectedProject.label||'Project folder');$('project-context-status').textContent=selectedProject.status==='checking'?'Checking folder access…':selectedProject.status==='unavailable'?selectedProject.reason||'Folder unavailable. Leave it or choose it again.':'Requested text files can go to your chosen AI. Recent edits have Undo.';pill.classList.toggle('context-unavailable',selectedProject.status==='unavailable');}renderConversationControls();renderVoiceControls();renderWork();}
+async function projectFilesApi(path,options={},milliseconds=15000){
+  if(runtimeReconnectPromise||runtimeRestartSubmitting)throw new Error('Companion is reconnecting. Check the saved file status after it is ready.');
+  if(path==='projects/choose')cancelTurn(false);
+  const controller=new AbortController(),abort=()=>controller.abort();options.signal?.addEventListener('abort',abort,{once:true});if(options.signal?.aborted)controller.abort();
+  const timeout=setTimeout(abort,Math.max(1000,Math.min(milliseconds,120000)));
+  try{if(!csrfToken)await checkService();return await api(path,{...options,signal:controller.signal});}
+  catch(error){if(error.name==='AbortError'||path==='projects/choose'&&error.code==='request_cancelled')throw Object.assign(new Error(path==='projects/choose'?'Folder selection stopped. Choose the project folder again when ready.':'This file request stopped. Check any unconfirmed save before trying another edit.'),{name:'AbortError'});throw error;}
+  finally{clearTimeout(timeout);options.signal?.removeEventListener('abort',abort);}
+}
+async function refreshProjectAccess(){
+  if(!projectRestored){projectRestored=true;const saved=readStored('selectedProject',null);if(validProjectSelection(saved)){selectedProject={...projectBinding(saved),label:'Project folder',status:'checking'};projectSelectionGeneration++;renderProjectContext();}}
+  if(!selectedProject||projectAccessPending)return projectAccessPending;
+  const stamp=projectSelectionGeneration,binding=projectBinding();
+  projectAccessPending=(async()=>{try{const value=await boundedApi('projects/'+encodeURIComponent(binding.projectId)+'?'+new URLSearchParams({grantEpoch:String(binding.grantEpoch)}));if(stamp!==projectSelectionGeneration||destroyed)return;if(!validProjectSelection(value.project)||value.project.projectId!==binding.projectId||value.project.grantEpoch!==binding.grantEpoch)throw new Error('This folder access changed. Choose it again.');selectedProject={...binding,label:String(value.project.label||'Project folder'),status:'ready'};projectFilesUI?.selectionChanged(selectedProject);}
+    catch(error){if(stamp!==projectSelectionGeneration||destroyed)return;selectedProject={...selectedProject,status:'unavailable',reason:error.message};cancelTurn(false);}
+    finally{if(stamp===projectSelectionGeneration)renderProjectContext();projectAccessPending=null;}})();
+  return projectAccessPending;
+}
+async function selectProject(value){
+  if(runtimeReconnectPromise||runtimeRestartSubmitting)return false;
+  if(value!==null&&!validProjectSelection(value))throw new Error('Choose an existing project folder.');
+  projectRestored=true;const stamp=++projectSelectionGeneration;cancelTurn(false);selectedProject=value?{...projectBinding(value),label:String(value.label||'Project folder'),status:'checking'}:null;
+  store('selectedProject',projectBinding());projectFilesUI?.selectionChanged(selectedProject);renderProjectContext();
+  if(!value)return true;
+  try{const result=await boundedApi('projects/'+encodeURIComponent(value.projectId)+'?'+new URLSearchParams({grantEpoch:String(value.grantEpoch)}));if(stamp!==projectSelectionGeneration||destroyed)return false;if(!validProjectSelection(result.project)||result.project.projectId!==value.projectId||result.project.grantEpoch!==value.grantEpoch)throw new Error('The selected folder could not be confirmed.');selectedProject={...projectBinding(value),label:String(result.project.label||value.label||'Project folder'),status:'ready'};projectFilesUI?.selectionChanged(selectedProject);renderProjectContext();return true;}
+  catch(error){if(stamp!==projectSelectionGeneration||destroyed)return false;selectedProject={...selectedProject,status:'unavailable',reason:error.message};renderProjectContext();return false;}
+}
+function initProjectFiles(){
+  projectFilesUI=createProjectFilesUI({container:$('project-files-container'),api:projectFilesApi,onSelect:selectProject,onRevoke:async binding=>{if(selectedProject?.projectId===binding.projectId)await selectProject(null);},notify:toast});
+  $('project-context-files').addEventListener('click',()=>showView('files'));$('project-context-leave').addEventListener('click',()=>void selectProject(null));
+}
 function activeProvider(){return providers.find(provider=>provider.id===activeProviderId);}
 function applyProviders(value){if(!Array.isArray(value?.providers))throw new Error('AI connections could not be read.');providers=value.providers;activeProviderId=value.activeProviderId||value.defaultProviderId||'';renderProviders();renderService();}
 async function checkService({reconnecting=false,force=false,deadline=Infinity}={}){
@@ -244,6 +284,7 @@ async function checkService({reconnecting=false,force=false,deadline=Infinity}={
       if(results[3].status==='fulfilled'&&Array.isArray(results[3].value.jobs)){jobs=results[3].value.jobs;if(!selectedJobId&&jobs.length)selectedJobId=jobs[0].id;renderJobs();}else if(results[3].status==='rejected')serviceError||=results[3].reason.message;
       if(results[4].status==='fulfilled')applyRuntime(results[4].value);
       if(results[5].status==='fulfilled')applyDesktopStatus(results[5].value);
+      await refreshProjectAccess();
       void refreshConversations({initialize:true,quiet:true});void refreshToolCatalog({quiet:true});void refreshWork({quiet:true});
       return {workspaceReady:results[2].status==='fulfilled',jobsReady:results[3].status==='fulfilled',runtimeReady:results[4].status==='fulfilled',runtime:results[4].status==='fulfilled'?clone(runtimeInfo):null};
     }catch(error){if(check===serviceCheckGeneration){serviceError=error.message;providers=[];activeProviderId='';service={transcriptionReady:false};}return {workspaceReady:false,jobsReady:false,runtimeReady:false};}
@@ -942,7 +983,7 @@ function renderWork(){
   const actions=element('div','work-actions');if(WORK_ACTIVE.has(job.status)){const stop=button('Stop this work','quiet-button',()=>void cancelWork(job.id));stop.disabled=workCancelling.has(job.id)||job.cancelRequested===true||!!runtimeReconnectPromise;actions.append(stop);}
   const open=button('Open conversation','quiet-button work-conversation-open',()=>void openWorkConversation(job.id));open.disabled=conversationLocallyBusy()||conversationLoading||!!runtimeReconnectPromise;actions.append(open);detail.append(actions);
   if(job.status==='waiting_for_review'){detail.append(element('p','','This run stopped at a computer action that needs your review. Approving it does not restart the work automatically.'));const pending=(job.outcome?.actions||[]).find(action=>action.result?.desktopAction?.id);if(pending)detail.append(button('Review computer action','secondary-button',()=>void openDesktopReview(pending.result.desktopAction.id)));}
-  const outcome=job.outcome;if(outcome){if(outcome.error)detail.append(element('p','inline-error',outcome.error.message||'This work could not finish. Completed actions remain saved.'));if(typeof outcome.text==='string'&&outcome.text){detail.append(element('h3','','Result'),element('div','work-output',outcome.text));}if(outcome.textHasMore){const more=button('Load more result','quiet-button',()=>void loadWorkOutcome(job.id,'text'));more.disabled=workDetailPending.has(job.id);detail.append(more);}if(Array.isArray(outcome.actions)&&outcome.actions.length){detail.append(element('h3','','Saved actions'));renderActionReceipts(detail,outcome.actions,{historical:true});const builds=new Set();for(const action of outcome.actions){const build=action.result?.featureJob?.job||action.result?.featureJob;if(build?.id&&!builds.has(build.id)){builds.add(build.id);detail.append(element('p','form-hint','Feature build · '+(JOB_LABELS[build.status]||build.status||'Requested')+' (saved status). Open the build for its current state.'));attachSavedFeatureLink(detail,build);}}}if(outcome.actionsHasMore){const more=button('Load more actions','quiet-button',()=>void loadWorkOutcome(job.id,'actions'));more.disabled=workDetailPending.has(job.id);detail.append(more);}appendWindowContextProvenance(detail,outcome.windowContext);}
+  const outcome=job.outcome;if(outcome){if(outcome.error)detail.append(element('p','inline-error',outcome.error.message||'This work could not finish. Completed actions remain saved.'));if(typeof outcome.text==='string'&&outcome.text){detail.append(element('h3','','Result'),element('div','work-output',outcome.text));}if(outcome.textHasMore){const more=button('Load more result','quiet-button',()=>void loadWorkOutcome(job.id,'text'));more.disabled=workDetailPending.has(job.id);detail.append(more);}if(Array.isArray(outcome.actions)&&outcome.actions.length){detail.append(element('h3','','Saved actions'));renderActionReceipts(detail,outcome.actions,{historical:true});const builds=new Set();for(const action of outcome.actions){const build=action.result?.featureJob?.job||action.result?.featureJob;if(build?.id&&!builds.has(build.id)){builds.add(build.id);detail.append(element('p','form-hint','Feature build · '+(JOB_LABELS[build.status]||build.status||'Requested')+' (saved status). Open the build for its current state.'));attachSavedFeatureLink(detail,build);}}}if(outcome.actionsHasMore){const more=button('Load more actions','quiet-button',()=>void loadWorkOutcome(job.id,'actions'));more.disabled=workDetailPending.has(job.id);detail.append(more);}appendWindowContextProvenance(detail,outcome.windowContext);}appendProjectProvenance(detail,outcome?.projectContext||job.project);
   if(typeof job.prompt==='string'){const original=element('details','work-original');original.dataset.jobId=job.id;original.open=originalOpen;original.append(element('summary','','Original request'),element('p','',job.prompt));detail.append(original);}else if(workDetailPending.has(job.id))detail.append(element('p','form-hint','Loading the original request and saved result…'));
   if(job.progress?.events?.length){const events=element('details','work-events work-progress');events.dataset.jobId=job.id;events.open=progressOpen;events.append(element('summary','','Progress'));for(const event of job.progress.events.slice(-12).reverse())events.append(element('p','',(timeLabel(event.at)?timeLabel(event.at)+' · ':'')+(event.message||event.type||'')));detail.append(events);}
 }
@@ -962,8 +1003,8 @@ async function loadWorkOutcome(id,part){
     catch(error){if(selectedWorkId===id)workError=error.message;}finally{if(workDetailPending.get(id)===request)workDetailPending.delete(id);renderWork();}})();workDetailPending.set(id,request);renderWork();return request;
 }
 async function submitWork(){
-  syncPendingWorkIds();if(workSubmitting||pendingWorkIds.size||runtimeReconnectPromise)return;const prompt=$('work-prompt').value.trim();if(!prompt)return;const provider=activeProvider(),source=captureWindowContext();if(!provider?.ready||!currentWindowContext(source)||!windowContextReady()){workError='Choose a ready AI connection and an available window context before handing off.';renderWork();return;}
-  const id=crypto.randomUUID(),selection=workSelectionGeneration,body={id,prompt,providerId:provider.id,...(source.id?{contextId:source.id}:{})};workSubmitting=true;workError='';persistPendingWork(id);renderWork();
+  syncPendingWorkIds();if(workSubmitting||pendingWorkIds.size||runtimeReconnectPromise)return;const prompt=$('work-prompt').value.trim();if(!prompt)return;const provider=activeProvider(),source=captureWindowContext(),fileContext=captureProjectContext();if(!provider?.ready||!currentWindowContext(source)||!windowContextReady()||!currentProjectContext(fileContext)||!projectReady()){workError='Choose a ready AI connection and check the selected window and project folder before handing off.';renderWork();return;}
+  const id=crypto.randomUUID(),selection=workSelectionGeneration,body={id,prompt,providerId:provider.id,...(source.id?{contextId:source.id}:{}),...(fileContext.project?{project:fileContext.project}:{})};workSubmitting=true;workError='';persistPendingWork(id);renderWork();
   try{const value=await boundedApi('work',{method:'POST',body:JSON.stringify(body)},20000);validWorkJob(value.job,id);rememberWorkJob(value.job,{detail:true});persistPendingWork(id,{remove:true});workTotal=Math.max(workTotal,workJobs.length);if($('work-prompt').value.trim()===prompt)$('work-prompt').value='';if(selection===workSelectionGeneration){selectedWorkId=id;workSelectionGeneration++;}toast('Work handed off. You can keep talking.');}
   catch(error){if(error.status&&error.status>=400&&error.status<500&&![408,409,429,499].includes(error.status))persistPendingWork(id,{remove:true});workError=pendingWorkIds.has(id)?'The handoff has not been confirmed. Check handoff before starting it again.':error.message;}
   finally{workSubmitting=false;renderWork();}
@@ -994,11 +1035,23 @@ function addMessage(role,text,label=role==='user'?'You':'Companion'){
   $('messages').append(article);messages.push({role,text});updateCornerPreview(text);
   $('content-scroll').scrollTop=$('content-scroll').scrollHeight;return article;
 }
+function appendProjectProvenance(container,project){
+  if(!container||!validProjectSelection(project))return;
+  container.append(element('p','form-hint','Project folder · '+String(project.label||'Chosen folder')+' · access version '+project.grantEpoch));
+}
+async function openProjectReceipt(project){
+  if(!validProjectSelection(project))return;
+  const pending=selectProject({...projectBinding(project),label:project.label||'Original project folder'}),stamp=projectSelectionGeneration;
+  const ready=await pending;if(stamp!==projectSelectionGeneration||selectedProject?.projectId!==project.projectId||selectedProject?.grantEpoch!==project.grantEpoch)return;
+  showView('files');if(!ready)toast('The original folder is unavailable. Choose it again to inspect retained edits.');
+}
 function renderActionReceipts(container,actions,{historical=false,nested=false}={}){
   if(!container||!Array.isArray(actions))return;
   const labels={manage_work:'Work',create_task:'Task saved',update_task:'Task updated',complete_task:'Task completed',save_note:'Note saved',list_tasks:'Tasks checked',read_task:'Task opened',summarize_tasks:'Tasks counted',window_context:'Window read',list_notes:'Notes checked',search_notes:'Notes searched',read_note:'Note opened',start_focus:'Focus started',stop_focus:'Focus ended',save_workflow:'Workflow saved',run_workflow:'Workflow run',build_feature:'Feature build',list_feature_builds:'Builds checked',inspect_feature_build:'Build checked',list_capabilities:'Tools checked',run_capability:'Tool run',get_time:'Current time'};
   for(const action of actions){let result=action.result||{};if(historical&&result.desktopAction){const current=desktopActions.find(item=>item.id===result.desktopAction.id);if(current)result={...result,desktopAction:current};}const failed=action.status==='failed'||!!action.error||!!result.error;let text;
-    if(failed){const error=result.error||action.error;text=(labels[action.tool]||toolLabel(action.arguments?.name||action.tool)||'Action')+' · could not finish: '+(typeof error==='string'?error:error?.message||'Unknown error');}
+    if(result.projectFileEdit){const edit=result.projectFileEdit;const label=edit.status==='applied'?(edit.receiptPending?'File changed · receipt needs checking':'File saved'):edit.status==='recovery_required'?'File edit needs recovery review':edit.status==='interrupted'?'File edit interrupted':'File edit failed';text=label+(edit.path?' · '+edit.path:'');}
+    else if(result.projectFileRead||result.sourceTrust==='untrusted_project_file'){const read=result.projectFileRead||result;text='File read'+(read.path?' · '+read.path:'')+(read.hasMore?' · partial page':'')+(historical?' · saved read':'');}
+    else if(failed){const error=result.error||action.error;text=(labels[action.tool]||toolLabel(action.arguments?.name||action.tool)||'Action')+' · could not finish: '+(typeof error==='string'?error:error?.message||'Unknown error');}
     else if(result.desktopAction){if(!historical)ingestDesktopResult(result);text=(desktopPending(result.desktopAction)?(historical?'Prepared desktop action · ':'Needs your review · '):DESKTOP_LABELS[result.desktopAction.status]+' · ')+result.desktopAction.summary;}
     else if(result.desktopReceipt){if(!historical)ingestDesktopResult(result);text=result.desktopReceipt.summary;}
     else if(result.capability)text=toolLabel(result.capability.name||action.arguments?.name||action.tool)+' · completed';
@@ -1011,6 +1064,7 @@ function renderActionReceipts(container,actions,{historical=false,nested=false}=
     else if(result.formatted)text=result.formatted;
     else text=action.summary||result.summary||result.message||labels[action.tool]||action.tool||'Action completed';
     const receipt=element('div','action-receipt'+(failed?' receipt-failed':''),text);container.append(receipt);
+    if(result.projectFileEdit){const edit=result.projectFileEdit;receipt.append(button('Open this project ↗','quiet-button',()=>void openProjectReceipt(edit)));if(edit.undoAvailable)receipt.append(element('span','form-hint','Undo is available in this folder’s edit history.'));if(edit.outcomeUnknown)receipt.append(element('p','inline-error','The final file contents need checking. Review this edit before another request.'));}
     if(result.workJob)appendWorkLink(receipt,result.workJob,{historical});
     if(!failed&&result.capability&&result.value)receipt.append(element('pre','capability-output',JSON.stringify(result.value,null,2).slice(0,4000)));
     if(!nested&&Array.isArray(result.hostActions))renderActionReceipts(receipt,result.hostActions,{historical,nested:true});
@@ -1025,6 +1079,7 @@ async function runCommand(value,options={}){
   const message=value.trim();if(!message)return;if(await localDesktopApproval(message,options))return;if(await localVoiceCommand(message,options))return;if(options.voice&&options.approvalContext){$('desktop-review-error').textContent='Say “approve desktop action” or “cancel desktop action” for this preview. These words have not approved any input.';return;}
   if(turnBusy||runtimeReconnectPromise||runtimeRestartSubmitting||desktopToolBusy||desktopMutationBusy||conversationLoading)return;$('question-error').textContent='';
   const sourceContext=Object.hasOwn(options,'windowContext')?options.windowContext:captureWindowContext();if(!currentWindowContext(sourceContext)||!windowContextReady()){renderWindowContext();$('question-error').textContent='The selected window context changed or is unavailable. Clear it or select the window again before sending.';if(options.voice)voiceSession?.disable({remember:false});return;}
+  let fileContext=Object.hasOwn(options,'projectContext')?options.projectContext:captureProjectContext();if(!fileContext&&!selectedProject)fileContext=captureProjectContext();if(!currentProjectContext(fileContext)||!projectReady()){$('question-error').textContent='The project folder changed or is unavailable. Choose it again or leave the folder before sending.';if(options.voice)voiceSession?.disable({remember:false});return;}
   const context=Object.hasOwn(options,'conversationContext')?options.conversationContext:captureConversationContext();if(!currentConversationContext(context)){$('question-error').textContent='The conversation changed. Review your words and send them in the intended conversation.';if(options.voice)voiceSession?.disable({remember:false});return;}
   if(conversationId&&conversationUncertain.has(conversationId)){$('question-error').textContent='Refresh this saved conversation before sending another request.';if(options.voice)voiceSession?.disable({remember:false});return;}
   if(!options.voice)ensureCornerExpanded();if(!options.voice&&(recording||microphoneOpening)){disableHandsFree();stopRecording(false);}
@@ -1032,14 +1087,15 @@ async function runCommand(value,options={}){
   if(!provider?.ready){$('question-error').textContent=provider?.unavailableReason||'Choose an AI connection in Settings first. Your message stays here.';if(options.voice)voiceSession?.disable({remember:false});return;}
   conversationInitialized=true;const turn=++generation,requestId=crypto.randomUUID();setBusy(true);setState('thinking','Opening your saved conversation…');let targetId=context.id;
   try{
-    const detail=await ensureConversation(context);if(turn!==generation||destroyed||!currentConversationContext(context)||!currentWindowContext(sourceContext))return;if(!windowContextReady())throw new Error('The selected window context is unavailable. Clear it or select the window again.');
+    const detail=await ensureConversation(context);if(turn!==generation||destroyed||!currentConversationContext(context)||!currentWindowContext(sourceContext)||!currentProjectContext(fileContext))return;if(!windowContextReady())throw new Error('The selected window context is unavailable. Clear it or select the window again.');
     if(!context.id){conversationDrafts.set(detail.id,$('question').value);conversationDrafts.delete('new');conversationId=detail.id;context.id=detail.id;targetId=detail.id;newConversationRequest=null;store('conversationId',detail.id);}
     adoptConversation(detail,context);conversationInitialized=true;conversationError='';
     if(detail.activeRequestId||detail.turns.some(item=>item.status==='running'))throw new Error('A request is already running in this conversation. Wait, refresh, or open another conversation. Your draft is still here.');
     localChatTurn={id:requestId,conversationId:detail.id,message,providerId,status:'running',startedAt:new Date().toISOString()};renderSavedConversation();showView('today');setState('thinking',provider.label+' is working on your request.');
-    const result=await requestWithTurn('chat',{message,providerId,conversationId:detail.id,expectedRevision:detail.revision,...(sourceContext.id?{contextId:sourceContext.id}:{})},{requestId},turn);
+    const result=await requestWithTurn('chat',{message,providerId,conversationId:detail.id,expectedRevision:detail.revision,...(sourceContext.id?{contextId:sourceContext.id}:{}),...(fileContext.project?{project:fileContext.project}:{})},{requestId},turn);
     if(turn!==generation||destroyed||!currentConversationContext(context))return;if(typeof result.text!=='string')throw new Error('The AI returned an unreadable reply.');
     if(sourceContext.id&&result.windowContext?.contextId!==sourceContext.id)throw Object.assign(new Error('The selected window source could not be confirmed. Select the window again.'),{code:'window_context_unavailable'});
+    if(fileContext.project&&(result.projectContext?.projectId!==fileContext.project.projectId||result.projectContext?.grantEpoch!==fileContext.project.grantEpoch))throw new Error('The original project folder could not be confirmed. Inspect the saved actions before sending another edit.');
     if(result.windowContext&&selectedWindowContext?.id===result.windowContext.contextId){selectedWindowContext.window={...selectedWindowContext.window,title:result.windowContext.title||selectedWindowContext.window.title,appName:result.windowContext.appName||selectedWindowContext.window.appName};renderWindowContext();}
     clearAcceptedDraft(localChatTurn);if(result.workspace)applyWorkspace(result.workspace);else void refreshWorkspace().catch(error=>toast(error.message));
     for(const action of result.actions||[])ingestDesktopResult(action.result);
@@ -1049,7 +1105,7 @@ async function runCommand(value,options={}){
     await refreshConversation();if(turn!==generation||!currentConversationContext(context))return;await speakText(result.text,turn);
   }catch(error){
     if(turn===generation&&currentConversationContext(context)&&error.name!=='AbortError'){
-      $('question-error').textContent=error.message;if(['window_context_unavailable','window_context_empty'].includes(error.code))markWindowContextUnavailable(error.message);
+      $('question-error').textContent=error.message;if(['window_context_unavailable','window_context_empty'].includes(error.code))markWindowContextUnavailable(error.message);if(['project_grant_changed','project_root_changed','project_binding_changed'].includes(error.code)&&selectedProject&&currentProjectContext(fileContext)){selectedProject={...selectedProject,status:'unavailable',reason:error.message};renderProjectContext();}
       if(error.conversation?.id===conversationId)adoptConversation(error.conversation,context);
       if(targetId){if(!error.status)conversationUncertain.set(targetId,{requestId,message});await refreshConversation({quiet:true});}
       void refreshWorkspace().catch(()=>{});if(options.voice)voiceSession?.disable({remember:false});
@@ -1089,7 +1145,7 @@ $('read-aloud').addEventListener('change', () => {
 window.speechSynthesis?.addEventListener('voiceschanged', updateVoiceHelp);
 function disableHandsFree(){$('hands-free').checked=false;updateVoiceHelp();}
 function renderVoiceControls(){
-  $('voice-enable').textContent=voiceSessionState.enabled?'Turn voice off':'Enable voice';$('voice-enable').setAttribute('aria-pressed',String(voiceSessionState.enabled));$('voice-enable').disabled=(!!runtimeReconnectPromise||!!selectedWindowContext&&selectedWindowContext.status!=='ready')&&!voiceSessionState.enabled;
+  $('voice-enable').textContent=voiceSessionState.enabled?'Turn voice off':'Enable voice';$('voice-enable').setAttribute('aria-pressed',String(voiceSessionState.enabled));$('voice-enable').disabled=(!!runtimeReconnectPromise||runtimeRestartSubmitting||!projectReady()||!!selectedWindowContext&&selectedWindowContext.status!=='ready')&&!voiceSessionState.enabled;
   document.body.classList.toggle('voice-enabled',voiceSessionState.enabled);document.body.classList.toggle('voice-listening',['listening','speech'].includes(voiceSessionState.status));updateVoiceHelp();
 }
 function releaseVoiceOwnership(){const entry=voiceOwnershipRequest;voiceOwnershipRequest=null;voiceOwnsCapture=false;entry?.release?.();entry?.resolve?.(false);}
@@ -1107,7 +1163,7 @@ async function ownVoice(action){
   }).catch(error=>{if(voiceOwnershipRequest===entry){releaseVoiceOwnership();$('question-error').textContent=error.message;}});
   return entry.ready;
 }
-function makeVoiceContext(){conversationInitialized=true;return {providerId:activeProviderId,conversationContext:clone(captureConversationContext()),windowContext:clone(captureWindowContext()),approvalContext:clone(captureDesktopApprovalContext())};}
+function makeVoiceContext(){conversationInitialized=true;return {providerId:activeProviderId,conversationContext:clone(captureConversationContext()),windowContext:clone(captureWindowContext()),projectContext:clone(captureProjectContext()),approvalContext:clone(captureDesktopApprovalContext())};}
 function initVoiceSession(){
   voiceSession=createVoiceSession({mediaDevices:navigator.mediaDevices,permissions:navigator.permissions,MediaRecorder:window.MediaRecorder,AudioContext:window.AudioContext||window.webkitAudioContext,now:()=>performance.now(),requestFrame:requestAnimationFrame,cancelFrame:cancelAnimationFrame,setTimer:setTimeout,clearTimer:clearTimeout,readOptIn:()=>readStored('voiceEnabled',false)===true,writeOptIn:value=>store('voiceEnabled',value),
     captureContext:()=>{const context=voiceFirstContext||makeVoiceContext();voiceFirstContext=null;voiceCaptureContext=clone(context);return context;},
@@ -1120,7 +1176,7 @@ function initVoiceSession(){
   if(document.hidden||nativeWindowVisible===false)void voiceSession.setVisible(false);renderVoiceControls();
 }
 async function restoreVoiceIfAllowed(){
-  if(!voiceSession||destroyed||document.hidden||nativeWindowVisible===false||!service.transcriptionReady||runtimeReconnectPromise||readStored('voiceEnabled',false)!==true||!windowContextReady()||(voiceSessionState.enabled&&voiceOwnsCapture))return;
+  if(!voiceSession||destroyed||document.hidden||nativeWindowVisible===false||!service.transcriptionReady||runtimeReconnectPromise||readStored('voiceEnabled',false)!==true||!windowContextReady()||!projectReady()||(voiceSessionState.enabled&&voiceOwnsCapture))return;
   await ownVoice(async()=>{await voiceSession.setVisible(true);if(voiceSessionState.enabled)await voiceSession.resume();else await voiceSession.restore();});
 }
 function setVoiceVisible(visible){
@@ -1128,9 +1184,9 @@ function setVoiceVisible(visible){
   if(document.hidden||nativeWindowVisible===false)return Promise.resolve();
   if(voiceOwnsCapture)return voiceSession.setVisible(true).then(()=>voiceSession.resume());return restoreVoiceIfAllowed();
 }
-function maybeResume(){if(!voiceSession||document.hidden||nativeWindowVisible===false||destroyed||turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||!voiceOwnsCapture||(document.querySelector('dialog[open]')&&!voiceDialogOverride))return;void voiceSession.resume();}
+function maybeResume(){if(!voiceSession||!projectReady()||document.hidden||nativeWindowVisible===false||destroyed||turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||!voiceOwnsCapture||(document.querySelector('dialog[open]')&&!voiceDialogOverride))return;void voiceSession.resume();}
 async function startRecording(){
-  if(!voiceSession||microphoneOpening||turnBusy||runtimeReconnectPromise||runtimeRestartSubmitting||desktopToolBusy||desktopMutationBusy||document.hidden||nativeWindowVisible===false||destroyed)return;
+  if(!voiceSession||!projectReady()||microphoneOpening||turnBusy||runtimeReconnectPromise||runtimeRestartSubmitting||desktopToolBusy||desktopMutationBusy||document.hidden||nativeWindowVisible===false||destroyed)return;
   $('question-error').textContent='';voiceDialogOverride=!!document.querySelector('dialog[open]');if(!windowContextReady()&&!captureDesktopApprovalContext()){renderWindowContext();$('question-error').textContent='Clear this unavailable window context or select the window again before recording.';return;}if(!service.transcriptionReady){$('question-error').textContent='Voice is not ready. Open Settings to check the speech service, or use Chat.';return;}
   if(voiceSessionState.enabled&&recording){voiceSession.finish();return;}
   if(voiceSessionState.enabled){const frozen=makeVoiceContext();await ownVoice(async()=>{voiceFirstContext=clone(frozen);await voiceSession.enable();});return;}
@@ -1144,7 +1200,7 @@ async function processVoiceSegment({blob,context,signal}){
   const entry={};activeVoiceSegment=entry;const turn=++generation;voicePipeline=true;setBusy(true);setState('transcribing','Microphone off while Companion works.');
   const abort=()=>{if(activeVoiceSegment===entry)cancelTurn(false,{preserveVoice:true});};signal.addEventListener('abort',abort,{once:true});
   try{const result=await requestWithTurn('transcribe',blob,{raw:true,headers:{'Content-Type':blob.type}},turn);if(signal.aborted||turn!==generation||destroyed)return;if(typeof result.text!=='string'||!result.text.trim())throw new Error('No words were detected. Please try again.');
-    $('question').value=result.text.slice(0,4000);setBusy(false);await runCommand($('question').value,{voice:true,providerId:context?.providerId,conversationContext:context?.conversationContext,windowContext:context?.windowContext,approvalContext:context?.approvalContext});
+    $('question').value=result.text.slice(0,4000);setBusy(false);await runCommand($('question').value,{voice:true,providerId:context?.providerId,conversationContext:context?.conversationContext,windowContext:context?.windowContext,projectContext:context?.projectContext,approvalContext:context?.approvalContext});
   }catch(error){if(!signal.aborted&&activeVoiceSegment===entry){$('question-error').textContent=error.message;voiceSession.disable({remember:false});}}
   finally{signal.removeEventListener('abort',abort);if(activeVoiceSegment===entry){activeVoiceSegment=null;voicePipeline=false;setBusy(false);if(!recording&&!microphoneOpening)setState('idle');maybeResume();}}
 }
@@ -1152,15 +1208,17 @@ async function localVoiceCommand(message,options={}){
   if(!options.voice)return false;const phrase=message.trim().toLowerCase().replace(/[.!?]+$/,'');
   if(['stop listening','microphone off','mic off','turn voice off','disable voice'].includes(phrase)){voiceSession?.disable();stopSpeech();$('question').value='';return true;}
   if(['stop','cancel','stop current work','cancel current work','stop everything'].includes(phrase)){void stopAllActivity(true,{global:true});$('question').value='';return true;}
-  const views={'show work':'work','open work':'work','show tasks':'tasks','open tasks':'tasks','show notes':'notes','open notes':'notes','show workflows':'workflows','open workflows':'workflows','show computer':'desktop','open computer':'desktop','show settings':'settings','open settings':'settings','show memory':'settings','open memory':'settings','show build':'build','open build':'build','build a feature':'build'};
+  const views={'show work':'work','open work':'work','show tasks':'tasks','open tasks':'tasks','show notes':'notes','open notes':'notes','show workflows':'workflows','open workflows':'workflows','show computer':'desktop','open computer':'desktop','show settings':'settings','open settings':'settings','show memory':'settings','open memory':'settings','show build':'build','open build':'build','build a feature':'build','show files':'files','open files':'files'};
   const featureMatch=/^(?:open|show) (?:the )?(?:(?:tool|feature) )?(.+)$/.exec(phrase),featureName=featureMatch?.[1],dynamicMatch=featureName&&[...extensions.values()].some(entry=>featureNames(entry).includes(normalizedFeatureName(featureName))),capabilityMatch=featureName&&toolCatalog.some(item=>item.kind==='capability'&&[item.title,item.name].some(value=>normalizedFeatureName(value)===normalizedFeatureName(featureName))),toolList=['show tools','open tools','list tools','show installed tools'].includes(phrase);
-  const recognized=toolList||!!dynamicMatch||!!capabilityMatch||!!(featureName&&knownFeatureNames.has(normalizedFeatureName(featureName)))||/^(?:open|show) (?:the )?(?:tool|feature) /i.test(phrase)||['show chat','open chat','hide chat','close chat','new conversation','review desktop action','review computer action','close preview'].includes(phrase)||Object.hasOwn(views,phrase);if(!recognized)return false;
+  const recognized=toolList||!!dynamicMatch||!!capabilityMatch||!!(featureName&&knownFeatureNames.has(normalizedFeatureName(featureName)))||/^(?:open|show) (?:the )?(?:tool|feature) /i.test(phrase)||['show chat','open chat','hide chat','close chat','new conversation','leave folder','review desktop action','review computer action','close preview'].includes(phrase)||Object.hasOwn(views,phrase);if(!recognized)return false;
   if(!currentConversationContext(options.conversationContext)){$('question-error').textContent='The conversation changed. Repeat that command here.';voiceSession?.disable({remember:false});return true;}
+  if(options.projectContext&&!currentProjectContext(options.projectContext)||selectedProject&&!options.projectContext){$('question-error').textContent='The project folder changed. Repeat the command in the intended folder.';voiceSession?.disable({remember:false});return true;}
   if(toolList)showToolsList();
   else if(dynamicMatch&&Object.hasOwn(views,phrase))showToolsList('More than one tool matches that name. Choose the installed tool below, or use the bottom controls.');
   else if(featureName&&!Object.hasOwn(views,phrase)&&!['show chat','open chat','show memory','open memory'].includes(phrase)){openFeatureByName(featureName);}
   else if(['show chat','open chat'].includes(phrase)){setChatOpen(true);ensureCornerExpanded();}
   else if(['hide chat','close chat'].includes(phrase))setChatOpen(false);
+  else if(phrase==='leave folder')await selectProject(null);
   else if(phrase==='new conversation')await selectConversation(null,{allowVoiceCommand:true});
   else if(phrase==='close preview')$('desktop-review-dialog').close();
   else if(phrase==='review desktop action'||phrase==='review computer action'){await refreshDesktop();const action=desktopActions.find(desktopPending);if(action)await openDesktopReview(action.id);else toast('No computer action needs review.');}
@@ -1174,9 +1232,9 @@ $('hands-free').addEventListener('change',()=>{if($('hands-free').checked)void s
 $('settings-read-aloud').addEventListener('change',()=>{$('read-aloud').checked=$('settings-read-aloud').checked;$('read-aloud').dispatchEvent(new Event('change'));});
 $('read-aloud').addEventListener('change',()=>{$('settings-read-aloud').checked=$('read-aloud').checked;});
 document.addEventListener('visibilitychange',()=>{if(document.hidden){setVoiceVisible(false);if(voicePipeline||recording||microphoneOpening)cancelTurn(false,{preserveVoice:true});else{disableHandsFree();stopSpeech();}$('provider-key').value='';}else{void setVoiceVisible(true);void checkService();void refreshConversations({initialize:true,quiet:true});}});
-window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
+window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;projectFilesUI?.close();for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
 window.addEventListener('pageshow',event=>{if(!event.persisted)return;destroyed=false;setBusy(false);setState('idle');updateVoiceHelp();void setVoiceVisible(true);void checkService();void loadExtensions();});
-initNativeShell();initVoiceSession();renderWindowContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
+initProjectFiles();initNativeShell();initVoiceSession();renderWindowContext();renderProjectContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
 void checkService();void loadExtensions();
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;renderFocus();if(jobs.some(job=>ACTIVE_JOBS.has(job.status))||currentView==='build')void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});},2000);
 setInterval(()=>{if(!document.hidden&&!destroyed&&!operationBusy&&!runtimeReconnectPromise)void refreshWorkspace().catch(error=>{$('connection-label').textContent=error.message;});},5000);
