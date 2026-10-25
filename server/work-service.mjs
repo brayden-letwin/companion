@@ -32,7 +32,7 @@ export function createWorkService({store,runTurn,concurrency=2}={}){
     const {job,controller}=entry;
     try{
       if(controller.signal.aborted||closed)throw abortError();
-      await runTurn({jobId:job.id,requestId:job.requestId,message:job.prompt,providerId:job.providerId,conversationId:job.conversationId,...(job.contextId?{contextId:job.contextId}:{}),...(job.windowContext?{windowContext:structuredClone(job.windowContext)}:{}),...(job.project?{project:structuredClone(job.project)}:{}),signal:controller.signal,scope:entry.scope,allowDelegation:false,expectedProvider:structuredClone(job.provider),onProgress:update=>{
+      await runTurn({jobId:job.id,requestId:job.requestId,message:job.prompt,providerId:job.providerId,conversationId:job.conversationId,...(job.contextId?{contextId:job.contextId}:{}),...(job.windowContext?{windowContext:structuredClone(job.windowContext)}:{}),...(job.project?{project:structuredClone(job.project)}:{}),...(job.continuation?{continuation:structuredClone(job.continuation)}:{}),signal:controller.signal,scope:entry.scope,allowDelegation:false,expectedProvider:structuredClone(job.provider),onProgress:update=>{
         if(closed||controller.signal.aborted||active.get(job.id)!==entry)return;
         const stage=progressStage(update);if(!stage)return;
         try{store.progressWorkJob(job.id,stage);}catch{/* Optional progress cannot change the actual durable effect receipt. */}

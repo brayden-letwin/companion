@@ -30,6 +30,7 @@ const ASSETS = new Map([
   ['/src/assistant.mjs', ['src/assistant.mjs', 'text/javascript; charset=utf-8']],
   ['/src/voice-session.mjs', ['src/voice-session.mjs', 'text/javascript; charset=utf-8']],
   ['/src/project-files.mjs', ['src/project-files.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/build-continuation.mjs', ['src/build-continuation.mjs', 'text/javascript; charset=utf-8']],
   ['/src/assistant.css', ['src/assistant.css', 'text/css; charset=utf-8']],
   ['/src/core/assistant.mjs', ['src/core/assistant.mjs', 'text/javascript; charset=utf-8']],
   ['/src/core/discussion.mjs', ['src/core/discussion.mjs', 'text/javascript; charset=utf-8']],
@@ -75,7 +76,7 @@ export async function createSharedServer({ dbPath, port = 4174, root = REPO_ROOT
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid shared-room port.');
   const rootReal = await realpath(root);
   if (dbPath !== ':memory:') await mkdir(path.dirname(path.resolve(dbPath)), { recursive: true });
-  const db = new DatabaseSync(dbPath);
+  const db = new DatabaseSync(dbPath === ':memory:' ? dbPath : path.toNamespacedPath(path.resolve(dbPath)));
   db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
     CREATE TABLE IF NOT EXISTS members(id TEXT PRIMARY KEY,name TEXT NOT NULL,name_key TEXT UNIQUE NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','member')),salt TEXT NOT NULL,password_hash TEXT NOT NULL,created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS room(id INTEGER PRIMARY KEY CHECK(id=1),group_id TEXT NOT NULL,name TEXT NOT NULL,revision INTEGER NOT NULL,state_json TEXT NOT NULL);

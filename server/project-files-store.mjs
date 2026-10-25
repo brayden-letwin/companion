@@ -13,7 +13,9 @@ const encode=value=>{const result=JSON.stringify(value);if(!result||Buffer.byteL
 export async function createProjectFilesStore({dataDirectory,now=Date.now}={}){
   if(typeof dataDirectory!=='string'||!path.isAbsolute(dataDirectory))throw new TypeError('Use an absolute private project-files directory.');
   await mkdir(dataDirectory,{recursive:true,mode:0o700});
-  const db=new DatabaseSync(path.join(dataDirectory,'project-files.sqlite'));let closed=false;
+  // SQLite's Windows VFS otherwise fails near MAX_PATH, including when its
+  // WAL/shm suffix pushes a valid database filename over that boundary.
+  const db=new DatabaseSync(path.toNamespacedPath(path.join(dataDirectory,'project-files.sqlite')));let closed=false;
   try{db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000; CREATE TABLE IF NOT EXISTS project_grants(id TEXT PRIMARY KEY,root TEXT NOT NULL,root_key TEXT NOT NULL,identity TEXT NOT NULL,label TEXT NOT NULL,epoch INTEGER NOT NULL,revoked INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS project_edits(sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,digest TEXT NOT NULL,project_id TEXT NOT NULL,epoch INTEGER NOT NULL,path TEXT NOT NULL,action TEXT NOT NULL,state TEXT NOT NULL,result_json TEXT,error_json TEXT,backup_bytes INTEGER NOT NULL DEFAULT 0,pruned INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);");}catch(error){db.close();throw error;}
   const check=()=>{if(closed)throw fail('project_files_closed','Project files are shutting down.',503);};
   const transaction=callback=>{check();db.exec('BEGIN IMMEDIATE');try{const result=callback();db.exec('COMMIT');return result;}catch(error){db.exec('ROLLBACK');throw error;}};

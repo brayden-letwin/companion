@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { builtinCatalog, validateWorkflowSteps } from './capability-registry.mjs';
 import { windowContextReference } from './window-context.mjs';
 import { projectReference, projectEditReference, projectReadReference } from './project-files-context.mjs';
+import {continuationReference} from './continuation-context.mjs';
 import { installWorkStore } from './work-store.mjs';
 
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
@@ -28,7 +29,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
   const limits = { ...CONVERSATION_DEFAULTS, ...conversationLimits };
   if (Object.keys(conversationLimits).some(key => !Object.hasOwn(CONVERSATION_DEFAULTS, key)) || Object.entries(limits).some(([key, value]) => !Number.isSafeInteger(value) || value < 1 || value > CONVERSATION_DEFAULTS[key]) || limits.outcomeBytes < 8192 || limits.totalBytes < 2 * limits.outcomeBytes + 65536) throw new TypeError('Use bounded conversation storage limits.');
   await mkdir(dataDirectory, { recursive: true });
-  const db = new DatabaseSync(path.join(dataDirectory, 'productivity.sqlite'));
+  const db = new DatabaseSync(path.toNamespacedPath(path.join(dataDirectory, 'productivity.sqlite')));
   db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL); CREATE TABLE IF NOT EXISTS workspace_receipts(id TEXT PRIMARY KEY, hash TEXT NOT NULL); CREATE TABLE IF NOT EXISTS chat_receipts(id TEXT PRIMARY KEY, hash TEXT NOT NULL, state TEXT NOT NULL, reply TEXT);');
   db.exec(`CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,title TEXT NOT NULL,auto_title INTEGER NOT NULL,revision INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,active_request_id TEXT,last_status TEXT);
     CREATE TABLE IF NOT EXISTS conversation_turns(sequence INTEGER PRIMARY KEY AUTOINCREMENT,conversation_id TEXT NOT NULL,request_id TEXT UNIQUE NOT NULL,digest TEXT NOT NULL,message TEXT NOT NULL,provider_id TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,outcome_json TEXT,base_bytes INTEGER NOT NULL,stored_bytes INTEGER NOT NULL,reserved_bytes INTEGER NOT NULL);
@@ -168,6 +169,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
     if(source.windowContext)result.windowContext=windowContextReference(source.windowContext);
     if(source.projectContext)result.projectContext=projectReference(source.projectContext);
     if(source.projectFileEdit)result.projectFileEdit=projectEditReference(source.projectFileEdit);
+    if(source.continuation)result.continuation=continuationReference(source.continuation);
     if(source.projectFileRead||source.sourceTrust==='untrusted_project_file')result.projectFileRead=projectReadReference(source.projectFileRead||source);
     for(const key of ['task','note','workflow','featureJob','desktopAction','desktopReceipt','workJob'])if(source[key]&&typeof source[key]==='object')result[key]={id:source[key].id,...(source[key].status?{status:source[key].status}:{}),...(key==='workJob'?{conversationId:source[key].conversationId,providerId:source[key].providerId}:{}),...(typeof source[key].outcomeUnknown==='boolean'?{outcomeUnknown:source[key].outcomeUnknown}:{}),...(key==='desktopAction'?{requiresFreshPreview:true}:{})};
     if(source.capability)result.capability={id:source.capability.id,name:source.capability.name,version:source.capability.version,hash:source.capability.hash};
@@ -183,6 +185,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
     if(key==='windowContext')return windowContextReference(value);
     if(key==='projectContext')return projectReference(value);
     if(key==='projectFileEdit')return projectEditReference(value);
+    if(key==='continuation')return continuationReference(value);
     if(key==='projectFileRead'||value?.sourceTrust==='untrusted_project_file')return projectReadReference(value);
     if(value?.sourceType==='selected_window_accessibility')return{...minimalResult(value),readable:value.readable===true,sourceType:'selected_window_accessibility',trust:'untrusted_source_data',sourceOmitted:true};
     if (typeof value === 'string') return value.length > size ? value.slice(0, size) + '… [details truncated]' : value;
@@ -198,6 +201,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
     let result = dataCopy(value), encoded = JSON.stringify(result);
     if(result.windowContext)result.windowContext=windowContextReference(result.windowContext);
     if(result.projectContext)result.projectContext=projectReference(result.projectContext);
+    if(result.continuation)result.continuation=continuationReference(result.continuation);
     encoded=JSON.stringify(result);
     if (Buffer.byteLength(encoded) <= limits.outcomeBytes) return { value: result, encoded };
     const originalActions = Array.isArray(result.actions) ? result.actions : [];
@@ -277,7 +281,8 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
       if ((previous.actions || []).length > actions.length || (previous.actions || []).some((action, index) => action.id !== actions[index]?.id || action.tool !== actions[index]?.tool || action.status !== actions[index]?.status)) throw fail('conversation_checkpoint_conflict', 'A newer action checkpoint is already retained. Earlier receipts cannot be removed.', 409);
       const context=windowContextReference(actions.find(action=>action.tool==='window_context')?.result?.windowContext??value.windowContext??previous.windowContext);
       const project=projectReference(value.projectContext??previous.projectContext);
-      const outcome = boundedOutcome({ actions, featureJob: value.featureJob ?? previous.featureJob ?? null,...(context?{windowContext:context}:{}),...(project?{projectContext:project}:{}) });
+      const continuation=continuationReference(value.continuation??previous.continuation);
+      const outcome = boundedOutcome({ actions, featureJob: value.featureJob ?? previous.featureJob ?? null,...(context?{windowContext:context}:{}),...(project?{projectContext:project}:{}),...(continuation?{continuation}:{}) });
       db.prepare('UPDATE conversation_turns SET outcome_json=?,stored_bytes=?,reserved_bytes=? WHERE request_id=?').run(outcome.encoded, saved.base_bytes + Buffer.byteLength(outcome.encoded), 2 * limits.outcomeBytes - Buffer.byteLength(outcome.encoded), requestId);
       db.prepare('UPDATE conversations SET updated_at=? WHERE id=?').run(iso(now()), conversationId);
       return { conversation: getConversation(conversationId), receipt: receiptFor(requestId, digest) };
@@ -297,6 +302,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
         : { statusCode: Number.isInteger(source.statusCode) && source.statusCode >= 400 && source.statusCode <= 599 ? source.statusCode : value.status === 'cancelled' ? 499 : 500, code: text(source.code || 'request_failed', 100, 'Error code'), message: text(source.message || 'The request could not finish. Inspect any completed actions.', 2000, 'Error message'), actions, featureJob, conversationId, conversationRevision };
       const context=windowContextReference(source.windowContext??partial.windowContext);if(context)wire.windowContext=context;
       const project=projectReference(source.projectContext??partial.projectContext);if(project)wire.projectContext=project;
+      const continuation=continuationReference(source.continuation??partial.continuation);if(continuation)wire.continuation=continuation;
       const outcome = boundedOutcome(wire);
       if (saved.status !== 'running') {
         if (saved.status !== value.status || hash(JSON.parse(saved.outcome_json || '{}')) !== hash(outcome.value)) throw fail('request_conflict', 'That turn already has a different terminal outcome.', 409);
@@ -315,7 +321,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
   transaction(() => {
     db.exec("UPDATE execution_receipts SET state='interrupted' WHERE state='in_progress';");
     for (const saved of db.prepare("SELECT * FROM conversation_turns WHERE status='running'").all()) {
-      const partial = saved.outcome_json ? JSON.parse(saved.outcome_json) : {}, context=windowContextReference(partial.windowContext), project=projectReference(partial.projectContext), outcome = boundedOutcome({ statusCode: 409, code: 'request_interrupted', message: 'Companion restarted during this request. Any recorded actions remain; inspect the workspace and build history before starting another request.', actions: partial.actions || [], featureJob: partial.featureJob || null, ...(context?{windowContext:context}:{}),...(project?{projectContext:project}:{}), conversationId: saved.conversation_id, conversationRevision: conversationRow(saved.conversation_id).revision + 1 });
+      const partial = saved.outcome_json ? JSON.parse(saved.outcome_json) : {}, context=windowContextReference(partial.windowContext), project=projectReference(partial.projectContext), outcome = boundedOutcome({ statusCode: 409, code: 'request_interrupted', message: 'Companion restarted during this request. Any recorded actions remain; inspect the workspace and build history before starting another request.', actions: partial.actions || [], featureJob: partial.featureJob || null, ...(context?{windowContext:context}:{}),...(project?{projectContext:project}:{}),...(continuationReference(partial.continuation)?{continuation:continuationReference(partial.continuation)}:{}), conversationId: saved.conversation_id, conversationRevision: conversationRow(saved.conversation_id).revision + 1 });
       const receipt = chatReceipt(saved.request_id, saved.digest); const at = iso(now());
       if (!receipt) db.prepare('INSERT INTO chat_receipts VALUES(?,?,?,?)').run(saved.request_id, saved.digest, 'failed', outcome.encoded);
       else db.prepare('UPDATE chat_receipts SET state=?,reply=? WHERE id=? AND hash=?').run('failed', outcome.encoded, saved.request_id, saved.digest);

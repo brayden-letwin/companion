@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { windowContextReference } from './window-context.mjs';
 import { normalizeProjectBinding, projectReference } from './project-files-context.mjs';
+import {continuationReference} from './continuation-context.mjs';
 
 const UUID=/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const ACTIVE=new Set(['queued','running']);
@@ -26,6 +27,7 @@ export function installWorkStore({db,now=Date.now,conversationLimit=200,checkOpe
   db.exec(`CREATE TABLE IF NOT EXISTS work_jobs(sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,hash TEXT NOT NULL,title TEXT NOT NULL,prompt TEXT NOT NULL,provider_id TEXT NOT NULL,provider_json TEXT NOT NULL,conversation_id TEXT UNIQUE NOT NULL,request_id TEXT UNIQUE NOT NULL,origin_conversation_id TEXT,origin_request_id TEXT,context_id TEXT,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,started_at TEXT,finished_at TEXT,cancel_requested INTEGER NOT NULL DEFAULT 0,progress_json TEXT NOT NULL,error_json TEXT);`);
   if(!db.prepare('PRAGMA table_info(work_jobs)').all().some(column=>column.name==='window_context_json'))db.exec('ALTER TABLE work_jobs ADD COLUMN window_context_json TEXT');
   if(!db.prepare('PRAGMA table_info(work_jobs)').all().some(column=>column.name==='project_json'))db.exec('ALTER TABLE work_jobs ADD COLUMN project_json TEXT');
+  if(!db.prepare('PRAGMA table_info(work_jobs)').all().some(column=>column.name==='continuation_json'))db.exec('ALTER TABLE work_jobs ADD COLUMN continuation_json TEXT');
   const transaction=callback=>{checkOpen();db.exec('BEGIN IMMEDIATE');try{const result=callback();db.exec('COMMIT');return result;}catch(error){db.exec('ROLLBACK');throw error;}};
   const row=jobId=>{checkOpen();const saved=db.prepare('SELECT * FROM work_jobs WHERE id=?').get(id(jobId));if(!saved)throw fail('work_not_found','That work job was not found.',404);return saved;};
   const instant=previous=>new Date(Math.max(now(),Date.parse(previous||0)+1||0)).toISOString();
@@ -58,16 +60,17 @@ export function installWorkStore({db,now=Date.now,conversationLimit=200,checkOpe
     saved=reconcile(saved);
     return{id:saved.id,title:saved.title,prompt:saved.prompt,providerId:saved.provider_id,provider:JSON.parse(saved.provider_json),conversationId:saved.conversation_id,requestId:saved.request_id,
       ...(saved.origin_conversation_id?{originConversationId:saved.origin_conversation_id}:{}),...(saved.origin_request_id?{originRequestId:saved.origin_request_id}:{}),...(saved.context_id?{contextId:saved.context_id}:{}),
-      status:saved.status,createdAt:saved.created_at,updatedAt:saved.updated_at,...(saved.started_at?{startedAt:saved.started_at}:{}),...(saved.finished_at?{finishedAt:saved.finished_at}:{}),cancelRequested:saved.cancel_requested===1,progress:JSON.parse(saved.progress_json),...(saved.error_json?{error:JSON.parse(saved.error_json)}:{}),...(saved.window_context_json?{windowContext:JSON.parse(saved.window_context_json)}:{}),...(saved.project_json?{project:JSON.parse(saved.project_json)}:{})};
+      status:saved.status,createdAt:saved.created_at,updatedAt:saved.updated_at,...(saved.started_at?{startedAt:saved.started_at}:{}),...(saved.finished_at?{finishedAt:saved.finished_at}:{}),cancelRequested:saved.cancel_requested===1,progress:JSON.parse(saved.progress_json),...(saved.error_json?{error:JSON.parse(saved.error_json)}:{}),...(saved.window_context_json?{windowContext:JSON.parse(saved.window_context_json)}:{}),...(saved.project_json?{project:JSON.parse(saved.project_json)}:{}),...(saved.continuation_json?{continuation:JSON.parse(saved.continuation_json)}:{})};
   }
   function createWorkJob(value){
-    if(!object(value)||Object.keys(value).some(key=>!['id','prompt','title','providerId','provider','originConversationId','originRequestId','contextId','windowContext','scope','project'].includes(key)))throw fail('invalid_work_input','Use supported work job fields.');
+    if(!object(value)||Object.keys(value).some(key=>!['id','prompt','title','providerId','provider','originConversationId','originRequestId','contextId','windowContext','scope','project','continuation'].includes(key)))throw fail('invalid_work_input','Use supported work job fields.');
     const jobId=id(value.id),prompt=text(value.prompt,12000,'original prompt'),title=value.title===undefined?prompt.replace(/\s+/gu,' ').trim().slice(0,80):text(value.title,100,'job title'),providerId=text(value.providerId,100,'provider ID');
     const originConversationId=optionalId(value.originConversationId),originRequestId=requestId(value.originRequestId),contextId=optionalId(value.contextId);
+    const continuation=value.continuation===undefined?null:continuationReference(value.continuation);if(value.continuation!==undefined&&(!continuation||continuation.workId!==jobId))throw fail('invalid_work_input','Use the original reserved continuation identity.');
     const project=value.project===undefined?null:projectReference(value.project);
     if(value.project!==undefined&&!project)throw fail('invalid_work_input','Use a valid frozen project binding.');
     const projectBinding=project?normalizeProjectBinding({projectId:project.projectId,grantEpoch:project.grantEpoch}):null;
-    const hash=digest({id:jobId,prompt,title,providerId,originConversationId,originRequestId,contextId,...(projectBinding?{project:projectBinding}:{})});
+    const hash=digest({id:jobId,prompt,title,providerId,originConversationId,originRequestId,contextId,...(projectBinding?{project:projectBinding}:{}),...(continuation?{continuation}:{})});
     return transaction(()=>{
       const existing=db.prepare('SELECT * FROM work_jobs WHERE id=?').get(jobId);if(existing){if(existing.hash!==hash)throw fail('work_conflict','That work job ID was already used for different input.',409);return{job:dto(existing),replayed:true};}
       if(db.prepare('SELECT count(*) AS count FROM work_jobs').get().count>=200)throw fail('work_history_limit','Keep at most 200 retained work jobs.',409);
@@ -80,6 +83,7 @@ export function installWorkStore({db,now=Date.now,conversationLimit=200,checkOpe
       db.prepare('INSERT INTO work_jobs(id,hash,title,prompt,provider_id,provider_json,conversation_id,request_id,origin_conversation_id,origin_request_id,context_id,status,created_at,updated_at,progress_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(jobId,hash,title,prompt,providerId,JSON.stringify(descriptor),jobId,'work_'+jobId,originConversationId,originRequestId,contextId,'queued',at,at,JSON.stringify({message:'Queued.',events:[{at,type:'queued',message:'Queued.'}]}));
       if(context)db.prepare('UPDATE work_jobs SET window_context_json=? WHERE id=?').run(JSON.stringify(context),jobId);
       if(project)db.prepare('UPDATE work_jobs SET project_json=? WHERE id=?').run(JSON.stringify(project),jobId);
+      if(continuation)db.prepare('UPDATE work_jobs SET continuation_json=? WHERE id=?').run(JSON.stringify(continuation),jobId);
       return{job:dto(row(jobId)),replayed:false};
     });
   }

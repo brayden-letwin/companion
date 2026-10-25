@@ -5,14 +5,18 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { verifyCapabilityBehavior, verifyPanelCapabilityLinks } from './capability-verification.mjs';
 import { formatSourceFile, validateSourceReadOptions } from './source-read.mjs';
+import { loadCapabilities, capabilityHash } from './capability-registry.mjs';
+import { VERIFICATION_GUARD_SOURCE } from './verification-guard.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
+const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
+const HASH = /^[a-f\d]{64}$/;
 const fail = (statusCode, code, message) => Object.assign(new Error(message), { statusCode, code });
 const clone = value => structuredClone(value);
 const SOURCE_DIRS = new Set(['src', 'server', 'electron', 'scripts', 'tests', 'docs']);
 const SOURCE_TYPES = new Set(['.mjs', '.cjs', '.js', '.css', '.html', '.json', '.md', '.ps1', '.cmd', '.txt']);
 const ROOT_DOCS = new Set(['README.md', 'DESIGN.md', 'CONTRIBUTING.md', 'ROADMAP.md', 'DISCUSSION_FLOW.md', 'QA.md', 'START_HERE.txt', 'AGENTS.md', 'Start Companion.cmd', 'Start Desktop Companion.cmd', 'Stop Companion.cmd', 'mcp.example.json', 'package.json']);
-const TRUSTED_TESTS = ['math.test.mjs', 'tutor.test.mjs', 'discussion.test.mjs', 'shared-discussion.test.mjs', 'assistant.test.mjs', 'provider.test.cjs', 'local-provider.test.cjs', 'training-data.test.mjs', 'productivity-store.test.mjs', 'task-queries.test.mjs', 'productivity-conversations-ui.test.mjs', 'voice-session.test.mjs','assistant-turn.test.mjs','completion-queue.test.mjs','work-output.test.mjs','work-service.test.mjs','codex-runner.test.mjs','model-router.test.mjs','window-context.test.mjs','source-read.test.mjs','project-files-store.test.mjs','project-files-service.test.mjs','project-files-ui.test.mjs'];
+const TRUSTED_TESTS = ['math.test.mjs', 'tutor.test.mjs', 'discussion.test.mjs', 'shared-discussion.test.mjs', 'assistant.test.mjs', 'provider.test.cjs', 'local-provider.test.cjs', 'training-data.test.mjs', 'productivity-store.test.mjs', 'task-queries.test.mjs', 'productivity-conversations-ui.test.mjs', 'voice-session.test.mjs','assistant-turn.test.mjs','completion-queue.test.mjs','work-output.test.mjs','work-service.test.mjs','codex-runner.test.mjs','model-router.test.mjs','window-context.test.mjs','source-read.test.mjs','project-files-store.test.mjs','project-files-service.test.mjs','project-files-ui.test.mjs','continuation-store.test.mjs','continuation-service.test.mjs','build-continuation-ui.test.mjs'];
 const LIMITS = Object.freeze({ files: 24, fileBytes: 250000, patchBytes: 1000000, snapshotBytes: 4000000, sourceFiles: 300, jobs: 100, prompt: 12000, output: 64000, verificationMs: 30000 });
 const TERMINAL = new Set(['applied', 'failed', 'cancelled', 'conflict', 'rolled_back', 'interrupted', 'recovery_required']);
 
@@ -40,7 +44,7 @@ function validPath(value) {
 function protectedPath(file) {
   const lower = file.toLowerCase();
   return /^(?:server|electron|scripts|tests)\//.test(lower) || ['package.json', 'agents.md', 'start companion.cmd', 'start desktop companion.cmd', 'stop companion.cmd', 'mcp.example.json'].includes(lower)
-    || ['src/assistant.mjs','src/voice-session.mjs','src/project-files.mjs'].includes(lower) || /^src\/core\/(?:productivity|feature|provider|credential|auth|security)/i.test(file)
+    || ['src/assistant.mjs','src/voice-session.mjs','src/project-files.mjs','src/build-continuation.mjs'].includes(lower) || /^src\/core\/(?:productivity|feature|provider|credential|auth|security)/i.test(file)
     || /(?:credential|auth|security|builder|model-router)/i.test(file);
 }
 function string(value, max, label) {
@@ -48,6 +52,17 @@ function string(value, max, label) {
   return value.trim();
 }
 function owner(value) { return hash(string(value, 300, 'Local owner')); }
+function linkedDigest(job, keyHash) {
+  return hash(JSON.stringify({ ownerHash: job.ownerHash, prompt: job.prompt, providerId: job.providerId, autoApply: job.autoApply, keyHash }));
+}
+function validLinkedMetadata(job) {
+  const link = job.linkedRequest;
+  return link && typeof link === 'object' && !Array.isArray(link) && Object.keys(link).every(key => ['version', 'keyHash', 'digest'].includes(key))
+    && link.version === 1 && HASH.test(link.keyHash) && HASH.test(link.digest) && HASH.test(job.ownerHash)
+    && typeof job.prompt === 'string' && job.prompt === string(job.prompt, LIMITS.prompt, 'Feature request')
+    && typeof job.providerId === 'string' && job.providerId === string(job.providerId, 100, 'Provider')
+    && typeof job.autoApply === 'boolean' && link.digest === linkedDigest(job, link.keyHash);
+}
 async function fileHash(file) { try { return hash(await readFile(file)); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } }
 async function contained(root, relative, makeParents = false) {
   validPath(relative);
@@ -84,7 +99,7 @@ function diff(file, before, after) {
   return `--- ${before === null ? '/dev/null' : 'a/' + file}\n+++ ${after === null ? '/dev/null' : 'b/' + file}\n@@ -1,${oldLines.length} +1,${newLines.length} @@\n${oldLines.map(line => '-' + line).join('\n')}\n${newLines.map(line => '+' + line).join('\n')}`;
 }
 function publicJob(job) {
-  const { ownerHash: _owner, baseRevision: _base, rawFiles: _raw, transaction: _transaction, providedFeatures: _provided, ...safe } = job;
+  const { ownerHash: _owner, baseRevision: _base, rawFiles: _raw, transaction: _transaction, providedFeatures: _provided, linkedRequest: _linked, ...safe } = job;
   return clone({ ...safe, providedFeatures: job.status === 'applied' ? job.providedFeatures || [] : [] });
 }
 function jobSummary(job) {
@@ -106,27 +121,8 @@ function safeEnvironment(scratch) {
   for (const name of ['SystemRoot', 'WINDIR']) if (process.env[name]) env[name] = process.env[name];
   return env;
 }
-// Trusted preload is outside the candidate and runs before any candidate code.
-// Filesystem permissions remain the native boundary; this closes ordinary
-// JavaScript networking paths as an additional verification-only restriction.
-const NETWORK_GUARD = String.raw`'use strict';
-// Initialize inherited pipe handles before denying new Socket constructors.
-void process.stdout;void process.stderr;void process.stdin;
-const {syncBuiltinESMExports}=require('node:module');
-function denied(){const error=new Error('Network access is disabled during candidate verification.');error.code='ERR_COMPANION_VERIFY_NETWORK';throw error;}
-function block(object,key){const descriptor=Object.getOwnPropertyDescriptor(object,key);if(!descriptor||descriptor.configurable){Object.defineProperty(object,key,{value:denied,writable:false,configurable:false,enumerable:descriptor?.enumerable??true});}else if(descriptor.writable){Object.defineProperty(object,key,{value:denied,writable:false});}}
-for(const name of ['fetch','WebSocket','EventSource'])block(globalThis,name);
-const modules=['net','tls','http','https','http2','dgram','dns','dns/promises','_http_agent','_http_client','_http_server','_tls_wrap'].map(name=>{try{return require('node:'+name);}catch{return null;}}).filter(Boolean);
-for(const module of modules){
-for(const [key,value]of Object.entries(module)){
-if(typeof value!=='function')continue;
-if(value.prototype){for(const method of Object.getOwnPropertyNames(value.prototype)){if(method==='constructor')continue;const descriptor=Object.getOwnPropertyDescriptor(value.prototype,method);if(typeof descriptor?.value==='function'&&(/^(?:connect|listen|send|bind|resolve|lookup|query|createConnection|addMembership|_start|onSocket)/.test(method)))block(value.prototype,method);}}
-block(module,key);
-}
-if(module.promises){for(const [key,value]of Object.entries(module.promises))if(typeof value==='function')block(module.promises,key);}
-}
-syncBuiltinESMExports();
-`;
+// The cached trusted preload is written outside the candidate. Node permissions
+// plus explicit native SQLite/network guards are layered checks, not an OS sandbox.
 function abortable(promise, signal) {
   if (signal.aborted) return Promise.reject(fail(499, 'request_cancelled', 'Feature work was stopped.'));
   return new Promise((resolve, reject) => {
@@ -137,7 +133,7 @@ function abortable(promise, signal) {
 }
 async function nodeCheck(args, { cwd, scratch, signal, timeoutMs = LIMITS.verificationMs }) {
   if (signal?.aborted) throw fail(499, 'request_cancelled', 'Feature work was stopped.');
-  const guard = path.join(scratch, 'deny-network.cjs'); await writeFile(guard, NETWORK_GUARD, { mode: 0o600 });
+  const guard = path.join(scratch, 'verification-guard.cjs'); await writeFile(guard, VERIFICATION_GUARD_SOURCE, { mode: 0o600 });
   return new Promise(resolve => {
     const child = spawn(process.execPath, ['--permission', `--allow-fs-read=${cwd}`, `--allow-fs-read=${scratch}`, `--allow-fs-write=${scratch}`, '--no-addons', '--require', guard, ...args],
       { cwd, env: safeEnvironment(scratch), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -165,6 +161,7 @@ export async function createFeatureBuilder({ root, dataDirectory, complete, veri
   }
   await mkdir(storage, { recursive: true, mode: 0o700 });
   const storageRoot = await realpath(storage); const jobs = new Map(), controllers = new Map(), persistence = new Map();
+  const retainedIds = new Set(), linkedKeys = new Map(), admissions = new Map();
   let queue = Promise.resolve(), writer = Promise.resolve(), closed = false;
   const shutdown = new AbortController();
   const lockFile = path.join(sourceRoot, '.companion-feature-writer.lock');
@@ -214,13 +211,21 @@ export async function createFeatureBuilder({ root, dataDirectory, complete, veri
     persistence.set(job.id, work.catch(() => {})); await work;
   };
   const event = (job, type, message) => { job.events.push({ at: new Date().toISOString(), type, message: String(message).slice(0, 1000) }); if (job.events.length > 100) job.events.shift(); };
-  async function privateRead(job, area, file, encoding) {
+  async function privateRead(job, area, file, encoding, maxBytes) {
     if (typeof area !== 'string' || !/^(?:candidate|(?:apply|rollback)-backup-[a-z0-9-]{1,80})$/.test(area)) throw fail(409, 'recovery_required', 'A retained builder area is invalid.');
+    const jobInfo = await lstat(jobDirectory(job.id));
+    if (!jobInfo.isDirectory() || jobInfo.isSymbolicLink()) throw fail(409, 'recovery_required', 'Retained builder history must use a regular private directory.');
     const jobRoot = await realpath(jobDirectory(job.id));
     if (!jobRoot.startsWith(storageRoot + path.sep)) throw fail(409, 'recovery_required', 'Builder history leaves its private storage.');
+    const areaInfo = await lstat(path.join(jobRoot, area));
+    if (!areaInfo.isDirectory() || areaInfo.isSymbolicLink()) throw fail(409, 'recovery_required', 'A retained builder area must use a regular private directory.');
     const areaRoot = await realpath(path.join(jobRoot, area));
     if (!areaRoot.startsWith(jobRoot + path.sep)) throw fail(409, 'recovery_required', 'A retained builder area is linked outside its job.');
-    return readFile(await contained(areaRoot, file), encoding);
+    const target = await contained(areaRoot, file);
+    if (maxBytes !== undefined && (await lstat(target)).size > maxBytes) throw fail(413, 'feature_evidence_limit', 'Retained source evidence exceeds its source limit.');
+    const bytes = await readFile(target);
+    if (maxBytes !== undefined && bytes.length > maxBytes) throw fail(413, 'feature_evidence_limit', 'Retained source evidence exceeds its source limit.');
+    return encoding ? bytes.toString(encoding) : bytes;
   }
   function owned(id, sessionId) {
     const job = jobs.get(id);
@@ -497,14 +502,19 @@ export async function createFeatureBuilder({ root, dataDirectory, complete, veri
       job.error = String(error.message || 'The feature request failed.').slice(0, 2000); event(job, job.status, job.error); await persist(job);
     } finally { controllers.delete(job.id); }
   }
-  async function createJob(input, sessionId, patch) {
+  async function createJob(input, sessionId, patch, reserved) {
     if (closed) throw fail(503, 'builder_closed', 'The feature builder is shutting down.');
     if (jobs.size >= LIMITS.jobs) throw fail(429, 'feature_history_limit', 'This workspace has reached its retained feature history limit.');
     if (input.autoApply !== undefined && typeof input.autoApply !== 'boolean') throw fail(400, 'validation_error', 'autoApply must be true or false.');
-    const job = { id: randomUUID(), ownerHash: owner(sessionId), status: 'queued', prompt: patch ? 'External source patch' : string(input.prompt, LIMITS.prompt, 'Feature request'),
+    const job = { id: reserved?.id || randomUUID(), ownerHash: owner(sessionId), status: 'queued', prompt: patch ? 'External source patch' : string(input.prompt, LIMITS.prompt, 'Feature request'),
       providerId: patch ? 'external' : string(input.providerId, 100, 'Provider'), autoApply: input.autoApply ?? true, summary: patch?.summary || '', reviewRequired: false,
-      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), files: [], verification: null, tests: [], events: [] };
-    jobs.set(job.id, job); await persist(job); queue = queue.then(() => processJob(job, patch), () => processJob(job, patch));
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), files: [], verification: null, tests: [], events: [], ...(reserved ? { linkedRequest: reserved.linkedRequest } : {}) };
+    jobs.set(job.id, job); retainedIds.add(job.id);
+    if (reserved) {
+      try { await mkdir(jobDirectory(job.id), { mode: 0o700 }); }
+      catch (error) { jobs.delete(job.id); if (error.code === 'EEXIST') throw fail(409, 'linked_build_conflict', 'That build identity already has retained evidence.'); throw error; }
+    }
+    await persist(job); queue = queue.then(() => processJob(job, patch), () => processJob(job, patch));
     return publicJob(job);
   }
   function pendingAutoApply(job) {
@@ -516,10 +526,17 @@ export async function createFeatureBuilder({ root, dataDirectory, complete, veri
 
   for (const entry of await readdir(storageRoot, { withFileTypes: true })) {
     if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/.test(entry.name)) continue;
+    retainedIds.add(entry.name);
     const file = path.join(storageRoot, entry.name, 'job.json');
     try {
       const saved = JSON.parse(await readFile(file, 'utf8'));
       if (saved.id !== entry.name || typeof saved.ownerHash !== 'string' || !Array.isArray(saved.files) || saved.files.some(item => !validPath(item.path))) continue;
+      if (Object.hasOwn(saved, 'linkedRequest')) {
+        if (!UUID.test(saved.id) || !validLinkedMetadata(saved)) continue;
+        const linkedKey = `${saved.ownerHash}:${saved.linkedRequest.keyHash}`;
+        if (linkedKeys.has(linkedKey)) continue;
+        linkedKeys.set(linkedKey, saved.id);
+      }
       jobs.set(saved.id, saved);
       if (saved.status === 'applying') {
         try { await sourceLock(() => restoreTransaction(saved)); saved.transaction = null; saved.status = 'interrupted'; saved.error = 'Interrupted promotion was restored from its retained backup.'; }
@@ -530,6 +547,30 @@ export async function createFeatureBuilder({ root, dataDirectory, complete, veri
   }
   return {
     async request(input, sessionId) { return createJob(input, sessionId); },
+    /** Internal durable handoff. HTTP/model input never chooses these identities. */
+    async requestLinked(input, sessionId, link) {
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['prompt', 'providerId', 'autoApply'].includes(key))
+        || !link || typeof link !== 'object' || Array.isArray(link) || Object.keys(link).some(key => !['id', 'key'].includes(key)) || typeof link.id !== 'string' || !UUID.test(link.id)) {
+        throw fail(400, 'invalid_linked_build', 'Use a fixed internal build ID and request key.');
+      }
+      if (input.autoApply !== undefined && typeof input.autoApply !== 'boolean') throw fail(400, 'validation_error', 'autoApply must be true or false.');
+      const id = link.id.toLowerCase(), keyHash = hash(string(link.key, 300, 'Linked request key'));
+      const normalized = { prompt: string(input.prompt, LIMITS.prompt, 'Feature request'), providerId: string(input.providerId, 100, 'Provider'), autoApply: input.autoApply ?? true };
+      const ownerHash = owner(sessionId), digest = linkedDigest({ ...normalized, ownerHash }, keyHash), saved = jobs.get(id);
+      const linkedKey = `${ownerHash}:${keyHash}`;
+      if (saved) {
+        if (saved.ownerHash !== ownerHash || saved.linkedRequest?.digest !== digest) throw fail(409, 'linked_build_conflict', 'That build identity already belongs to another request.');
+        await admissions.get(id);
+        return publicJob(saved);
+      }
+      if (retainedIds.has(id) || linkedKeys.has(linkedKey)) throw fail(409, 'linked_build_conflict', 'That linked build has retained evidence under another or unreadable identity.');
+      // createJob reserves its map entry before yielding, persists it before
+      // generation, and concurrent exact retries wait for that same admission.
+      const admission = createJob(normalized, sessionId, undefined, { id, linkedRequest: { version: 1, keyHash, digest } });
+      admissions.set(id, admission); linkedKeys.set(linkedKey, id);
+      await admission;
+      return publicJob(jobs.get(id));
+    },
     async submitPatch(input, sessionId) {
       const patch = normalizePatch({ summary: input.summary, files: input.files, ...(input.tests ? { tests: input.tests } : {}) });
       if (!input.baseHashes || typeof input.baseHashes !== 'object' || Array.isArray(input.baseHashes)) throw fail(400, 'validation_error', 'External patches need baseHashes for every changed path.');
@@ -545,6 +586,49 @@ export async function createFeatureBuilder({ root, dataDirectory, complete, veri
     },
     async list(sessionId) { const key = owner(sessionId); return [...jobs.values()].filter(job => job.ownerHash === key).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(jobSummary); },
     async get(id, sessionId) { return publicJob(owned(id, sessionId)); },
+    /** Internal evidence only: never execute retained source or return its text. */
+    async readinessEvidence(id, sessionId) {
+      const job = owned(id, sessionId);
+      const basic = { id: job.id, status: job.status, verificationPassed: job.verification?.passed === true,
+        files: job.files.map(({ path, afterHash }) => ({ path, afterHash })) };
+      if (job.status !== 'applied') return { job: basic, sourceRevision: null, files: [], requiredCapabilities: [] };
+      const current = await snapshot(), files = job.files.map(file => ({ path: file.path, afterHash: file.afterHash,
+        currentHash: current.files.find(item => item.path === file.path)?.hash ?? null }));
+      if (files.some(file => file.currentHash !== file.afterHash)) return { job: basic, sourceRevision: current.revision, files, requiredCapabilities: [] };
+      // privateRead checks the candidate area itself before the metadata loader
+      // reads modules. The loader validates bounded source without importing it.
+      const manifestPath = 'server/capabilities/manifest.json';
+      let candidateManifest, manifestBytes;
+      try { manifestBytes = await privateRead(job, 'candidate', manifestPath, undefined, LIMITS.fileBytes); candidateManifest = JSON.parse(manifestBytes); }
+      catch (error) { if (error.code === 'ENOENT') return { job: basic, sourceRevision: current.revision, files, requiredCapabilities: [] }; throw error; }
+      const candidateRoot = await realpath(path.join(jobDirectory(job.id), 'candidate'));
+      const candidateCapabilities = await loadCapabilities({ root: candidateRoot });
+      const manifestChange = job.files.find(file => file.path === manifestPath);
+      if (manifestChange && hash(manifestBytes) !== manifestChange.afterHash) throw fail(409, 'feature_evidence_changed', 'The retained capability manifest changed after verification.');
+      let previous = candidateManifest.capabilities || [];
+      if (manifestChange) {
+        if (manifestChange.beforeHash === null) previous = [];
+        else {
+          const beforeBytes = await privateRead(job, job.applyBackup, manifestPath, undefined, LIMITS.fileBytes);
+          if (hash(beforeBytes) !== manifestChange.beforeHash) throw fail(409, 'feature_evidence_changed', 'The retained previous capability manifest changed.');
+          previous = JSON.parse(beforeBytes).capabilities || [];
+        }
+      }
+      if (!Array.isArray(previous) || !Array.isArray(candidateManifest.capabilities)) throw fail(409, 'feature_evidence_unavailable', 'The retained capability manifest could not be compared safely.');
+      const provided = candidateCapabilities.filter(capability => {
+        const before = previous.find(entry => entry.id === capability.id), after = candidateManifest.capabilities.find(entry => entry.id === capability.id);
+        return !before || capabilityHash(before) !== capabilityHash(after) || job.files.some(file => file.path === `server/capabilities/${capability.id}.mjs`);
+      });
+      for (const capability of provided) {
+        const moduleChange = job.files.find(file => file.path === `server/capabilities/${capability.id}.mjs`);
+        if (moduleChange && capability.moduleHash !== moduleChange.afterHash) throw fail(409, 'feature_evidence_changed', 'A retained capability module changed after verification.');
+      }
+      const installed = await loadCapabilities({ root: sourceRoot });
+      const requiredCapabilities = provided.map(capability => ({ name: capability.tool.name, id: capability.id, version: capability.version, hash: capability.hash,
+        current: installed.some(item => item.id === capability.id && item.hash === capability.hash) }));
+      const confirmed = await snapshot();
+      return { job: basic, sourceRevision: confirmed.revision, files, requiredCapabilities, sourceStable: confirmed.revision === current.revision };
+    },
     async apply(id, sessionId) { return applyJob(owned(id, sessionId)); },
     async rollback(id, sessionId) {
       const job = owned(id, sessionId);

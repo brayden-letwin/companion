@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { BUILTIN_TOOL_DEFINITIONS, builtinCatalog, validateToolArguments, capabilityHash, validateWorkflowSteps } from './capability-registry.mjs';
 import { listTasks, readTask, summarizeTasks } from './task-queries.mjs';
 import { PROJECT_FILES_TOOL_NAME, projectFilesCatalogEntry } from './project-files-tool.mjs';
+import {continuationReference,continuationPriorEffect} from './continuation-context.mjs';
 const defaultExecuteCapability=async options=>(await import('./capability-runtime.mjs')).executeCapability(options);
 export const TOOL_DEFINITIONS = BUILTIN_TOOL_DEFINITIONS;
 const fail = (message, code = 'invalid_tool') => Object.assign(new Error(message), { code, statusCode: 400 });
@@ -107,7 +108,7 @@ function inspectFeatureBuild(job, requestedId, requestOffset = 0) {
   return report;
 }
 
-export function createProductivityTools({ store, builder, desktop, root, work, projectFiles, capabilities = [], capabilityStatus = {ready:true}, executeCapability = defaultExecuteCapability, owner = 'local-workspace', now = Date.now } = {}) {
+export function createProductivityTools({ store, builder, desktop, root, work, projectFiles, continuations, capabilities = [], capabilityStatus = {ready:true}, executeCapability = defaultExecuteCapability, owner = 'local-workspace', now = Date.now } = {}) {
   if (!store) throw new Error('The productivity store is required.');
   const definitions = [...TOOL_DEFINITIONS, ...(desktop?.definitions || [])];
   const registry = new Map(definitions.map(tool => [tool.name, tool]));
@@ -122,15 +123,22 @@ export function createProductivityTools({ store, builder, desktop, root, work, p
   const execute = async (name, raw = {}, context = {}) => {
     const { requestId, callId, providerId, signal } = context;
     if (signal?.aborted) throw Object.assign(new Error('Request stopped.'), { name: 'AbortError' });
+    if(context.allowFeatureBuild===false&&name==='build_feature')throw Object.assign(fail('This follow-through cannot start another feature build.','continuation_build_forbidden'),{statusCode:403});
     const budget=executionBudget(context);if(!budget.remaining)throw fail('This request reached its shared action budget. Completed actions are retained.','execution_budget_exceeded');budget.remaining-=1;
+    const previous=continuationPriorEffect(context.followThrough?.priorActions,name,raw);
+    if(previous)return{...previous.result,replayed:true,continuationReuse:{requestId:context.followThrough.originRequestId,actionId:previous.actionId},historical:true};
     if(name===PROJECT_FILES_TOOL_NAME)return executeProjectFiles(raw,context);
     if(typeof name==='string'&&name.startsWith('cap_'))return runCapability(name,raw,context);
     const args = validateArguments(name, raw, registry);
     if(name==='manage_work'){
       if(context.allowDelegation===false)throw Object.assign(fail('Independent work cannot delegate or manage other jobs.','delegation_forbidden'),{statusCode:403});
       if(!work)throw Object.assign(fail('Independent work is unavailable in this runtime.','work_unavailable'),{statusCode:503});
-      const allowed={start:['action','prompt','title'],list:['action','offset','limit'],read:['action','jobId','promptOffset','textOffset','actionOffset'],cancel:['action','jobId']}[args.action];
+      const allowed={start:['action','prompt','title'],list:['action','offset','limit'],read:['action','jobId','promptOffset','textOffset','actionOffset'],cancel:['action','jobId'],continue:['action','continuationId']}[args.action];
       if(!allowed||Object.keys(args).some(key=>!allowed.includes(key)))throw fail('Use only arguments for the selected work operation.');
+      if(args.action==='continue'){
+        if(!continuations||typeof args.continuationId!=='string'||!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(args.continuationId))throw Object.assign(fail('Choose an actual linked original request from build history.','continuation_unavailable'),{statusCode:409});
+        const result=await continuations.continue(args.continuationId,{signal});return{continuation:continuationReference(result.continuation),...(result.continuation?.workJob?{workJob:result.continuation.workJob}:{}),message:'Inspect the linked original request and its actual Work outcome. A build or accepted handoff does not mean the task is completed.'};
+      }
       if(args.action==='list')return work.list({offset:args.offset,limit:args.limit});
       if(typeof args.jobId==='string'&&!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(args.jobId))throw fail('Choose an actual work job UUID.');
       if(args.action==='read'||args.action==='cancel'){
@@ -212,7 +220,14 @@ export function createProductivityTools({ store, builder, desktop, root, work, p
           return saved.reply;
         }
         try {
-          const result = { featureJob: await builder.request({ prompt: args.prompt, providerId, autoApply: true }, owner), message: 'The feature build has started. Check its real progress before saying it is installed.' };
+          let linked;
+          if(continuations&&context.currentMessage&&context.currentRequestId&&context.currentRequestDigest&&context.providerSnapshot){
+            const id=operationId('continuation',owner+':'+context.currentRequestId),buildId=operationId('continuation-build',id),workId=operationId('continuation-work',id);
+            const provider=context.providerSnapshot;
+            linked=await continuations.requestBuild({id,buildId,workId,buildSpec:args.prompt,origin:{requestId:context.currentRequestId,requestDigest:context.currentRequestDigest,message:context.currentMessage,providerId,provider:{id:provider.id,label:provider.label||provider.id,type:provider.type,model:provider.model??'',...(provider.baseUrl?{baseUrl:provider.baseUrl}:{})},...(context.conversationId?{conversationId:context.conversationId}:{}),...(context.contextId?{contextId:context.contextId}:{}),...(context.windowContext?{windowContext:context.windowContext}:{}),...(context.project?{project:context.project}:{}),...(context.runtime?{runtime:context.runtime}:{})}},{scope:context.scope,signal});
+          }
+          const featureJob=linked?linked.featureJob||await builder.get(linked.continuation.buildId,owner):await builder.request({prompt:args.prompt,providerId,autoApply:true},owner);
+          const result = { featureJob,...(linked?.continuation?{continuation:continuationReference(linked.continuation)}:{}), message: 'The feature build has started. Check its real progress before saying it is installed.'+(linked?' The linked original request can continue after its tool is ready.':'') };
           store.finishChat?.(receiptId, digest, result); return result;
         } catch (error) { store.finishChat?.(receiptId, digest, { message: 'The feature build could not be started. Check build history before retrying.', code: error.code || 'build_failed', statusCode: error.statusCode || 500 }, true); throw error; }
       }
@@ -220,7 +235,9 @@ export function createProductivityTools({ store, builder, desktop, root, work, p
       case 'inspect_feature_build': {
         if (!builder || typeof builder.get !== 'function') throw fail('The feature builder is not available.', 'builder_unavailable');
         if (!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(args.jobId)) throw fail('Choose an actual feature build UUID.');
-        return inspectFeatureBuild(await builder.get(args.jobId, owner), args.jobId, args.requestOffset ?? 0);
+        const report=inspectFeatureBuild(await builder.get(args.jobId, owner), args.jobId, args.requestOffset ?? 0);
+        if(continuations){const linked=await continuations.getByBuild(args.jobId);if(linked?.continuation)report.featureBuild.continuation={...continuationReference(linked.continuation),reason:linked.continuation.reason,ready:linked.continuation.readiness?.ready===true};}
+        return report;
       }
       default: throw fail('That tool is not registered.');
     }
@@ -240,6 +257,8 @@ export function createProductivityTools({ store, builder, desktop, root, work, p
     const receiptId=`capability:${operationId(context.requestId||randomUUID(),context.callId||'capability')}`,digest=capabilityHash({name,arguments:args});
     const prior=store.executionReceipt(receiptId,digest);if(prior)return replayCapability(prior);
     const capability=custom.get(name);if(!capability)throw Object.assign(fail('This capability is not installed. Inspect the capability catalog.','capability_unavailable'),{statusCode:409});
+    const required=context.followThrough?.requiredCapabilities?.find(pin=>pin.name===name);
+    if(required&&(required.id!==capability.id||required.version!==capability.version||required.hash!==capability.hash))throw Object.assign(fail('The newly installed tool changed before this follow-through could use it. Inspect the current build.','continuation_capability_changed'),{statusCode:409});
     const checked=validateToolArguments(capability.tool,args),meta={id:capability.id,name,version:capability.version,hash:capability.hash};
     const saved=store.beginExecution({id:receiptId,digest,definition:meta});if(saved)return replayCapability(saved);
     const hostActions=[];let budgetFailure=null;
@@ -276,5 +295,5 @@ export function createProductivityTools({ store, builder, desktop, root, work, p
     }
     const finished=store.finishExecution({id:receiptId,digest,result:{id:workflowId,status:'completed',steps:results}});return{...finished.result,workspace:store.snapshot()};
   }
-  return { definitions, catalog, execute, runWorkflow, setWorkService(service){if(!service||['create','list','get','cancel'].some(name=>typeof service[name]!=='function'))throw new TypeError('Use the actual work service.');work=service;} };
+  return { definitions, catalog, execute, runWorkflow, setContinuationService(service){if(!service||['requestBuild','continue','getByBuild'].some(name=>typeof service[name]!=='function'))throw new TypeError('Use the actual original-request service.');continuations=service;},setWorkService(service){if(!service||['create','list','get','cancel'].some(name=>typeof service[name]!=='function'))throw new TypeError('Use the actual work service.');work=service;} };
 }

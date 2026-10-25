@@ -1,5 +1,6 @@
 import { windowContextReference } from './window-context.mjs';
 import { projectReference, projectEditReference, projectReadReference } from './project-files-context.mjs';
+import {continuationReference} from './continuation-context.mjs';
 
 const STATUSES=new Set(['queued','running','completed','failed','cancelled','interrupted','waiting_for_review']);
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
@@ -34,6 +35,7 @@ function references(source,depth=0){
   }
   const context=windowContextReference(source.windowContext);if(context)result.windowContext=context;
   if(source.projectContext)result.projectContext=projectReference(source.projectContext);
+  if(source.continuation)result.continuation=continuationReference(source.continuation);
   if(source.projectFileEdit)result.projectFileEdit=projectEditReference(source.projectFileEdit);
   if(source.projectFileRead||source.sourceTrust==='untrusted_project_file')result.projectFileRead=projectReadReference(source.projectFileRead||source);
   if(source.sourceType==='selected_window_accessibility')Object.assign(result,{sourceType:source.sourceType,sourceOmitted:true,readable:source.readable===true});
@@ -78,6 +80,7 @@ export function formatWorkOutcome(job,turn,{textOffset=0,textLimit=4000,actionOf
   if(error!==undefined&&error!==null){if(!object(error))throw fail('The recorded work error is malformed.',502);outcome.error={code:typeof error.code==='string'?shortened(error.code,100):'work_failed',message:typeof error.message==='string'?shortened(error.message,2000):'This work did not finish. Inspect its recorded actions.'};}
   const context=windowContextReference(turn?.reply?.windowContext??turn?.error?.windowContext??turn?.windowContext??job.windowContext);if(context)outcome.windowContext=context;
   const project=projectReference(turn?.reply?.projectContext??turn?.error?.projectContext??turn?.projectContext??job.project);if(project)outcome.projectContext=project;
+  const continuation=continuationReference(turn?.reply?.continuation??turn?.error?.continuation);if(continuation)outcome.continuation=continuation;
   if(bytes(outcome)>maxBytes)throw fail('The work page metadata exceeds its response allocation.',502);
   for(const action of recordedActions.slice(actionOffset,actionOffset+actionLimit)){
     // Most stored receipts fit intact. Only oversized individual results are

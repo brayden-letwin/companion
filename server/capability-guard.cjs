@@ -1,6 +1,6 @@
 'use strict';
-// Load inherited pipes before blocking new sockets. Native permissions restrict files/processes;
-// these fixed JavaScript hooks additionally deny ordinary networking and signalling the host.
+// Load inherited pipes before blocking new sockets. These fixed restrictions
+// supplement native permissions; they are not an operating-system sandbox.
 void process.stdin; void process.stdout; void process.stderr;
 const { syncBuiltinESMExports } = require('node:module');
 function denied() { throw Object.assign(new Error('This operation is unavailable in a capability.'), { code: 'ERR_COMPANION_CAPABILITY_DENIED' }); }
@@ -22,5 +22,17 @@ for (const name of ['net', 'tls', 'http', 'https', 'http2', 'dgram', 'dns', 'dns
     block(module, key);
   }
   if (module.promises) for (const [key, value] of Object.entries(module.promises)) if (typeof value === 'function') block(module.promises, key);
+}
+// Callable capabilities use the parent broker for workspace data. Native SQLite
+// has its own filesystem access, so it is unavailable inside these children.
+// Lock exported entry points and their native prototypes before module imports.
+const sqlite = require('node:sqlite');
+for (const [key, value] of Object.entries(sqlite)) {
+  if (typeof value !== 'function') continue;
+  if (value.prototype) for (const method of Object.getOwnPropertyNames(value.prototype)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value.prototype, method);
+    if (typeof descriptor?.value === 'function') block(value.prototype, method);
+  }
+  block(sqlite, key);
 }
 syncBuiltinESMExports();

@@ -13,6 +13,8 @@ import { createWorkService } from './work-service.mjs';
 import { validateSourceReadOptions } from './source-read.mjs';
 import { createProjectFileService } from './project-files-service.mjs';
 import { normalizeProjectBinding, projectReference, projectEditReference } from './project-files-context.mjs';
+import {createContinuationRuntime} from './continuation-runtime.mjs';
+import {continuationReference} from './continuation-context.mjs';
 
 const OWNER = 'local-workspace';
 const BASE = '/api/assistant';
@@ -48,7 +50,8 @@ async function readJson(req, limit = 2 * 1024 * 1024) {
   let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw fail(400, 'invalid_json', 'Provide a JSON object.'); }
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw fail(400, 'invalid_json', 'Provide a JSON object.'); return body;
 }
-const routeMatches = route => ['/chat','/work','/context','/projects','/projects/choose','/conversations','/providers','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
+const routeMatches = route => ['/chat','/work','/continuations','/context','/projects','/projects/choose','/conversations','/providers','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
+  || /^\/api\/assistant\/continuations\/[a-f\d-]+(?:\/(?:continue|cancel))?$/i.test(route)
   || /^\/api\/assistant\/projects\/[a-f\d-]+(?:\/(?:files|file|history|edit|revoke|edits\/[a-f\d-]+))?$/i.test(route)
   || /^\/api\/assistant\/(?:work\/[a-f\d-]+(?:\/cancel)?|context\/[a-f\d-]+\/clear|conversations\/[a-f\d-]+|features\/[a-f\d-]+(?:\/(?:apply|rollback|cancel))?|workspace\/workflows\/[a-f\d-]+\/run|desktop\/actions\/[a-f\d-]+\/(?:approve|cancel))$/i.test(route);
 
@@ -101,15 +104,25 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
     return services.work.create({...input,prompt,providerId,provider:provider&&{id:provider.id,label:provider.label||provider.id,type:provider.type,model:provider.model??'',...(provider.baseUrl?{baseUrl:provider.baseUrl}:{})},...(windowContext?{windowContext}:{}),...(project?{project}:{})});
   }
   async function attachWorkRuntime(services){
+    services.runtimeStatus ||= getRuntimeStatus;
     services.work=await createWorkService({store:services.store,runTurn:async input=>{
       const controller=new AbortController(),abort=()=>controller.abort();input.signal?.addEventListener('abort',abort,{once:true});if(input.signal?.aborted)controller.abort();
       const untrack=trackProject(input.project,controller);
       const timer=setTimeout(()=>controller.abort(),240000);timer.unref?.();
-      try{return await runAssistantTurn({body:{id:input.requestId,message:input.message??input.prompt,providerId:input.providerId,conversationId:input.conversationId,expectedRevision:0,...(input.contextId?{contextId:input.contextId}:{}),...(input.project?{project:normalizeProjectBinding({projectId:input.project.projectId,grantEpoch:input.project.grantEpoch})}:{})},services,signal:controller.signal,scope:input.scope,allowDelegation:false,expectedProvider:input.expectedProvider||input.provider,onProgress:input.onProgress,readContext:(id,options)=>{if(input.windowContext)options.onSelected?.(input.windowContext);return readSelectedContext(services,id,input.scope,controller,options);}});}
+      try{
+        let followThrough;
+        if(input.continuation){if(typeof services.continuations?.prepareWork!=='function')throw fail(503,'continuation_unavailable','The original-request ledger is unavailable. This job cannot run as an unrestricted task.');followThrough=await services.continuations.prepareWork(input,{signal:controller.signal});}
+        return await runAssistantTurn({body:{id:input.requestId,message:input.message??input.prompt,providerId:input.providerId,conversationId:input.conversationId,expectedRevision:0,...(input.contextId?{contextId:input.contextId}:{}),...(input.project?{project:normalizeProjectBinding({projectId:input.project.projectId,grantEpoch:input.project.grantEpoch})}:{})},services,signal:controller.signal,scope:input.scope,allowDelegation:false,allowFeatureBuild:!followThrough,...(followThrough?{followThrough}:{}),expectedProvider:input.expectedProvider||input.provider,onProgress:input.onProgress,readContext:(id,options)=>{if(input.windowContext)options.onSelected?.(input.windowContext);return readSelectedContext(services,id,input.scope,controller,options);}});
+      }
       finally{clearTimeout(timer);input.signal?.removeEventListener('abort',abort);removeContextReader(input.contextId,controller);untrack();}
     }});
     services.tools.setWorkService?.({create:(input,options)=>acceptWork(input,services,options),list:options=>services.work.list(options),get:(id,options)=>services.work.get(id,options),cancel:id=>services.work.cancel(id)});
-    services.projectFiles?.onRevoke?.(project=>{for(const controller of projectRequests.get(projectKey(project))||[])controller.abort();return services.work.cancelProject(project);});
+    if(!createRuntime||services.enableContinuations===true){
+      if(!services.continuations)try{services.continuations=await createContinuationRuntime({services,root,dataDirectory,getRuntimeStatus:services.runtimeStatus,validateWindow:(id,scope)=>ownedContext(id,scope),owner:OWNER});}
+      catch{const unavailable=()=>{throw fail(503,'continuation_unavailable','Linked original requests could not open. Retain their private state for review; other workspace tools remain available.');};services.continuations={requestBuild:unavailable,list:unavailable,get:unavailable,getByBuild:unavailable,getByWork:unavailable,recordForWork:unavailable,prepareWork:unavailable,continue:unavailable,cancel:unavailable,stopAll:async()=>({stopped:0}),cancelProject:async()=>({stopped:0}),close:async()=>{}};}
+      services.tools.setContinuationService?.(services.continuations);
+    }
+    services.projectFiles?.onRevoke?.(async project=>{for(const controller of projectRequests.get(projectKey(project))||[])controller.abort();await services.continuations?.cancelProject?.(project);return services.work.cancelProject(project);});
     return services;
   }
   async function selectContext(req,res,body,session,services){
@@ -203,6 +216,15 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         session.windows?.set('productivity', window);
         const services = await runtime();
         if (req.method === 'GET') {
+          if(route===BASE+'/continuations'){
+            if(!services.continuations)throw fail(503,'continuation_unavailable','Linked original requests are unavailable.');
+            const query=projectQuery(req,['buildId','offset','limit']),offset=query.offset??0,limit=query.limit??20;
+            if(!Number.isSafeInteger(offset)||offset<0||offset>200||!Number.isSafeInteger(limit)||limit<1||limit>20)throw fail(400,'invalid_continuation_page','Use bounded original-request paging.');
+            if(query.buildId!==undefined){if(!UUID.test(query.buildId)||offset>1)throw fail(400,'invalid_continuation_page','Choose one actual build and its original request.');const linked=await services.continuations.getByBuild(query.buildId),total=linked?1:0;json(res,200,{continuations:linked&&offset===0?[linked.continuation]:[],total,offset,limit,hasMore:false,nextOffset:null});}
+            else json(res,200,await services.continuations.list({offset,limit}));return true;
+          }
+          const continuation=/^\/api\/assistant\/continuations\/([a-f\d-]+)$/i.exec(route);
+          if(continuation){if(!services.continuations)throw fail(503,'continuation_unavailable','Linked original requests are unavailable.');json(res,200,await services.continuations.get(continuation[1]));return true;}
           if(route===BASE+'/projects'){projectQuery(req,[]);if(!services.projectFiles)throw fail(503,'project_files_unavailable','Project folders are unavailable.');json(res,200,await services.projectFiles.projects({includeLocalPaths:true}));return true;}
           const projectRoute=/^\/api\/assistant\/projects\/([a-f\d-]+)(?:\/(files|file|history|edits\/([a-f\d-]+)))?$/i.exec(route);
           if(projectRoute){
@@ -237,6 +259,8 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         }
         if (req.method !== 'POST') throw fail(405, 'method_not_allowed', 'Use GET or POST.');
         const body = await readJson(req);
+        const continuationAction=/^\/api\/assistant\/continuations\/([a-f\d-]+)\/(continue|cancel)$/i.exec(route);
+        if(continuationAction){fields(body,[]);if(!services.continuations)throw fail(503,'continuation_unavailable','Linked original requests are unavailable.');const id=continuationAction[1];json(res,200,continuationAction[2]==='cancel'?await services.continuations.cancel(id):await guardedRequest(req,res,session,id,signal=>services.continuations.continue(id,{signal})));return true;}
         if(route===BASE+'/projects/choose'){fields(body,[]);if(!services.projectFiles)throw fail(503,'project_files_unavailable','Project folders are unavailable.');json(res,200,await guardedRequest(req,res,session,randomUUID(),signal=>services.projectFiles.choose({signal})));return true;}
         const projectAction=/^\/api\/assistant\/projects\/([a-f\d-]+)\/(edit|revoke)$/i.exec(route);
         if(projectAction){
@@ -259,6 +283,7 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         if (route === BASE + '/stop') {
           fields(body, []);
           for (const controller of active.values()) controller.abort();
+          const continuations=await services.continuations?.stopAll?.();
           const work=await services.work.stopAll();
           const desktop = await services.desktop?.cancelAll();
           const builds = services.builder.stopPending ? (await services.builder.stopPending(OWNER)).builds : [];
@@ -267,7 +292,7 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
             try { const result = await services.builder.cancel(job.id, OWNER); builds.push({ id: job.id, status: result.status }); }
             catch { builds.push({ id: job.id, status: 'check_required' }); }
           }
-          json(res, 200, { stopped: true, desktop: desktop || null, builds,work }); return true;
+          json(res, 200, { stopped: true, desktop: desktop || null, builds,work,...(continuations?{continuations}:{}) }); return true;
         }
         if (route === BASE + '/desktop/stop') {
           fields(body, []);
@@ -324,14 +349,14 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         throw fail(404, 'not_found', 'That action was not found.');
       } catch (error) {
         const status = error.statusCode || error.status || 500;
-        json(res, Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500, { error: { code: error.code || 'productivity_error', message: error.statusCode || error.status ? error.message : 'Companion could not complete this action. Check its connection and try again.' }, ...(error.workspace ? { workspace: error.workspace } : {}), ...(error.actions ? { actions: error.actions } : {}), ...(error.windowContext ? {windowContext:windowContextReference(error.windowContext)} : {}),...(error.projectFileEdit?{projectFileEdit:projectEditReference(error.projectFileEdit)}:{}),...(error.projectContext?{projectContext:projectReference(error.projectContext)}:{}), ...(Array.isArray(error.hostActions) ? { hostActions: error.hostActions } : {}), ...(error.capability ? { capability: error.capability } : {}), ...(error.conversation ? { conversation: conversationPage(error.conversation) } : {}), ...(error.conversationId ? { conversationId: error.conversationId } : {}) });
+        json(res, Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500, { error: { code: error.code || 'productivity_error', message: error.statusCode || error.status ? error.message : 'Companion could not complete this action. Check its connection and try again.' }, ...(error.workspace ? { workspace: error.workspace } : {}), ...(error.actions ? { actions: error.actions } : {}),...(error.continuation?{continuation:error.continuation}:{}), ...(error.windowContext ? {windowContext:windowContextReference(error.windowContext)} : {}),...(error.projectFileEdit?{projectFileEdit:projectEditReference(error.projectFileEdit)}:{}),...(error.projectContext?{projectContext:projectReference(error.projectContext)}:{}), ...(Array.isArray(error.hostActions) ? { hostActions: error.hostActions } : {}), ...(error.capability ? { capability: error.capability } : {}), ...(error.conversation ? { conversation: conversationPage(error.conversation) } : {}), ...(error.conversationId ? { conversationId: error.conversationId } : {}) });
       }
       return true;
     },
     cancel(scope, id) { active.get(`${scope}:${id}`)?.abort(); },
     async close() {
       closed = true; for (const controller of active.values()) controller.abort(); active.clear();contextPins.clear();contextRequests.clear();projectRequests.clear();
-      if (runtimePromise) { const services = await runtimePromise.catch(() => null);await services?.work?.close?.();await services?.projectFiles?.close?.(); await services?.desktop?.close?.(); await services?.builder.close?.(); services?.store.close(); }
+      if (runtimePromise) { const services = await runtimePromise.catch(() => null);const workClosing=services?.work?.close?.();await services?.continuations?.close?.();await workClosing;await services?.projectFiles?.close?.(); await services?.desktop?.close?.(); await services?.builder.close?.(); services?.store.close(); }
     },
   };
 }
