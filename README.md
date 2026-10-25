@@ -35,11 +35,14 @@ New callable functions now share one registry. Voice/chat discovers them, panels
 
 Each workflow run retains its original definition and real partial results. An exact retry returns that run's receipt even if the workflow was later edited or disabled. Changed or removed custom actions require review before a fresh run; they are never silently replaced. Generated capability behavior checks execute actual code with fixture-only host effects. Those checks supplement concrete review and live acceptance rather than proving every possible feature correct.
 
+**Tools → Files** connects a folder you choose to chat, voice, Work and connected AI tools. Read and save requested UTF-8 text/code files, inspect actual edit history, and Undo recent edits. Each request keeps its original folder; removing access stops dependent future operations. Companion’s own source and private data stay on the Build/review path. See [Project files](docs/PROJECT_FILES.md) for access, recovery and size limits.
+
 | View | What works now |
 | --- | --- |
 | **Chat** | Saved conversations, actual action receipts, and a typing/manual-microphone fallback. |
 | **Tasks** | Search the full list, filter projects, sort by priority or due date, read complete instructions, and load more results. Create, edit, complete, and reopen persistent tasks. |
 | **Notes** | Save, search, edit, and archive persistent notes. Keeping an AI reply is an explicit action. |
+| **Files** | Choose a local project folder; read/edit text files, inspect saved changes and Undo. |
 | **Workflows** | Save a sequence of supported local actions and run it with actual step results. |
 | **Tools → Work** | Hand off independent requests, inspect actual results, stop one job, or open its saved conversation. |
 | **Computer** | Search/open installed apps, choose a window as question context, read a snapshot, and review prepared input. |
@@ -145,7 +148,7 @@ npm test
 npm run check
 ```
 
-The 0.14 update passed 466 Node tests and 49 JavaScript syntax checks. Live checks verified full service restart through Settings, cached-source restoration after a deliberately broken update, complete workspace preservation, and graceful Windows Stop plus an unchanged Already stopped retry. The primary app now uses the outer launcher. [QA.md](QA.md) distinguishes these checks from native, physical-voice and account validation still outstanding.
+The 0.15 update passed 529 Node tests and 55 JavaScript syntax checks. Live browser, GPT and MCP checks saved and undid real synthetic text files while preserving BOM, emoji and CRLF. The source-builder regression baseline also passed without activation. [QA.md](QA.md) records exact recovery checks and the human picker, physical-voice and Electron checks still outstanding.
 
 The 0.13 update passed 442 Node tests and 47 JavaScript syntax checks. A real external Codex client used Companion's MCP tools to read exact source pages and submit a working Checklist panel in an isolated test app. An initial failed check stopped activation; a corrected build passed, ran through actual browser controls, and rolled back to the complete original source.
 

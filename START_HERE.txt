@@ -13,6 +13,9 @@ COMPANION — START HERE
         Start 25 minutes of focus time.
    You can also edit Tasks and Notes directly.
    Computer can search/open apps and read a window you choose.
+   Tools > Files lets you choose a project folder for text/code work.
+   Save requested edits, inspect Recent edits, and Undo recent changes.
+   Leave folder detaches this window; Remove access revokes shared access.
 
 3. Open Settings to choose an AI connection.
    This development PC has a working Codex / ChatGPT sign-in.
