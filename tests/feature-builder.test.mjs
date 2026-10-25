@@ -112,6 +112,12 @@ test('routine history controls require review before generated code can change e
  assert.equal(job.status,'review_required');assert.equal(job.files[0].protected,true);await absent(path.join(f.root,file));
 });
 
+test('extracted workflow editor controls retain the protected source review boundary',async t=>{
+ const file='src/workflow-editor.mjs',f=await fixture(t,{complete:async()=>({summary:'Prepare reviewed workflow editor UI.',files:[{path:file,content:'export const editorPolicy = "review required";\n'}],tests:[]})});
+ const job=await finished(f.builder,(await f.builder.request({prompt:'Prepare changes to routine editor controls.',providerId:'synthetic',autoApply:true},OWNER)).id);
+ assert.equal(job.status,'review_required');assert.equal(job.reviewRequired,true);assert.equal(job.files[0].protected,true);await absent(path.join(f.root,file));
+});
+
 function executablePatch(code='export function execute(args){return {total:args.value*2};}') {
   const capability={id:'double-value',title:'Double value',module:'./double-value.mjs',version:1,tool:{name:'cap_double_value',description:'Double one number.',parameters:{type:'object',properties:{value:{type:'integer'}},required:['value'],additionalProperties:false}},workflowAllowed:true,effectPolicy:'pure',acceptance:[{name:'Known result',arguments:{value:3},expected:{total:6}}]};
   return {summary:'Add one executable registered capability.',files:[{path:'server/capabilities/manifest.json',content:JSON.stringify({version:1,capabilities:[capability]})},{path:'server/capabilities/double-value.mjs',content:code}],tests:[]};
@@ -188,6 +194,22 @@ test('generated edits cannot remove the original task-query regression check bef
   const job=await finished(f.builder,(await f.builder.request({prompt:'Prepare the requested task behavior change for review.',providerId:'synthetic'},OWNER)).id);
   assert.equal(job.status,'failed');assert.equal(job.verification.passed,false);const original=job.verification.checks.find(check=>check.name==='Existing trusted regression tests');assert.equal(original.passed,false);assert.match(original.output,/task counts remain complete/);
   assert.match(await readFile(path.join(f.root,'server/task-queries.mjs'),'utf8'),/countsAreComplete = true/);assert.match(await readFile(path.join(f.root,'tests/task-queries.test.mjs'),'utf8'),/task counts remain complete/);
+});
+
+test('guarded original UI regressions use frozen support and reject a candidate helper that fakes broken UI success',async t=>{
+  const f=await fixture(t),uiPath='src/assistant.mjs',supportPath='tests/support/assistant-ui-fixture.mjs',testPath='tests/productivity-conversations-ui.test.mjs';
+  const originalUi='document.getElementById("status").textContent="Ready for requests";\n',brokenUi='document.getElementById("status").textContent="BROKEN_ACTUAL_UI_STATE";\n';
+  const originalSupport='import vm from "node:vm";import {readFileSync} from "node:fs";const root=new URL("../../",import.meta.url);export function createUI(){const status={textContent:""};const context=vm.createContext({document:{getElementById:id=>{if(id!=="status")throw Error("Unexpected fixture node");return status;}}});vm.runInContext(readFileSync(new URL("src/assistant.mjs",root),"utf8"),context);return{status};}\n';
+  const fakeSupport='export function createUI(){return{status:{textContent:"Ready for requests"}};}\n';
+  const originalTest='import test from "node:test";import assert from "node:assert/strict";import {createUI} from "./support/assistant-ui-fixture.mjs";test("original fixture reads actual candidate UI",()=>assert.equal(createUI().status.textContent,"Ready for requests"));\n';
+  await mkdir(path.join(f.root,'tests/support'),{recursive:true});await writeFile(path.join(f.root,uiPath),originalUi);await writeFile(path.join(f.root,supportPath),originalSupport);await writeFile(path.join(f.root,testPath),originalTest);
+  const source=await f.builder.source(OWNER),hashes=Object.fromEntries(source.files.map(file=>[file.path,file.hash]));
+  const positive=await finished(f.builder,(await f.builder.submitPatch({summary:'Unchanged real UI with shared original fixture.',files:[{path:uiPath,content:originalUi+'// Synthetic source-only maintenance.\n'}],baseHashes:{[uiPath]:hashes[uiPath]},autoApply:false},OWNER)).id);
+  assert.equal(positive.status,'review_required',JSON.stringify(positive.verification));assert.equal(positive.verification.checks.find(check=>check.name==='Existing trusted regression tests')?.passed,true);
+  const failed=await finished(f.builder,(await f.builder.submitPatch({summary:'Synthetic candidate changes helper to hide broken actual UI.',files:[{path:uiPath,content:brokenUi},{path:supportPath,content:fakeSupport}],baseHashes:{[uiPath]:hashes[uiPath],[supportPath]:hashes[supportPath]},autoApply:true},OWNER)).id);
+  assert.equal(failed.status,'failed');assert.equal(failed.verification.passed,false);const check=failed.verification.checks.find(value=>value.name==='Existing trusted regression tests');assert.equal(check?.passed,false);assert.match(check.output,/original fixture reads actual candidate UI/);assert.match(check.output,/BROKEN_ACTUAL_UI_STATE/);assert.doesNotMatch(check.output,/ERR_MODULE_NOT_FOUND/);
+  const candidate=path.join(f.dataDirectory,failed.id,'candidate');assert.equal(await readFile(path.join(candidate,supportPath),'utf8'),fakeSupport);assert.equal(await readFile(path.join(candidate,'trusted-regression-tests/support/assistant-ui-fixture.mjs'),'utf8'),originalSupport);assert.equal(await readFile(path.join(candidate,'trusted-regression-tests/productivity-conversations-ui.test.mjs'),'utf8'),originalTest);
+  assert.equal(await readFile(path.join(f.root,uiPath),'utf8'),originalUi);assert.equal(await readFile(path.join(f.root,supportPath),'utf8'),originalSupport);assert.equal(f.completions.length,0,'External regression fixtures use no model calls.');await assert.rejects(f.builder.apply(failed.id,OWNER),{code:'feature_not_ready'});
 });
 
 test('candidate tests cannot read private files or inherited credentials', async t => {
