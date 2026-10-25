@@ -36,6 +36,8 @@ const runningWorkflows = new Set(), workflowResults = new Map();
 const jobDetails = new Map(), jobDetailPending = new Set();
 const jobDetailRetryAt = new Map();
 const CONVERSATION_ID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
+const pendingWorkflowRuns=new Map();
+syncPendingWorkflowRuns();
 const savedConversationId = readStored('conversationId', null);
 let conversationId = typeof savedConversationId==='string'&&CONVERSATION_ID.test(savedConversationId)?savedConversationId:null;
 let conversations=[], conversationDetail=null, conversationInitialized=false, conversationSelectionGeneration=0;
@@ -636,17 +638,29 @@ function validateWorkflowSteps(steps){
     validateWorkflowValue(step.arguments||{},state.meta.parameters,'step '+(index+1));
   }
 }
+function savedWorkflowRunIds(){const saved=readStored('pendingWorkflowRuns',[]),map=new Map();if(Array.isArray(saved))for(const item of saved.slice(0,100))if(item&&CONVERSATION_ID.test(item.workflowId)&&CONVERSATION_ID.test(item.operationId))map.set(item.workflowId,item.operationId);return map;}
+function syncPendingWorkflowRuns(){for(const[id,operationId]of savedWorkflowRunIds())if(!pendingWorkflowRuns.has(id))pendingWorkflowRuns.set(id,operationId);}
+function rememberWorkflowRun(id,operationId){pendingWorkflowRuns.set(id,operationId);const saved=savedWorkflowRunIds();saved.set(id,operationId);store('pendingWorkflowRuns',[...saved].map(([workflowId,operationId])=>({workflowId,operationId})));}
+function forgetWorkflowRun(id,operationId){if(pendingWorkflowRuns.get(id)===operationId)pendingWorkflowRuns.delete(id);const saved=savedWorkflowRunIds();if(saved.get(id)===operationId)saved.delete(id);store('pendingWorkflowRuns',[...saved].map(([workflowId,operationId])=>({workflowId,operationId})));}
 function renderWorkflows(){
-  const list=$('workflow-list');list.replaceChildren();if(!workspace?.workflows.length)list.append(emptyState('No workflows yet.','Create a workflow from the actions you use often.'));
+  syncPendingWorkflowRuns();const list=$('workflow-list');list.replaceChildren();if(!workspace?.workflows.length)list.append(emptyState('No workflows yet.','Create a workflow from the actions you use often.'));
   for(const flow of workspace?.workflows||[]){const wrapper=element('div'),card=element('article','workflow-card'),info=element('div','workflow-info');info.append(element('h2','',flow.name),element('p','',flow.description||'Saved actions, ready to run.'),element('small','',(flow.steps?.length||0)+' steps'+(flow.enabled===false?' · Disabled':'')));const unavailable=toolCatalogReady&&(flow.steps||[]).find(step=>!workflowAvailability(step).available);if(unavailable)info.append(element('p','workflow-unavailable',workflowAvailability(unavailable).reason));
-    const actions=element('div','workflow-actions'),run=button(runningWorkflows.has(flow.id)?'Running…':'Run workflow ↗','secondary-button',()=>void runWorkflow(flow));run.disabled=flow.enabled===false||runningWorkflows.has(flow.id)||!!unavailable;actions.append(run,button('Edit','quiet-button',()=>openWorkflow(flow)));card.append(element('span','workflow-icon','↳'),info,actions);wrapper.append(card);
-    const result=workflowResults.get(flow.id);if(result){const receipt=element('div','workflow-result');receipt.append(element('strong','',result.status==='completed'?'Workflow finished.':'Workflow stopped: '+(result.error||'A step could not finish.')));for(const[index,step]of(result.steps||[]).entries()){const failed=step.status==='failed'||!!step.error||!!step.result?.error,pending=step.status==='pending';receipt.append(element('div','',(index+1)+'. '+toolLabel(step.tool)+' · '+(failed?'could not finish':pending?'needs review':'completed')));if(step.result?.capability&&step.result.value)receipt.append(element('pre','capability-output',JSON.stringify(step.result.value,null,2).slice(0,4000)));}wrapper.append(receipt);}list.append(wrapper);
+    const pendingRun=pendingWorkflowRuns.has(flow.id);if(pendingRun)info.append(element('p','form-hint','The last run needs confirmation. Checking it will not start a new run.'));
+    const actions=element('div','workflow-actions'),run=button(runningWorkflows.has(flow.id)?(pendingRun?'Checking…':'Running…'):pendingRun?'Check last run':'Run workflow ↗','secondary-button',()=>void runWorkflow(flow));run.disabled=runningWorkflows.has(flow.id)||(!pendingRun&&(flow.enabled===false||!!unavailable));actions.append(run,button('Edit','quiet-button',()=>openWorkflow(flow)));card.append(element('span','workflow-icon','↳'),info,actions);wrapper.append(card);
+    const result=workflowResults.get(flow.id);if(result){const receipt=element('div','workflow-result');receipt.append(element('strong','',result.status==='completed'?'Workflow finished.':result.status==='running'?'This workflow is still running. Use Check last run to read its saved result.':result.status==='interrupted'?'Workflow interrupted. Check the completed actions below before making another request.':'Workflow stopped: '+(result.error||'A step could not finish.')));for(const[index,step]of(result.steps||[]).entries()){const failed=step.status==='failed'||!!step.error||!!step.result?.error,pending=step.status==='pending';receipt.append(element('div','',(index+1)+'. '+toolLabel(step.tool)+' · '+(failed?'could not finish':pending?'needs review':'completed')));if(step.result?.capability&&step.result.value)receipt.append(element('pre','capability-output',JSON.stringify(step.result.value,null,2).slice(0,4000)));}wrapper.append(receipt);}list.append(wrapper);
   }
 }
 async function runWorkflow(flow){
-  if(runningWorkflows.has(flow.id)||runtimeReconnectPromise)return;runningWorkflows.add(flow.id);renderWorkflows();$('workflow-error').textContent='';
-  try{await refreshToolCatalog();validateWorkflowSteps(flow.steps||[]);const result=await boundedApi('workspace/workflows/'+encodeURIComponent(flow.id)+'/run',{method:'POST',body:JSON.stringify({operationId:crypto.randomUUID()})},45000);workflowResults.set(flow.id,result);if(result.workspace)applyWorkspace(result.workspace);toast(result.status==='completed'?'Workflow finished.':'The workflow stopped before all steps finished.');}
-  catch(error){$('workflow-error').textContent=error.message;}finally{runningWorkflows.delete(flow.id);renderWorkflows();}
+  if(runningWorkflows.has(flow.id)||runtimeReconnectPromise)return;syncPendingWorkflowRuns();let operationId=pendingWorkflowRuns.get(flow.id)||null;runningWorkflows.add(flow.id);renderWorkflows();$('workflow-error').textContent='';
+  try{
+    if(!operationId){await refreshToolCatalog();validateWorkflowSteps(flow.steps||[]);syncPendingWorkflowRuns();operationId=pendingWorkflowRuns.get(flow.id)||crypto.randomUUID();rememberWorkflowRun(flow.id,operationId);renderWorkflows();}
+    const result=await boundedApi('workspace/workflows/'+encodeURIComponent(flow.id)+'/run',{method:'POST',body:JSON.stringify({operationId})},45000);
+    if(result?.id!==flow.id||!['completed','failed','cancelled','running','interrupted'].includes(result.status))throw new Error('The saved run result could not be confirmed.');
+    workflowResults.set(flow.id,result);if(result.workspace)applyWorkspace(result.workspace);
+    if(['completed','failed','cancelled'].includes(result.status)){forgetWorkflowRun(flow.id,operationId);toast(result.status==='completed'?'Workflow finished.':'The workflow stopped. Completed actions are shown below.');}
+    else toast(result.status==='running'?'This workflow is still running. Check its saved result again shortly.':'The workflow was interrupted. Its completed actions remain visible.');
+  }catch(error){$('workflow-error').textContent=operationId?'The last run could not be confirmed. Use Check last run to check the same request safely. '+error.message:error.message;}
+  finally{runningWorkflows.delete(flow.id);renderWorkflows();}
 }
 function openWorkflow(flow=null){workflowEditingId=flow?.id||null;workflowEditingRevision=workspace?.revision;$('workflow-name').value=flow?.name||'';$('workflow-description').value=flow?.description||'';workflowDraft=clone(flow?.steps||[{tool:'',arguments:{}}]);$('workflow-form-error').textContent='';renderWorkflowSteps();showDialog('workflow-dialog');void refreshToolCatalog({quiet:true});}
 function replaceWorkflowArgument(step,name,value){const args={...(step.arguments||{})};if(value===undefined)delete args[name];else args[name]=value;step.arguments=args;}
