@@ -1,7 +1,8 @@
 COMPANION — START HERE
 
 1. Double-click Start Companion.cmd in this folder.
-   It starts Companion and opens Today in your browser.
+   It starts Companion and prefers the native corner when installed.
+   Its Show workspace control opens Today; otherwise the browser opens.
    No reading-group account is needed.
 
 2. Type what you want to get done.
@@ -9,6 +10,7 @@ COMPANION — START HERE
         Save a note: the next meeting needs an agenda.
         Start 25 minutes of focus time.
    You can also edit Tasks and Notes directly.
+   Computer can search/open apps and read a window you choose.
 
 3. Use the AI selector at the top.
    This development PC has a working Codex / ChatGPT sign-in.
@@ -19,6 +21,18 @@ VOICE
 Tap the mic to start; tap again to finish. Cancel stops the current request.
 Hands-free is optional and turns off when you switch tabs.
 Voice needs the local transcription service. Typing still works without it.
+The user reported basic voice success; spoken desktop approval still needs testing.
+Ctrl+Alt+Space toggles the corner when available. Ctrl+Alt+Escape is global Stop.
+The app shows whether those shortcuts actually registered. Hiding the corner
+keeps pending desktop reviews and background feature builds available.
+A physical global Stop check cancelled a pending action without changing its target text.
+
+COMPUTER INPUT
+A click, text replacement, or key press first needs a real preview.
+Check the exact window/control and input. Use its button, or say/type exactly
+"approve desktop action" or "cancel desktop action" while that preview is open.
+Its Speak this command button records the command. Old or expired previews
+cannot receive it. The model cannot approve its own desktop input.
 
 MISSING A TOOL?
 Open Build a feature and describe what you need.
@@ -29,11 +43,15 @@ A queued or failed build is not an installed feature.
 Reviewed server-worker updates restart and reconnect under the normal launcher.
 Changing the host program itself needs its owning host stopped and relaunched;
 a browser refresh cannot apply host code. Settings can restart a managed worker.
+Restart desktop app loads source-runtime Electron edits; a copied desktop package
+needs rebuilding to include repository changes.
 
 NEXT TIME
 Double-click the same launcher. Your tasks, notes, workflows, and build history
 are saved on this computer, outside the source repository.
-The default address is http://127.0.0.1:4174/assistant.html.
+The full workspace address is http://127.0.0.1:4174/assistant.html.
+Use scripts/start-companion.ps1 -Browser for the browser-only launch path.
+npm run desktop:legacy preserves the old math reader.
 
 A fresh checkout needs Node.js 24.15 or newer and an AI connection for chat.
 Codex uses its existing CLI sign-in; API providers need your own key and access.

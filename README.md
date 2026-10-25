@@ -4,13 +4,13 @@ A quiet, voice-driven workspace for getting things done—and adding the tools y
 
 ## Open it
 
-1. **Double-click `Start Companion.cmd`.** It starts Companion and opens **Today** in your browser.
+1. **Double-click `Start Companion.cmd`.** It starts Companion and prefers the native corner when its Electron runtime is installed; otherwise it opens **Today** in your browser.
 2. **Type what you want to get done.** Use the AI selector at the top; open **Settings** if a connection needs attention.
 3. **Use the microphone when voice is ready**, or keep typing. Tap again to finish speaking; **Cancel** stops the current request.
 
 No group account is needed. The existing development PC has a working Codex sign-in. On another PC, install **Node.js 24.15 or newer**, then use an existing Codex CLI sign-in or connect a provider in Settings. API keys belong in the app's password field, never in a chat or a Git commit.
 
-The default address is **http://127.0.0.1:4174/assistant.html**. It runs on this computer; it is not a hosted service. Closing the browser leaves the local server running. Double-click the same launcher next time.
+The full workspace is at **http://127.0.0.1:4174/assistant.html**. It runs on this computer; it is not a hosted service. Closing a page or hiding the corner leaves the local server running. Double-click the same launcher next time. The main local service was upgraded to 0.7 after its private data was backed up. [QA.md](QA.md) records live checks separately from automated tests and remaining hardware checks.
 
 Try a concrete request:
 
@@ -24,18 +24,37 @@ Requests go to your selected AI. Completed actions appear as real tool receipts 
 
 ## Your workspace
 
+The interface uses neutral black surfaces, clear labels, and white outlines. The compact corner keeps the request and microphone close at hand; the full workspace shows the tools when you need them.
+
 | View | What works now |
 | --- | --- |
 | **Today** | Conversation, recent activity, workspace counts, and a visible active focus session. |
 | **Tasks** | Create, edit, complete, and reopen persistent tasks, with details, priority, projects, and optional due dates in the underlying tools. |
 | **Notes** | Save, search, edit, and archive persistent notes. Keeping an AI reply is an explicit action. |
 | **Workflows** | Save a sequence of supported local actions and run it with actual step results. |
+| **Computer** | Search/open installed apps, list/focus windows, explicitly read a selected window, and review prepared input. |
 | **Build a feature** | Request real source changes, follow their progress, inspect diffs and checks, activate, and roll back. |
 | **Settings** | Select or configure AI connections and optional offline read-aloud. |
 
 Workflows currently use registered Companion actions such as creating tasks, saving notes, and starting focus time. They do not send email or operate other applications. A focus session is an in-app timer; it does not block applications or guarantee a system notification.
 
 Changes persist on the local server. If a concurrent edit changes the workspace, your draft remains available for an explicit retry. If a save response is lost, **Confirm last change** resends the original operation receipt rather than creating a duplicate.
+
+## The native corner
+
+The compact corner is **400 × 230**, with an expanded conversation view. Use its controls to expand, hide, or open the full workspace. **Ctrl+Alt+Space** toggles it when that shortcut is available; the UI reports actual shortcut availability. **Ctrl+Alt+Escape** is global Stop when registered: it cancels running requests, desktop helpers/pending actions, and queued/generating/checking feature jobs. Completed data and promoted source remain. Hiding the corner stops its microphone/current chat but preserves pending desktop reviews and background builds so you can continue in the full workspace.
+
+Run `scripts/start-companion.ps1 -Browser` to choose the browser instead. `npm run desktop` opens the general native workspace after its server is running. `npm run desktop:legacy` retains the original math reader/corner.
+
+Settings offers **Restart desktop app** for the current native app. When it is running directly from editable source, relaunching loads reviewed Electron changes. A copied desktop package must be rebuilt to include repository changes; relaunching its old copy is not an update. Server-worker restart and full managed-host relaunch remain separate operations.
+
+## Computer actions
+
+Ask for an action, or use **Computer** to find an installed app or explicitly list and read a window. A read returns bounded accessibility text and controls from that chosen window; it does not continuously watch the screen. Launch receipts distinguish an accepted launch from an observed app window. Unsupported or unavailable controls return a failure rather than a claim of success.
+
+Clicks, text replacement, and supported keys are first prepared as a target-bound action. **Review the actual window/control and exact input**, then use its action button or, while that same preview is open, say or type exactly **“approve desktop action”** or **“cancel desktop action.”** The review has its own microphone control. Approval is tied to the visible, unexpired preview captured before recording; a closed, changed, or different preview cannot receive that old command. Assistant replies and read-aloud text do not trigger approval.
+
+The model has no approval tool. Companion controls, credential fields, terminals, and other protected targets are blocked from generic input. Input can affect another app, including submitting or saving; the concrete preview is where you decide on that one action. A timeout or cancellation can leave an uncertain outcome, so check the target before retrying when the app reports that input may already have happened. This is scoped Windows automation, not unrestricted control of every program.
 
 ## Choose your AI
 
@@ -75,7 +94,7 @@ Tap the microphone to start and tap again to submit. A recording is bounded to 6
 
 Voice transcription uses the separate local speech service, independently of the selected chat provider. The launcher can start the already installed local services on this PC. Typed messages, direct task/note editing, and workflows remain available when voice is not ready. The [legacy local setup guide](docs/LEGACY_READER.md) contains the existing Ollama and Whisper installation instructions.
 
-Recordings are processed in memory by Companion's transcription route. A submitted transcript becomes a message to the selected AI. Real microphone hardware, accents, noisy-room behavior, and natural interruption still require human testing; synthetic audio checks are not evidence that those conditions work.
+Recordings are processed in memory by Companion's transcription route. A submitted transcript becomes a message to the selected AI. The user reported that basic voice worked. That report does not independently verify the Restart desktop app control or spoken desktop approval. A later normal launcher run independently verified a fresh native launch. Broader device changes, accents, noisy-room behavior, long pauses, and natural interruption still need testing; one successful use does not establish those conditions.
 
 ## Data and running locally
 
@@ -96,7 +115,7 @@ npm test
 npm run check
 ```
 
-All 166 Node tests and 30 JavaScript syntax checks passed. The automated suites cover the persistent store and real tools, provider protocols and credentials, source builds and rollback, runtime lifecycle, local API boundaries, and the preserved reader/group core. Live Codex requests created real tasks and notes, a saved workflow executed two steps, and the same workspace survived restart. A real Codex-generated time-zone panel passed five checks, activated and ran in an isolated source copy, then rolled back and disappeared from that copy’s UI. Managed worker restart and browser reconnection also passed live checks. [QA.md](QA.md) records these outcomes separately from mock/synthetic tests and lists the remaining live account and human-voice checks.
+The current 0.7 verification passed all 201 Node tests, 33 JavaScript syntax checks, and the PowerShell parser checks. The automated suites cover the persistent store and real tools, provider protocols and credentials, source builds and rollback, runtime lifecycle, local API boundaries, and the preserved reader/group core. Live Codex requests created real tasks and notes, a saved workflow executed two steps, and the same workspace survived restart. A real Codex-generated time-zone panel passed five checks, activated and ran in an isolated source copy, then rolled back and disappeared from that copy’s UI. Managed worker restart and browser reconnection also passed live checks. The native corner and a real GPT app-search/open-Calculator chain were checked separately. A real GPT-prepared Notepad text action completed after human button approval, and the exact synthetic text was observed in Notepad. Basic voice success was user-reported. A normal native launch showed the new white-outline corner, and a physical global Stop cancelled a pending Notepad action without changing the editor text. [QA.md](QA.md) records these outcomes separately from mock/synthetic tests and lists the remaining live account and human-voice checks.
 
 The app uses plain HTML/CSS/JavaScript and a local Node server. The original PDF/native reader additionally uses PDF.js and Electron. Packaging the desktop reader does not bundle the local model, speech environment, or workspace server. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.
 

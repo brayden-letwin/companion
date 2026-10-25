@@ -1,12 +1,13 @@
 {
   "name": "companion-math",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "A personal productivity assistant with connected AI models and a source-editing feature builder.",
-  "main": "electron/main.cjs",
+  "main": "electron/productivity-main.cjs",
   "scripts": {
     "start": "node server/companion-host.mjs",
     "desktop": "electron .",
+    "desktop:legacy": "electron electron/main.cjs",
     "preview": "node scripts/preview.mjs",
     "shared": "node server/companion-host.mjs",
     "test": "node --test tests/*.test.mjs tests/*.test.cjs",

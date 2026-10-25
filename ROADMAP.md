@@ -6,8 +6,11 @@ Companion's current direction is a minimal general productivity assistant in the
 
 ## Implemented foundation
 
-- [x] One main Windows launcher opens Today without a group account.
-- [x] Minimal dark workspace with persistent tasks, notes, workflows, activity, and visible focus state.
+- [x] One Windows launcher prefers the installed native corner, with browser fallback and no group account.
+- [x] Native compact/expanded views, named window controls, tray and actual global-shortcut availability, plus own-app relaunch.
+- [x] Scoped Windows app search/open, window list/focus/read, frozen input proposals, explicit human review, and real receipts.
+- [x] Exact local human voice/typed approval bound to the current preview; model output cannot approve actions.
+- [x] Minimal neutral black workspace with white outlines, clear labels, and persistent tasks, notes, workflows, activity, and visible focus state.
 - [x] Direct task/note editing, completion/reopening, note archiving, and search.
 - [x] Real allowlisted tools read and change the saved workspace; responses carry actual receipts.
 - [x] Explicit reusable workflows execute supported actions in order and report completed steps or failure.
@@ -35,9 +38,16 @@ The app can edit its own application source. It does not instantly acquire arbit
 - [ ] Validate Claude with a real user-owned Anthropic API account.
 - [ ] Validate OpenAI API and a custom compatible endpoint with real account access.
 - [ ] Test the MCP facade from real external Codex and Claude clients; verify their action receipts and source-change lifecycle.
-- [ ] Check human microphone capture, permission denial, device changes, pauses, noisy rooms, and read-aloud interruption.
+- [x] User reported basic voice success; this does not independently verify native relaunch or spoken approval.
+- [x] Live native corner bounds/toggle and GPT installed-app search/open-Calculator chain checked on QA.
+- [x] Verify real GPT-prepared Notepad text input through frozen preview, human button approval, and actual editor contents.
+- [ ] Validate exact human voice approval on a live target.
+- [x] Repeat physical global Stop after native reload: pending action cancelled and existing target text unchanged.
+- [x] Visually check the neutral white-outline workspace and responsive navigation in the browser.
+- [ ] Check device changes, long/noisy recording, pauses, accents, and read-aloud interruption.
 - [ ] Exercise longer sessions, multiple tabs, keyboard-only use, Windows scaling, and narrow screens.
-- [ ] Recheck a cold launch and repeated launch after current server/source changes; document server-restart behavior clearly.
+- [x] Check a normal native launcher run with a fresh default profile, visible white-outline corner, and ready GPT.
+- [ ] Check repeated launch, source-native Settings relaunch, and fresh-machine installation separately.
 
 Provider protocol tests use mocks unless a dated QA entry says otherwise. A saved API key is configuration, not proof that a live account or model can complete requests.
 
@@ -55,11 +65,14 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 
 ## Broader original goals remain open
 
-- [ ] A small native corner or tray assistant for the general workspace, with reliable global voice controls and immediate takeover.
+- [x] A small native corner/tray for the general workspace, with registered-shortcut status and global Stop.
+- [ ] Validate shortcut conflicts, multi-monitor placement, scaling, and longer native sessions across target PCs.
 - [ ] A deliberate voice bridge into an existing Codex development conversation, if the user still wants that exact route.
 - [ ] Multiple independent work streams under voice direction, with clear status and retained intent across them.
-- [ ] User-selected context from other windows or screen regions, without claiming to infer private thought from a pointer pause.
-- [ ] Intent-driven actions in external applications through explicit adapters, target checks, and verified outcomes.
+- [x] Explicit selected-window accessibility reads with snapshot IDs, expiry, and no continuous screen monitoring.
+- [ ] Add user-selected screen-region context and broader application coverage without inferring thought from pointer movement.
+- [x] Implement scoped Windows actions with target rechecks, input previews, protected-target blocks, and outcome receipts.
+- [ ] Validate broader applications and input patterns; generic scoped input is not unrestricted PC control.
 - [ ] Calendar, mail, files, browser, and other useful integrations with real account setup and action permissions.
 - [ ] Natural interruption and broader continuous voice modes after the current opt-in flow is tested with people.
 - [ ] A tested installation, updates, signing, recovery, and distribution path beyond this configured development PC.

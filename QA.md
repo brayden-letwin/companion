@@ -1,5 +1,38 @@
 # Prototype verification — 24 October 2026
 
+## Native corner and scoped Windows actions (0.7.0)
+
+The new 0.7 backend/native work was first checked against the separate QA service on port 4202. The main local service on port 4174 was then upgraded after its private data was backed up outside the repository; host 28652 and initial worker 28292 served the 0.7 workspace with Computer navigation and ready GPT. A successful service restart later loaded the final API hook in worker 36044. This records local rollout, not a claim that 0.7 has been pushed to GitHub. Human conversation contents and native screenshots are not published here.
+
+### Native and voice checks
+
+- The actual native corner was visible at 400 × 230, with a clear compact composer and window controls. Ctrl+Alt+Space actually showed it. The UI exposes the real registration result for toggle and global Stop rather than promising that another app has not claimed those keys.
+- A real GPT reply was observed in the user's native session. Its input/reply contents are deliberately omitted.
+- After the idle QA native instance was closed, a normal `scripts/start-companion.ps1` run with no overrides launched the primary 4174 workspace using a fresh default profile. The native window was visible on first launch at 400 × 230, titled Companion, with the white-outline design and ready GPT. A local screenshot was retained outside this repository. This verifies normal launch; the Settings Restart desktop app control remains independently unverified.
+- The user reported “Voice works” after receiving restart/microphone instructions. The exact actions were not independently observed, and the native process ID remained unchanged at that checkpoint; this report does not verify the Restart desktop app control or a process relaunch. The agent did not initiate or record a human microphone question. Noise, long pauses, accents, device changes, read-aloud interruption, and extended use remain separate tests.
+- Three concrete startup/permission issues were found and fixed: removing an inherited Electron run-as-Node environment setting rather than leaving an empty .NET environment value; launching the interactive GUI normally instead of inheriting SW_HIDE; and accepting Electron 45's equivalent bare-origin/trailing-slash representation while preserving exact trusted-origin checks. No operating-system microphone privacy setting was changed. Native policy checks cover that origin case alongside the later global Stop recovery checks.
+- Source-native desktop relaunch and copied-package rebuild remain distinct. Restarting an editable source runtime can load reviewed Electron edits; relaunching an old copied package does not incorporate repository edits. The server worker and its owning host have their own restart boundaries.
+
+### Real desktop tools and review state
+
+- An independent QA browser conversation on port 4202 used real GPT calls to search installed apps and open Calculator through desktop_list_apps and desktop_open_app. The result observed the Calculator window rather than merely claiming that a launch request was accepted.
+- A real GPT chain opened Notepad, read its blank Untitled editor, and proposed the exact synthetic text `Companion desktop input test.`. The preview fixed the target to Untitled / Notepad / Text editor. Human button approval through **Send this text** reported Completed, and an independent accessibility read confirmed the exact 29-character text in the actual editor. Earlier attempts correctly became stale when the target app was closed or minimized.
+- The Computer UI performs explicit installed-app/window queries and selected-window accessibility reads. Pending proposals show a fixed target and exact click/text/key preview in a dialog marked “Companion desktop approval”; the backend blocks using PC input to operate Companion's own approval controls, credential fields, and protected targets.
+- Targeted frontend VM checks passed without live desktop input: assistant text cannot approve; closed, expired, changed, explicit-null, or stale voice previews cannot approve; a current human command submits only the prepared ID; completed receipts cannot regress to pending. Microphone permission capture freezes the approval ID/signature/generation before awaiting the device.
+- The same checks confirmed named native window controls, truthful unavailable-shortcut labels, no desktop cancellation merely from hiding/opening the full workspace, global shortcut routing to /stop, and rebuild wording for copied native packages. Human spoken approval of a live desktop target is not established by these VM checks.
+
+### Stop recovery and visual checks
+
+- The first physical Ctrl+Alt+Escape check after a QA worker restart did not cancel a pending action: a hidden native page retained an expired session/CSRF token. The target text remained unchanged. The renderer now bootstraps a fresh session for Stop and retries only these idempotent stop requests once on 401/403. Targeted VM checks confirmed recovery, the bounded retry, normal-mutation exclusion, and preservation of pending review merely on hide.
+- The native main process now also posts Stop independently with a bounded fixed-origin session bootstrap, while immediately telling renderers to stop recording. Native and builder tests cover this path and the stop boundary. After the fresh normal native launch and final service restart, a new pending Notepad text proposal was created on the primary service. Ctrl+Alt+Escape was physically pressed from Notepad; after about 2.5 seconds the review displayed Stopped before approval / Cancelled. The original 29-character Notepad text remained unchanged. This verifies the happy path on the refreshed runtime; renderer-failure recovery has automated coverage rather than physical failure injection.
+- The main browser workspace passed visual review with neutral black surfaces, crisp white outlines, simpler headings, and legible controls. A local screenshot was saved outside this repository; the responsive sidebar keeps text labels at 705px and uses icon navigation below 620px. Native compact mode keeps its own navigation-free layout.
+
+### Automated checks and limits
+
+All **201 of 201 Node tests** passed, all **33 JavaScript syntax checks** passed, and the PowerShell parser checks passed at this checkpoint. The suites include native policy, desktop service, API/MCP, runtime, source-builder, provider/store/tools, and preserved reader/group checks. No user API key was supplied to validate Claude, OpenAI API, or a compatible-provider account.
+
+The general corner and scoped Windows tools are concrete progress toward the full assistant. They do not establish arbitrary application control, continuous screen understanding, an already connected external Claude client, or a voice bridge into the existing Codex development conversation. Broader applications/input patterns, failure-injected physical Stop recovery, difficult voice conditions, and live spoken approval remain explicit follow-up checks.
+
 ## General productivity workspace and source-building assistant (0.6.0)
 
 These checks used disposable workspace data and an isolated source copy where noted. They did not create a human reading-group account, record a human microphone, or enter a user API key.
