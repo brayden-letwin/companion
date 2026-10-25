@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const TYPES = new Set(['codex', 'openai', 'anthropic', 'compatible', 'ollama']);
 const DEFAULTS = { openai: { model: 'gpt-6.1-sol', baseUrl: 'https://api.openai.com/v1' }, anthropic: { model: 'claude-sonnet-5-5', baseUrl: 'https://api.anthropic.com/v1' }, ollama: { model: 'qwen3.5:4b', baseUrl: 'http://127.0.0.1:11434' }, codex: { model: '' }, compatible: { model: '' } };
 const error = (message, code = 'validation_error', statusCode = 400) => Object.assign(new Error(message), { code, statusCode });
@@ -57,26 +58,28 @@ export async function createProviderSettings({ dataDirectory, platform = process
   const secretStorage = vault || platform === 'win32' ? 'dpapi' : 'memory';
   const protect = vault?.protect || ((key, binding) => dpapi('protect', key, binding, spawnImpl));
   const unprotect = vault?.unprotect || ((key, binding) => dpapi('unprotect', key, binding, spawnImpl));
-  let saved;
+  let saved, needsRevisionPersistence = false;
   try {
     const bytes = await readFile(filename); if (bytes.length > 256 * 1024) throw new Error();
     saved = JSON.parse(bytes.toString('utf8'));
     if (saved.version !== 1 || !Array.isArray(saved.providers) || saved.providers.length > 20) throw new Error();
     const ids = new Set();
     for (const entry of saved.providers) {
-      if (!object(entry) || Object.keys(entry).some(key => !['id', 'type', 'label', 'model', 'baseUrl', 'protectedKey'].includes(key)) || typeof entry.id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(entry.id) || ids.has(entry.id) || !TYPES.has(entry.type)) throw new Error();
+      if (!object(entry) || Object.keys(entry).some(key => !['id', 'type', 'label', 'model', 'baseUrl', 'protectedKey', 'revision'].includes(key)) || typeof entry.id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(entry.id) || ids.has(entry.id) || !TYPES.has(entry.type)) throw new Error();
       ids.add(entry.id); cleanText(entry.label, 80, 'provider label'); cleanText(entry.model, 160, 'model', entry.type === 'codex');
       if (entry.type === 'codex' ? entry.baseUrl !== undefined || entry.protectedKey !== undefined : normalizeProviderUrl(entry.baseUrl) !== entry.baseUrl) throw new Error();
       if (entry.protectedKey !== undefined && (typeof entry.protectedKey !== 'string' || entry.protectedKey.length > 65536 || !/^[A-Za-z0-9+/]+=*$/.test(entry.protectedKey))) throw new Error();
+      if (entry.revision !== undefined && (typeof entry.revision !== 'string' || !UUID.test(entry.revision))) throw new Error();
+      if (entry.revision === undefined) { entry.revision = randomUUID(); needsRevisionPersistence = true; }
     }
     if (saved.defaultProviderId !== null && !ids.has(saved.defaultProviderId)) throw new Error();
   } catch (cause) {
     if (cause.code !== 'ENOENT') throw error('Provider settings could not be read safely.', 'settings_unavailable', 503);
-    saved = { version: 1, defaultProviderId: null, providers: [{ id: 'codex', type: 'codex', label: 'Codex · ChatGPT sign-in', model: '' }, { id: 'ollama', type: 'ollama', label: 'Local Ollama', ...DEFAULTS.ollama }] };
+    saved = { version: 1, defaultProviderId: null, providers: [{ id: 'codex', type: 'codex', label: 'Codex · ChatGPT sign-in', model: '', revision: randomUUID() }, { id: 'ollama', type: 'ollama', label: 'Local Ollama', ...DEFAULTS.ollama, revision: randomUUID() }] }; needsRevisionPersistence = true;
   }
   const memoryKeys = new Map(); let queue = Promise.resolve();
   const binding = entry => `${entry.id}|${entry.type}|${entry.baseUrl || ''}`;
-  function redacted(entry) { return { id: entry.id, type: entry.type, label: entry.label, model: entry.model, ...(entry.baseUrl ? { baseUrl: entry.baseUrl } : {}), hasKey: Boolean(entry.protectedKey || memoryKeys.has(entry.id)), secretStorage: entry.protectedKey ? 'dpapi' : secretStorage }; }
+  function redacted(entry) { return { id: entry.id, type: entry.type, label: entry.label, model: entry.model, revision: entry.revision, ...(entry.baseUrl ? { baseUrl: entry.baseUrl } : {}), hasKey: Boolean(entry.protectedKey || memoryKeys.has(entry.id)), secretStorage: entry.protectedKey ? 'dpapi' : secretStorage }; }
   async function persist(next) {
     const temporary = path.join(directory, `.providers-${randomUUID()}.tmp`);
     try { await writeFile(temporary, JSON.stringify(next), { mode: 0o600, flag: 'wx' }); await chmod(temporary, 0o600); await rename(temporary, filename); }
@@ -84,6 +87,9 @@ export async function createProviderSettings({ dataDirectory, platform = process
     saved = next;
   }
   function serial(callback) { const result = queue.then(callback); queue = result.catch(() => {}); return result; }
+  // Revision is an opaque app-configuration generation, never a key fingerprint.
+  // Persist defaults/legacy additions before exposing any checks or settings DTOs.
+  if (needsRevisionPersistence) await persist(saved);
   return {
     list: () => saved.providers.map(redacted),
     defaultProviderId: () => saved.defaultProviderId,
@@ -100,7 +106,7 @@ export async function createProviderSettings({ dataDirectory, platform = process
       if (!object(value) || Object.keys(value).some(key => !['id', 'type', 'label', 'model', 'baseUrl', 'apiKey'].includes(key)) || typeof value.id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(value.id) || !TYPES.has(value.type)) throw error('Use a valid provider ID and supported provider type.');
       const previous = saved.providers.find(entry => entry.id === value.id);
       if (!previous && saved.providers.length >= 20) throw error('Keep at most 20 providers.');
-      const entry = { id: value.id, type: value.type, label: cleanText(value.label ?? previous?.label ?? value.type, 80, 'provider label'), model: cleanText(value.model ?? (previous?.type === value.type ? previous.model : undefined) ?? DEFAULTS[value.type].model, 160, 'model', value.type === 'codex') };
+      const entry = { id: value.id, type: value.type, label: cleanText(value.label ?? previous?.label ?? value.type, 80, 'provider label'), model: cleanText(value.model ?? (previous?.type === value.type ? previous.model : undefined) ?? DEFAULTS[value.type].model, 160, 'model', value.type === 'codex'), revision: randomUUID() };
       if (value.type !== 'codex') entry.baseUrl = normalizeProviderUrl(value.baseUrl ?? (previous?.type === value.type ? previous.baseUrl : undefined) ?? DEFAULTS[value.type].baseUrl);
       if (value.type === 'codex' && (value.apiKey || value.baseUrl)) throw error('Codex uses its existing CLI sign-in and does not accept an API key or base URL.');
       const endpointChanged = previous && binding(previous) !== binding(entry);

@@ -15,6 +15,7 @@ import { createProjectFileService } from './project-files-service.mjs';
 import { normalizeProjectBinding, projectReference, projectEditReference } from './project-files-context.mjs';
 import {createContinuationRuntime} from './continuation-runtime.mjs';
 import {continuationReference} from './continuation-context.mjs';
+import {createProviderCheckService} from './provider-checks.mjs';
 
 const OWNER = 'local-workspace';
 const BASE = '/api/assistant';
@@ -50,7 +51,8 @@ async function readJson(req, limit = 2 * 1024 * 1024) {
   let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw fail(400, 'invalid_json', 'Provide a JSON object.'); }
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw fail(400, 'invalid_json', 'Provide a JSON object.'); return body;
 }
-const routeMatches = route => ['/chat','/work','/continuations','/context','/projects','/projects/choose','/conversations','/providers','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
+const routeMatches = route => ['/chat','/work','/continuations','/context','/projects','/projects/choose','/conversations','/providers','/provider-checks','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
+  || /^\/api\/assistant\/provider-checks\/[a-f\d-]+(?:\/cancel)?$/i.test(route)
   || /^\/api\/assistant\/features\/[a-f\d-]+\/attempts\/[0-9]+$/i.test(route)
   || /^\/api\/assistant\/continuations\/[a-f\d-]+(?:\/(?:continue|cancel))?$/i.test(route)
   || /^\/api\/assistant\/projects\/[a-f\d-]+(?:\/(?:files|file|history|edit|revoke|edits\/[a-f\d-]+))?$/i.test(route)
@@ -106,6 +108,15 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
   }
   async function attachWorkRuntime(services){
     services.runtimeStatus ||= getRuntimeStatus;
+    if(!createRuntime||services.enableProviderChecks===true){
+      if(!services.providerChecks)try{
+        if(typeof services.router.getProviderConfigurations!=='function'||typeof services.router.probeConnection!=='function')throw Error('Connection check adapter unavailable.');
+        services.providerChecks=await createProviderCheckService({dataDirectory,listProviders:()=>services.router.getProviderConfigurations(),probeConnection:input=>services.router.probeConnection(input)});
+      }catch{
+        const unavailable=()=>{throw fail(503,'provider_checks_unavailable','Connection test history could not open. Retain its private data for review; other workspace tools remain available.');};
+        services.providerChecks={unavailable:true,start:unavailable,get:unavailable,list:unavailable,cancel:unavailable,invalidateProvider:async()=>{},stopAll:async()=>({stopped:0}),close:async()=>{}};
+      }
+    }
     services.work=await createWorkService({store:services.store,runTurn:async input=>{
       const controller=new AbortController(),abort=()=>controller.abort();input.signal?.addEventListener('abort',abort,{once:true});if(input.signal?.aborted)controller.abort();
       const untrack=trackProject(input.project,controller);
@@ -171,7 +182,14 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
     })().then(attachWorkRuntime).catch(error => { runtimePromise = null; throw error; });
     return runtimePromise;
   }
-  const providerStatus = async router => { const status = await router.getStatus(); return { ...status, activeProviderId: status.defaultProviderId }; };
+  const providerStatus = async services => {
+    const status=await services.router.getStatus();let checks=[],available=!!services.providerChecks&&!services.providerChecks.unavailable;
+    if(available)try{checks=(await services.providerChecks.list()).checks;}catch{available=false;}
+    return{...status,activeProviderId:status.defaultProviderId,connectionChecksAvailable:available,providers:status.providers.map(provider=>{
+      const connectionCheck=checks.find(check=>check.providerId===provider.id)||null;
+      return{...provider,availability:!provider.ready?'unavailable':provider.type==='codex'?'signed_in':provider.type==='ollama'?'model_found':'configured',verified:Boolean(provider.ready===true&&connectionCheck?.providerId===provider.id&&connectionCheck.revision===provider.revision&&connectionCheck.status==='passed'&&connectionCheck.configurationMatches===true&&connectionCheck.observedThisSession===true),connectionCheck};
+    })};
+  };
   function scheduleRestart(res, jobId, restartScope='worker') {
     const status = getRuntimeStatus();
     const available=restartScope!=='launcher'&&status.managed&&(restartScope!=='host'||status.hostRestartAvailable);
@@ -216,8 +234,14 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         if (++window.count > 240) throw fail(429, 'rate_limited', 'Too many workspace requests. Try again in a minute.');
         session.windows?.set('productivity', window);
         const services = await runtime();
+        if(route===BASE+'/provider-checks'||/^\/api\/assistant\/provider-checks\//i.test(route)){
+          if(!services.providerChecks||services.providerChecks.unavailable)throw fail(503,'provider_checks_unavailable','Connection tests are unavailable in this runtime.');
+        }
         if(req.method!=='GET'&&/^\/api\/assistant\/features\/[a-f\d-]+\/attempts\/[0-9]+$/i.test(route))throw fail(405,'method_not_allowed','Use GET to inspect retained build attempts.');
         if (req.method === 'GET') {
+          if(route===BASE+'/provider-checks'){projectQuery(req,[]);json(res,200,await services.providerChecks.list());return true;}
+          const providerCheck=/^\/api\/assistant\/provider-checks\/([a-f\d-]+)$/i.exec(route);
+          if(providerCheck){projectQuery(req,[]);if(!UUID.test(providerCheck[1]))throw fail(400,'invalid_provider_check','Choose an actual connection test UUID.');json(res,200,await services.providerChecks.get(providerCheck[1]));return true;}
           if(route===BASE+'/continuations'){
             if(!services.continuations)throw fail(503,'continuation_unavailable','Linked original requests are unavailable.');
             const query=projectQuery(req,['buildId','offset','limit']),offset=query.offset??0,limit=query.limit??20;
@@ -250,7 +274,7 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
           if (route === BASE + '/conversations') { json(res, 200, services.store.listConversations()); return true; }
           const conversation = /^\/api\/assistant\/conversations\/([a-f\d-]+)$/i.exec(route);
           if (conversation) { const query = new URL(req.url, 'http://localhost').searchParams; json(res, 200, conversationPage(services.store.getConversation(conversation[1]), query.has('before') ? query.get('before') : undefined)); return true; }
-          if (route === BASE + '/providers') { json(res, 200, await providerStatus(services.router)); return true; }
+          if (route === BASE + '/providers') { json(res, 200, await providerStatus(services)); return true; }
           if (route === BASE + '/features') { json(res, 200, { jobs: await services.builder.list(OWNER) }); return true; }
           if (route === BASE + '/features/source') { json(res, 200, await services.builder.source(OWNER, { includeContent: new URL(req.url, 'http://localhost').searchParams.get('content') === '1' })); return true; }
           if(route===BASE+'/features/source/file'){const options=sourceFileQuery(req);if(typeof services.builder.sourceFile!=='function')throw fail(503,'source_read_unavailable','Targeted source reads are unavailable in this runtime.');json(res,200,await services.builder.sourceFile(OWNER,options));return true;}
@@ -267,6 +291,12 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         }
         if (req.method !== 'POST') throw fail(405, 'method_not_allowed', 'Use GET or POST.');
         const body = await readJson(req);
+        if(route===BASE+'/provider-checks'){
+          fields(body,['id','providerId','revision']);if(typeof body.id!=='string'||!UUID.test(body.id)||typeof body.revision!=='string'||!UUID.test(body.revision)||typeof body.providerId!=='string'||!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.providerId))throw fail(400,'invalid_provider_check','Choose one configured provider, its current revision and a stable test UUID.');
+          json(res,202,await guardedRequest(req,res,session,body.id,signal=>services.providerChecks.start(body,{signal})));return true;
+        }
+        const cancelProviderCheck=/^\/api\/assistant\/provider-checks\/([a-f\d-]+)\/cancel$/i.exec(route);
+        if(cancelProviderCheck){fields(body,[]);if(!UUID.test(cancelProviderCheck[1]))throw fail(400,'invalid_provider_check','Choose an actual connection test UUID.');json(res,200,await services.providerChecks.cancel(cancelProviderCheck[1]));return true;}
         const continuationAction=/^\/api\/assistant\/continuations\/([a-f\d-]+)\/(continue|cancel)$/i.exec(route);
         if(continuationAction){fields(body,[]);if(!services.continuations)throw fail(503,'continuation_unavailable','Linked original requests are unavailable.');const id=continuationAction[1];json(res,200,continuationAction[2]==='cancel'?await services.continuations.cancel(id):await guardedRequest(req,res,session,id,signal=>services.continuations.continue(id,{signal})));return true;}
         if(route===BASE+'/projects/choose'){fields(body,[]);if(!services.projectFiles)throw fail(503,'project_files_unavailable','Project folders are unavailable.');json(res,200,await guardedRequest(req,res,session,randomUUID(),signal=>services.projectFiles.choose({signal})));return true;}
@@ -291,6 +321,7 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         if (route === BASE + '/stop') {
           fields(body, []);
           for (const controller of active.values()) controller.abort();
+          const providerChecks=await services.providerChecks?.stopAll?.();
           const continuations=await services.continuations?.stopAll?.();
           const work=await services.work.stopAll();
           const desktop = await services.desktop?.cancelAll();
@@ -300,7 +331,7 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
             try { const result = await services.builder.cancel(job.id, OWNER); builds.push({ id: job.id, status: result.status }); }
             catch { builds.push({ id: job.id, status: 'check_required' }); }
           }
-          json(res, 200, { stopped: true, desktop: desktop || null, builds,work,...(continuations?{continuations}:{}) }); return true;
+          json(res, 200, { stopped: true, desktop: desktop || null, builds,work,...(continuations?{continuations}:{}),...(providerChecks?{providerChecks}:{}) }); return true;
         }
         if (route === BASE + '/desktop/stop') {
           fields(body, []);
@@ -332,9 +363,9 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         }
         if (route === BASE + '/chat') { await chat(req, res, body, session, services); return true; }
         if (route === BASE + '/workspace/operations') { json(res, 200, services.store.apply(body)); return true; }
-        if (route === BASE + '/providers/configure') { fields(body, ['id','type','label','model','baseUrl','apiKey']); await services.router.configure(body); json(res, 200, await providerStatus(services.router)); return true; }
-        if (route === BASE + '/providers/select') { fields(body, ['id']); await services.router.select(body.id); json(res, 200, await providerStatus(services.router)); return true; }
-        if (route === BASE + '/providers/remove') { fields(body, ['id']); await services.router.remove(body.id); json(res, 200, await providerStatus(services.router)); return true; }
+        if (route === BASE + '/providers/configure') { fields(body, ['id','type','label','model','baseUrl','apiKey']); await services.router.configure(body);await services.providerChecks?.invalidateProvider?.(body.id); json(res, 200, await providerStatus(services)); return true; }
+        if (route === BASE + '/providers/select') { fields(body, ['id']); await services.router.select(body.id); json(res, 200, await providerStatus(services)); return true; }
+        if (route === BASE + '/providers/remove') { fields(body, ['id']); await services.router.remove(body.id);await services.providerChecks?.invalidateProvider?.(body.id); json(res, 200, await providerStatus(services)); return true; }
         if (route === BASE + '/tools/run') {
           fields(body, ['tool','arguments','operationId','project']); const requestId = directOperationId(body),project=normalizeProjectBinding(body.project);
           const result = await guardedRequest(req,res,session,requestId,signal=>services.tools.execute(body.tool, body.arguments || {}, { requestId: `${OWNER}:${requestId}`, callId: 'direct', signal,scope:session.scope,...(project?{project}:{}) }),project);
@@ -364,7 +395,7 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
     cancel(scope, id) { active.get(`${scope}:${id}`)?.abort(); },
     async close() {
       closed = true; for (const controller of active.values()) controller.abort(); active.clear();contextPins.clear();contextRequests.clear();projectRequests.clear();
-      if (runtimePromise) { const services = await runtimePromise.catch(() => null);const workClosing=services?.work?.close?.();await services?.continuations?.close?.();await workClosing;await services?.projectFiles?.close?.(); await services?.desktop?.close?.(); await services?.builder.close?.(); services?.store.close(); }
+      if (runtimePromise) { const services = await runtimePromise.catch(() => null);const workClosing=services?.work?.close?.(),checksClosing=services?.providerChecks?.close?.();await services?.continuations?.close?.();await Promise.all([workClosing,checksClosing]);await services?.projectFiles?.close?.(); await services?.desktop?.close?.(); await services?.builder.close?.(); services?.store.close(); }
     },
   };
 }

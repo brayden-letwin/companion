@@ -7,6 +7,60 @@ const fail = (code, message, statusCode = 400) => Object.assign(new Error(messag
 const obj = value => value && typeof value === 'object' && !Array.isArray(value);
 const abortError = () => Object.assign(fail('request_cancelled', 'Request stopped.', 499), { name: 'AbortError' });
 const jsonSize = value => Buffer.byteLength(JSON.stringify(value));
+const REVISION = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
+const PROBE_MARKER = 'COMPANION_CONNECTION_OK';
+const PROBE_SYSTEM = 'This is a fixed synthetic connection check. Return exactly the requested marker as plain text. Do not use tools, read files, browse, or perform any action.';
+const PROBE_MESSAGE = 'Reply with exactly COMPANION_CONNECTION_OK and nothing else.';
+const PROBE_TIMEOUT_MS = 60000;
+const PROBE_OUTPUT_BYTES = 32768;
+function waitForAbort(promise, signal) {
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const stop = () => reject(abortError()); signal.addEventListener('abort', stop, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener('abort', stop));
+  });
+}
+function checkedProbeText(value, type) {
+  const invalid = () => { throw fail('invalid_provider_response', 'The connection returned an invalid check response.', 502); };
+  let result;
+  if (type === 'openai') {
+    if (value.status !== 'completed' || !Array.isArray(value.output)) throw fail('incomplete_provider_response', 'The connection did not finish its check.', 502);
+    if (value.output.some(item => !obj(item) || !['message','reasoning'].includes(item.type))) invalid();
+    const output = value.output.filter(item => item.type === 'message');
+    if (output.length !== 1 || output[0].role !== 'assistant' || output[0].status !== undefined && output[0].status !== 'completed' || !Array.isArray(output[0].content) || output[0].content.length !== 1 || output[0].content[0]?.type !== 'output_text') invalid();
+    result = output[0].content[0].text;
+  } else if (type === 'anthropic') {
+    if (value.stop_reason !== 'end_turn') throw fail('incomplete_provider_response', 'The connection did not finish its check.', 502);
+    if (!Array.isArray(value.content) || value.content.length !== 1 || value.content[0]?.type !== 'text') invalid();
+    result = value.content[0].text;
+  } else {
+    const local = type === 'ollama';
+    if (local ? value.done !== true || value.done_reason && value.done_reason !== 'stop' : !Array.isArray(value.choices) || value.choices.length !== 1 || value.choices[0]?.finish_reason !== 'stop') throw fail('incomplete_provider_response', 'The connection did not finish its check.', 502);
+    const message = local ? value.message : value.choices[0].message;
+    if (!obj(message) || message.role !== 'assistant' || message.tool_calls !== undefined && (!Array.isArray(message.tool_calls) || message.tool_calls.length) || message.function_call != null || message.refusal) invalid();
+    result = message.content;
+  }
+  if (typeof result !== 'string' || result.trim() !== PROBE_MARKER) throw fail('probe_response_mismatch', 'The connection did not return the expected check response.', 502);
+}
+function safeProbeError(error) {
+  const failures = {
+    provider_changed: [409, 'The connection changed during its check. Test the current settings.'],
+    provider_not_found: [404, 'The connection is no longer available.'],
+    provider_key_required: [409, 'Add a key in connection settings before testing.'],
+    credential_storage_unavailable: [503, 'The saved key could not be unlocked. Enter it again in connection settings.'],
+    provider_credentials_rejected: [401, 'The connection rejected its credentials. Update its key in settings.'],
+    provider_rate_limited: [429, 'The connection is rate limited or has no available credit. Try later.'],
+    provider_busy: [429, 'The AI request queue is full. Stop work or try again shortly.'],
+    provider_timeout: [504, 'The connection check timed out.'],
+    provider_output_limit: [502, 'The connection returned too much check data.'],
+    incomplete_provider_response: [502, 'The connection did not finish its check.'],
+    invalid_provider_response: [502, 'The connection returned an invalid check response.'],
+    unexpected_provider_action: [502, 'The connection proposed an action during a check that permits no tools.'],
+    probe_response_mismatch: [502, 'The connection did not return the expected check response.'],
+  };
+  const known = Object.hasOwn(failures, error?.code), [status, message] = known ? failures[error.code] : [503, 'The connection check could not finish. Check its settings and try again.'];
+  return fail(known ? error.code : 'provider_unavailable', message, status);
+}
 function schemaValue(value, label = 'schema') { if (!obj(value) || jsonSize(value) > 128 * 1024) throw fail('validation_error', `Use a bounded JSON ${label}.`); return structuredClone(value); }
 function text(value, maximum, label, empty = false) { if (typeof value !== 'string' || value.length > maximum || (!empty && !value.trim())) throw fail('validation_error', `Invalid ${label}.`); return value; }
 function normalizedCall(value) {
@@ -36,12 +90,12 @@ function toolsValue(value = []) {
   });
 }
 
-async function readJson(response, signal) {
-  if (Number(response.headers.get('content-length')) > 2 * 1024 * 1024) throw fail('provider_output_limit', 'The provider returned too much data.', 502);
+async function readJson(response, signal, maxBytes = 2 * 1024 * 1024) {
+  if (Number(response.headers.get('content-length')) > maxBytes) { await response.body?.cancel().catch(() => {}); throw fail('provider_output_limit', 'The provider returned too much data.', 502); }
   const reader = response.body?.getReader(); if (!reader) throw fail('invalid_provider_response', 'The provider returned unreadable data.', 502);
   const chunks = []; let length = 0;
   try {
-    for (;;) { const { done, value } = await reader.read(); if (done) break; length += value.byteLength; if (length > 2 * 1024 * 1024) { await reader.cancel().catch(() => {}); throw fail('provider_output_limit', 'The provider returned too much data.', 502); } chunks.push(value); }
+    for (;;) { const { done, value } = await reader.read(); if (done) break; length += value.byteLength; if (length > maxBytes) { await reader.cancel().catch(() => {}); throw fail('provider_output_limit', 'The provider returned too much data.', 502); } chunks.push(value); }
   } catch (error) { if (signal.aborted) throw abortError(); throw error; }
   finally { reader.releaseLock(); }
   try { const value = JSON.parse(Buffer.concat(chunks, length).toString('utf8')); if (!obj(value)) throw new Error(); return value; }
@@ -105,19 +159,74 @@ export async function createModelRouter({ dataDirectory, fetchImpl = globalThis.
     })().finally(() => { if (generation === statusGeneration) statusPending = null; });
     return structuredClone(await statusPending);
   }
-  async function request(entry, route, body, signal) {
+  async function request(entry, route, body, signal, maxBytes) {
     let response;
     try { response = await fetchImpl(`${entry.baseUrl}${route}`, { method: 'POST', redirect: 'error', signal, headers: { 'Content-Type': 'application/json', ...(entry.apiKey ? { Authorization: `Bearer ${entry.apiKey}` } : {}), ...(entry.type === 'anthropic' ? { 'anthropic-version': '2026-10-21' } : {}) }, body: JSON.stringify(body) }); }
     catch { if (signal.aborted) throw abortError(); throw fail('provider_unavailable', 'The selected provider could not be reached. Check its endpoint and connection.', 503); }
     if (!response.ok) { await response.body?.cancel().catch(() => {}); const code = response.status; if ([401, 403].includes(code)) throw fail('provider_credentials_rejected', 'The selected provider rejected its credentials. Update the key in provider settings.', 401); if (code === 429) throw fail('provider_rate_limited', 'The selected provider is rate limited or has no available credit. Try later or choose another provider.', 429); throw fail('provider_unavailable', `The selected provider could not complete this request (HTTP ${code}).`, 502); }
-    return readJson(response, signal);
+    return readJson(response, signal, maxBytes);
   }
   return {
     getStatus: status,
+    getProviderConfigurations: () => storage.list(),
     async listProviders() { return (await status()).providers; },
     async configure(value) { const result = await storage.configure(value); invalidate(); return result; },
     async remove(id) { const result = await storage.remove(id); invalidate(); return result; },
     async select(id) { await storage.select(id); invalidate(); return { defaultProviderId: id }; },
+    async probeConnection(input = {}) {
+      if (!obj(input) || Object.keys(input).some(key => !['providerId','expectedRevision','signal','onStopping'].includes(key)) || typeof input.providerId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(input.providerId) || typeof input.expectedRevision !== 'string' || !REVISION.test(input.expectedRevision) || input.onStopping !== undefined && typeof input.onStopping !== 'function' || input.signal !== undefined && (!input.signal || typeof input.signal.addEventListener !== 'function' || typeof input.signal.removeEventListener !== 'function' || typeof input.signal.aborted !== 'boolean')) throw fail('validation_error', 'Use the current connection ID and revision for a check.');
+      const { providerId, expectedRevision, signal, onStopping } = input;
+      if (signal?.aborted) throw abortError();
+      const current = () => {
+        const provider = storage.list().find(entry => entry.id === providerId);
+        if (!provider) throw fail('provider_not_found', 'The connection is no longer available.', 404);
+        if (provider.revision !== expectedRevision) throw fail('provider_changed', 'The connection changed during its check.', 409);
+        return provider;
+      };
+      try { current(); } catch (error) { throw safeProbeError(error); }
+      const controller = new AbortController(); let timedOut = false, release, helperPending = false, notifyClosed, stoppingNotified = false;
+      const helperClosed = new Promise(resolve => { notifyClosed = resolve; });
+      const stopping = () => { if (stoppingNotified) return; stoppingNotified = true; try { const value = onStopping?.(); value?.catch?.(() => {}); } catch { /* No private data or authority goes to this observer. */ } };
+      const cancel = () => { stopping(); controller.abort(); };
+      signal?.addEventListener('abort', cancel, { once: true }); if (signal?.aborted) cancel();
+      const began = Date.now(), timer = setTimeout(() => { timedOut = true; cancel(); }, PROBE_TIMEOUT_MS); timer.unref?.();
+      try {
+        release = await completions.acquire({ signal: controller.signal, priority: 'background' });
+        current();
+        const entry = await waitForAbort(storage.get(providerId), controller.signal);
+        current();
+        if (entry.id !== providerId || entry.revision !== expectedRevision) throw fail('provider_changed', 'The connection changed during its check.', 409);
+        if (!['codex','ollama'].includes(entry.type) && !entry.apiKey) throw fail('provider_key_required', 'Add a key before testing this connection.', 409);
+        if (controller.signal.aborted) throw abortError();
+        if (entry.type === 'codex') {
+          const result = await runCodexCompletion({ prompt: PROBE_SYSTEM + '\n\n' + PROBE_MESSAGE, ...(entry.model ? { model: entry.model } : {}), connectionProbe: true,
+            signal: controller.signal, dataDirectory, ...(spawnImpl ? { spawnImpl } : {}), timeoutMs: Math.max(1, PROBE_TIMEOUT_MS - (Date.now() - began)), maxOutputBytes: PROBE_OUTPUT_BYTES,
+            onHelperStarted() { helperPending = true; }, onHelperSettled() { helperPending = false; notifyClosed(); } });
+          if (!result || result.text !== PROBE_MARKER || !Array.isArray(result.toolCalls) || result.toolCalls.length) throw fail('probe_response_mismatch', 'The connection did not return the expected check response.', 502);
+        } else {
+          const history = [{ role: 'user', content: PROBE_MESSAGE }]; let response;
+          if (entry.type === 'openai') response = request(entry, '/responses', { model: entry.model, store: false, instructions: PROBE_SYSTEM, input: history, max_output_tokens: 512 }, controller.signal, PROBE_OUTPUT_BYTES);
+          else if (entry.type === 'anthropic') response = request(entry, '/messages', { model: entry.model, max_tokens: 512, stream: false, system: PROBE_SYSTEM, messages: history }, controller.signal, PROBE_OUTPUT_BYTES);
+          else if (['compatible','ollama'].includes(entry.type)) {
+            const local = entry.type === 'ollama'; response = request(entry, local ? '/api/chat' : '/chat/completions', { model: entry.model, stream: false, messages: chatInput(history, PROBE_SYSTEM), ...(local ? { think: false, options: { num_ctx: 2048, num_predict: 512 } } : { max_tokens: 512 }) }, controller.signal, PROBE_OUTPUT_BYTES);
+          } else throw fail('provider_unavailable', 'The connection type is unavailable for this check.', 503);
+          checkedProbeText(await waitForAbort(response, controller.signal), entry.type);
+        }
+        if (controller.signal.aborted) throw abortError();
+        current();
+        return { passed: true, providerId, revision: expectedRevision };
+      } catch (error) {
+        if (timedOut) throw safeProbeError({ code: 'provider_timeout' });
+        if (controller.signal.aborted) throw abortError();
+        throw safeProbeError(error);
+      } finally {
+        clearTimeout(timer); signal?.removeEventListener('abort', cancel);
+        // A cancelled CLI promise can precede real helper exit. A probe remains
+        // stopping and retains its queue lease until that exact helper settles.
+        if (helperPending) { stopping(); await helperClosed; }
+        release?.();
+      }
+    },
     async complete({ providerId, messages, system = '', tools = [], signal, onEvent, schema, priority='interactive',expectedProvider } = {}) {
       const history = messagesValue(messages), definitions = toolsValue(tools); system = text(system, 100000, 'system instructions', true); if (schema !== undefined) schema = schemaValue(schema);
       if (schema && definitions.length) throw fail('validation_error', 'Use structured output or tool calls in one completion, not both.');

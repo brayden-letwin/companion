@@ -9,6 +9,7 @@ let activeJobs = 0;
 const fail = (code, message, statusCode = 503) => Object.assign(new Error(message), { code, statusCode });
 const abortError = () => Object.assign(fail('request_cancelled', 'Request stopped.', 499), { name: 'AbortError' });
 const command = process.platform === 'win32' ? 'codex.exe' : 'codex';
+const PROBE_INSTRUCTIONS = 'You are a completion engine for one fixed synthetic connection check. Return only the exact plain-text marker requested by the supplied check. Do not use tools, read user or project files, browse, retrieve memories, delegate, or perform actions. No user task, application state, conversation history or source files are supplied.';
 
 function terminate(child, spawnImpl) {
   if (!child || child.exitCode !== null && child.exitCode !== undefined) return;
@@ -35,7 +36,7 @@ export async function getCodexStatus({ spawnImpl = spawn, signal, timeoutMs = 50
 }
 
 /** Read-only ephemeral completion. Prompts are stdin data, never shell text. */
-export async function runCodexCompletion({ prompt, system = '', messages, schema, model, signal, onEvent, onHelperStarted, onHelperSettled, dataDirectory = tmpdir(), spawnImpl = spawn, timeoutMs = 180000, maxOutputBytes = 2 * 1024 * 1024 } = {}) {
+export async function runCodexCompletion({ prompt, system = '', messages, schema, model, signal, onEvent, onHelperStarted, onHelperSettled, connectionProbe = false, dataDirectory = tmpdir(), spawnImpl = spawn, timeoutMs = 180000, maxOutputBytes = 2 * 1024 * 1024 } = {}) {
   let directory, registered = false, launched = false, helperSettled = false, cleanupPromise;
   function releaseHelper() {
     if (helperSettled) return cleanupPromise;
@@ -50,6 +51,8 @@ export async function runCodexCompletion({ prompt, system = '', messages, schema
     return cleanupPromise;
   }
   try {
+  if (typeof connectionProbe !== 'boolean') throw fail('validation_error', 'Use a supported completion mode.', 400);
+  if (connectionProbe) { timeoutMs = Math.min(timeoutMs, 60000); maxOutputBytes = Math.min(maxOutputBytes, 32768); }
   if (typeof prompt !== 'string') {
     if (!Array.isArray(messages)) throw fail('validation_error', 'A completion prompt is required.', 400);
     prompt = JSON.stringify({ system, messages });
@@ -62,12 +65,21 @@ export async function runCodexCompletion({ prompt, system = '', messages, schema
   activeJobs += 1; registered = true;
     dataDirectory = await privateDataDirectory(dataDirectory); directory = await mkdtemp(path.join(dataDirectory, 'codex-job-'));
     const args = ['exec', '--json', '--ephemeral', '--sandbox', 'read-only', '--skip-git-repo-check', '--color', 'never', '-c', 'mcp_servers={}', '-c', 'features.apps=false', '-c', 'features.plugins=false'];
+    if (connectionProbe) {
+      // Official --disable/config switches, validated against the installed CLI.
+      // Retain its chosen default model and existing sign-in; no auth-file reads.
+      for (const feature of ['shell_tool','hooks','memories','multi_agent','multi_agent_v2','browser_use','browser_use_external','browser_use_full_cdp_access','in_app_browser','computer_use','view_image','image_generation','skill_search','skill_mcp_dependency_install','workspace_dependencies','sleep_tool','goals','tool_suggest']) args.push('--disable', feature);
+      if (signal?.aborted) throw abortError();
+      const instructionsPath = path.join(directory, 'connection-probe-instructions.txt');
+      await writeFile(instructionsPath, PROBE_INSTRUCTIONS, { mode: 0o600, flag: 'wx' });
+      args.push('-c', 'web_search="disabled"', '-c', 'tools.view_image=false', '-c', 'project_doc_max_bytes=0', '-c', 'developer_instructions=""', '-c', 'model_instructions_file=' + JSON.stringify(instructionsPath));
+    }
     if (model) args.push('--model', model);
     if (schema) { const schemaPath = path.join(directory, 'output-schema.json'); await writeFile(schemaPath, JSON.stringify(schema), { mode: 0o600, flag: 'wx' }); args.push('--output-schema', schemaPath); }
     args.push('-');
     const safePrompt = `You are a completion engine for Companion. Work only from the supplied conversation. Do not use shell, filesystem, browser, MCP, app, or external tools. Do not modify any files. Return the requested answer or structured output; the host application handles any requested actions separately.\n\n${prompt}`;
     return await new Promise((resolve, reject) => {
-      let child, bytes = 0, stderrBytes = 0, buffer = '', finalText = '', settled = false, turnCompleted = false, terminalError = null, killTimer;
+      let child, bytes = 0, stderrBytes = 0, buffer = '', finalText = '', messageCount = 0, settled = false, turnCompleted = false, terminalError = null, killTimer;
       const decoder = new StringDecoder('utf8');
       const emit = event => { try { onEvent?.(event); } catch { /* Observers cannot interrupt process cleanup. */ } };
       const done = (err, value) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(killTimer); signal?.removeEventListener('abort', cancel); err ? reject(err) : resolve(value); };
@@ -81,10 +93,16 @@ export async function runCodexCompletion({ prompt, system = '', messages, schema
       function line(value) {
         if (settled || terminalError) return;
         let event; try { event = JSON.parse(value); } catch { if (value.trim()) stop(fail('invalid_provider_response', 'Codex returned unreadable event data.', 502)); return; }
+        if (connectionProbe) {
+          if (!event || typeof event !== 'object' || !['thread.started','turn.started','item.started','item.updated','item.completed','turn.completed','turn.failed','error'].includes(event.type)) return stop(fail('invalid_provider_response', 'Codex returned unexpected connection-check events.', 502));
+          // The CLI can emit non-fatal startup diagnostics as item.type=error.
+          // Discard their payload; they prove neither an action nor completion.
+          if (event.type.startsWith('item.') && !['agent_message','assistant_message','reasoning','error'].includes(event.item?.type)) return stop(fail('unexpected_provider_action', 'Codex proposed a tool during the connection check.', 502));
+        }
         if (event.type === 'thread.started' || event.type === 'turn.started') emit({ type: 'progress', message: 'Codex is working.' });
         if (event.type === 'item.completed' && ['agent_message', 'assistant_message'].includes(event.item?.type)) {
           const text = event.item.text;
-          if (typeof text === 'string') finalText = text;
+          if (typeof text === 'string') { finalText = text; messageCount++; }
         }
         if (event.type === 'turn.completed') turnCompleted = true;
         if (event.type === 'turn.failed' || event.type === 'error') stop(fail('provider_unavailable', 'Codex could not complete the request. Check its sign-in and account limits, then retry.'));
@@ -100,7 +118,7 @@ export async function runCodexCompletion({ prompt, system = '', messages, schema
         let newline; while ((newline = buffer.indexOf('\n')) >= 0) { const value = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); line(value); }
         if (Buffer.byteLength(buffer) > 1024 * 1024) stop(fail('provider_output_limit', 'Codex returned an oversized event.', 502));
       });
-      child.stderr.on('data', chunk => { if (settled || terminalError) return; stderrBytes += chunk.length; if (stderrBytes > 65536) stop(fail('provider_output_limit', 'Codex returned too much diagnostic output.', 502)); });
+      child.stderr.on('data', chunk => { if (settled || terminalError) return; stderrBytes += chunk.length; if (stderrBytes > (connectionProbe ? 32768 : 65536)) stop(fail('provider_output_limit', 'Codex returned too much diagnostic output.', 502)); });
       child.stdin.on('error', () => { if (!terminalError) stop(fail('provider_unavailable', 'Codex could not receive the request.')); });
       child.on('error', () => {
         const error = terminalError || fail('provider_unavailable', 'Codex could not start. Install its CLI and sign in, then refresh.');
@@ -117,6 +135,7 @@ export async function runCodexCompletion({ prompt, system = '', messages, schema
         if (terminalError) return done(terminalError);
         if (signal?.aborted) return done(abortError());
         if (code !== 0 || !turnCompleted || !finalText.trim()) return done(fail('provider_unavailable', 'Codex did not finish an answer. Check its sign-in and account limits, then retry.'));
+        if (connectionProbe && messageCount !== 1) return done(fail('invalid_provider_response', 'Codex did not return one connection-check answer.', 502));
         emit({ type: 'progress', message: 'Codex finished.' }); done(null, { text: finalText.trim(), toolCalls: [] });
       });
       try { const result = onHelperStarted?.(); result?.catch?.(() => {}); } catch { /* Optional observer cannot change ownership. */ }
