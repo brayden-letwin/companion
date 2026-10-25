@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import { BUILTIN_TOOL_DEFINITIONS, builtinCatalog, validateToolArguments, capabilityHash, validateWorkflowSteps } from './capability-registry.mjs';
 import { listTasks, readTask, summarizeTasks } from './task-queries.mjs';
+import { listWorkflows, readWorkflow } from './workflow-queries.mjs';
 import { PROJECT_FILES_TOOL_NAME, projectFilesCatalogEntry } from './project-files-tool.mjs';
 import {continuationReference,continuationPriorEffect} from './continuation-context.mjs';
 const defaultExecuteCapability=async options=>(await import('./capability-runtime.mjs')).executeCapability(options);
@@ -232,8 +233,21 @@ export function createProductivityTools({ store, builder, desktop, root, work, p
         let formatted; try { formatted = new Intl.DateTimeFormat('en-CA', { dateStyle: 'full', timeStyle: 'long', timeZone: args.timezone }).format(new Date(now())); } catch { throw fail('Choose a valid IANA timezone.', 'invalid_timezone'); }
         return { iso: new Date(now()).toISOString(), formatted, timezone: args.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone };
       }
-      case 'list_workflows': return { workflows: state.workflows };
-      case 'save_workflow': { const result = mutate('saveWorkflow', args); return { workflow: result.workspace.workflows.find(item => item.id === result.entityId), replayed: result.replayed }; }
+      case 'list_workflows': return args.action === 'read' ? readWorkflow(state, args) : listWorkflows(state, args);
+      case 'save_workflow': {
+        const editing = args.workflowId !== undefined;
+        if (editing && (!Number.isSafeInteger(args.expectedRevision) || args.expectedRevision < 0)) throw fail('Read the routine and supply its expectedRevision before editing.', 'invalid_revision');
+        if (editing && args.steps !== undefined && args.expectedDefinitionHash === undefined) throw fail('Read the complete routine definition and retain expectedDefinitionHash before replacing its steps.', 'workflow_hash_required');
+        const toggle = editing && args.enabled !== undefined && Object.keys(args).every(key => ['workflowId','expectedRevision','expectedDefinitionHash','enabled'].includes(key));
+        const result = mutate(toggle ? 'setWorkflowEnabled' : 'saveWorkflow', args);
+        const receipt = { workflow: result.workflow || { id: args.workflowId || result.entityId }, appliedRevision: result.appliedRevision ?? null, replayed: result.replayed,
+          ...(!result.workflow || result.originalDefinitionUnavailable ? { originalDefinitionUnavailable: true } : {}) };
+        if (result.workflow && !result.originalDefinitionUnavailable && Buffer.byteLength(JSON.stringify(receipt)) > 16 * 1024) {
+          receipt.workflow = { ...listWorkflows({ revision: result.appliedRevision, workflows: [result.workflow] }).workflows[0], definitionOmitted: true };
+          receipt.definitionOmitted = true;
+        }
+        return receipt;
+      }
       case 'get_preferences': return { preferences: state.preferences.filter(preference => args.includeArchived || !preference.archived), revision: state.revision };
       case 'remember_preference': { const result = mutate('rememberPreference', args); return { preference: result.workspace.preferences.find(preference => preference.key === args.key.trim()), replayed: result.replayed }; }
       case 'forget_preference': { const result = mutate('forgetPreference', args); return { preference: result.workspace.preferences.find(preference => preference.id === args.preferenceId), replayed: result.replayed }; }

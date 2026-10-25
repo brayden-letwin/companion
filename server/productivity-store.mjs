@@ -7,6 +7,7 @@ import { windowContextReference } from './window-context.mjs';
 import { projectReference, projectEditReference, projectReadReference } from './project-files-context.mjs';
 import {continuationReference} from './continuation-context.mjs';
 import { installWorkStore } from './work-store.mjs';
+import { workflowDefinitionHash } from './workflow-queries.mjs';
 
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const fail = (code, message, statusCode = 400) => Object.assign(new Error(message), { code, statusCode });
@@ -22,15 +23,19 @@ function canonical(value) { if (Array.isArray(value)) return value.map(canonical
 const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 const initial = () => ({ revision: 0, tasks: [], notes: [], workflows: [], preferences: [], focus: null, activity: [] });
 const CONVERSATION_DEFAULTS = Object.freeze({ conversations: 200, turns: 400, outcomeBytes: 512 * 1024, totalBytes: 64 * 1024 * 1024 });
+const WORKFLOW_RECEIPT_BYTES = 32 * 1024 * 1024;
 
 /** One persistent workspace for the current OS user. Reading-room accounts are separate. */
-export async function createProductivityStore({ dataDirectory, now = Date.now, conversationLimits = {} } = {}) {
+export async function createProductivityStore({ dataDirectory, now = Date.now, conversationLimits = {}, workflowReceiptBytes = WORKFLOW_RECEIPT_BYTES } = {}) {
   if (!dataDirectory) throw new Error('A private data directory is required.');
   const limits = { ...CONVERSATION_DEFAULTS, ...conversationLimits };
   if (Object.keys(conversationLimits).some(key => !Object.hasOwn(CONVERSATION_DEFAULTS, key)) || Object.entries(limits).some(([key, value]) => !Number.isSafeInteger(value) || value < 1 || value > CONVERSATION_DEFAULTS[key]) || limits.outcomeBytes < 8192 || limits.totalBytes < 2 * limits.outcomeBytes + 65536) throw new TypeError('Use bounded conversation storage limits.');
+  if (!Number.isSafeInteger(workflowReceiptBytes) || workflowReceiptBytes < 1024 || workflowReceiptBytes > WORKFLOW_RECEIPT_BYTES) throw new TypeError('Use a routine receipt budget from 1024 bytes to 32 MiB.');
   await mkdir(dataDirectory, { recursive: true });
   const db = new DatabaseSync(path.toNamespacedPath(path.join(dataDirectory, 'productivity.sqlite')));
   db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL); CREATE TABLE IF NOT EXISTS workspace_receipts(id TEXT PRIMARY KEY, hash TEXT NOT NULL); CREATE TABLE IF NOT EXISTS chat_receipts(id TEXT PRIMARY KEY, hash TEXT NOT NULL, state TEXT NOT NULL, reply TEXT);');
+  // Keep the original two-column receipt table compatible with previous writers.
+  db.exec('CREATE TABLE IF NOT EXISTS workflow_mutation_receipts(id TEXT PRIMARY KEY, result_json TEXT NOT NULL)');
   db.exec(`CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,title TEXT NOT NULL,auto_title INTEGER NOT NULL,revision INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,active_request_id TEXT,last_status TEXT);
     CREATE TABLE IF NOT EXISTS conversation_turns(sequence INTEGER PRIMARY KEY AUTOINCREMENT,conversation_id TEXT NOT NULL,request_id TEXT UNIQUE NOT NULL,digest TEXT NOT NULL,message TEXT NOT NULL,provider_id TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,outcome_json TEXT,base_bytes INTEGER NOT NULL,stored_bytes INTEGER NOT NULL,reserved_bytes INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS conversation_turns_order ON conversation_turns(conversation_id,sequence);
@@ -41,6 +46,30 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
   let closed = false;
   let workflowCatalog=builtinCatalog();
   function configureWorkflowTools(catalog){if(!Array.isArray(catalog)||catalog.length>100||new Set(catalog.map(item=>item.name)).size!==catalog.length)throw fail('invalid_catalog','Use a bounded unique workflow catalog.');workflowCatalog=structuredClone(catalog);}
+  function workflowSteps(value, previous) {
+    if (value === undefined && previous) return structuredClone(previous.steps);
+    if (!previous) return validateWorkflowSteps(value, workflowCatalog);
+    if (!Array.isArray(value)) return validateWorkflowSteps(value, workflowCatalog);
+    const retained = value.map(step => {
+      if (!step || typeof step.tool !== 'string' || !step.tool.startsWith('cap_') || step.capability !== undefined) return step;
+      const originals = previous.steps.filter(saved => saved.tool === step.tool && saved.capability);
+      if (!originals.length || originals.some(saved => hash(saved.capability) !== hash(originals[0].capability))) throw fail('capability_changed', 'Explicitly select the current registered capability version before adding or changing this routine step.', 409);
+      return { ...step, capability: structuredClone(originals[0].capability) };
+    });
+    return validateWorkflowSteps(retained, workflowCatalog);
+  }
+  function checkWorkflowHash(operation, workflow, revision) {
+    if (operation.expectedDefinitionHash === undefined) return;
+    if (typeof operation.expectedDefinitionHash !== 'string' || !/^[a-f\d]{64}$/.test(operation.expectedDefinitionHash)) throw fail('invalid_input', 'Use the exact routine definition hash.');
+    const current = workflowDefinitionHash(workflow);
+    if (operation.expectedDefinitionHash !== current) throw Object.assign(fail('workflow_changed', 'This routine changed. Read its current definition before saving.', 409), { revision, definitionHash: current });
+  }
+  function workflowReceipt(receipt, operation) {
+    if (receipt.workflow_result_json == null) return { workflow: { id: operation.workflowId || operation.operationId }, appliedRevision: null, originalDefinitionUnavailable: true };
+    let result; try { result = JSON.parse(receipt.workflow_result_json); } catch { throw fail('workflow_receipt_unavailable', 'The original routine save receipt could not be read.', 503); }
+    if (!result || Object.keys(result).some(key => !['workflow','appliedRevision'].includes(key)) || !result.workflow || result.workflow.id !== (operation.workflowId || operation.operationId) || !Number.isSafeInteger(result.appliedRevision) || result.appliedRevision < 1) throw fail('workflow_receipt_unavailable', 'The original routine save receipt could not be matched.', 503);
+    return result;
+  }
   function apply(operation) {
     if (closed) throw fail('workspace_closed', 'The workspace is shutting down.', 503);
     if (!operation || typeof operation !== 'object' || Array.isArray(operation)) throw fail('invalid_input', 'Provide a workspace operation.');
@@ -52,13 +81,14 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
     db.exec('BEGIN IMMEDIATE');
     try {
       const state = snapshot();
-      const receipt = db.prepare('SELECT hash FROM workspace_receipts WHERE id=?').get(operation.operationId);
+      const receipt = db.prepare('SELECT w.hash,r.result_json AS workflow_result_json FROM workspace_receipts w LEFT JOIN workflow_mutation_receipts r ON r.id=w.id WHERE w.id=?').get(operation.operationId);
       if (receipt) {
         if (receipt.hash !== digest) throw fail('operation_conflict', 'That operation ID was already used for another change.', 409);
-        db.exec('COMMIT'); return { workspace: state, replayed: true };
+        const result = ['saveWorkflow','setWorkflowEnabled'].includes(operation.type) ? workflowReceipt(receipt, operation) : {};
+        db.exec('COMMIT'); return { workspace: state, replayed: true, ...result };
       }
       if (state.revision !== operation.expectedRevision) throw fail('revision_conflict', 'The workspace changed. Your draft is still available; review the latest state and try again.', 409);
-      const at = iso(now()); let summary;
+      const at = iso(now()); let summary, changedWorkflow;
       const task = taskId => { const item = state.tasks.find(t => t.id === id(taskId, 'task')); if (!item) throw fail('not_found', 'That task was not found.', 404); return item; };
       const note = noteId => { const item = state.notes.find(n => n.id === id(noteId, 'note')); if (!item) throw fail('not_found', 'That note was not found.', 404); return item; };
       const optionalText = (value, limit, label) => text(value ?? '', limit, label, true);
@@ -95,13 +125,27 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
           item.updatedAt = at; summary = `${item.archived ? 'Archived' : 'Updated'} note: ${item.title}`; break;
         }
         case 'saveWorkflow': {
-          let item = operation.workflowId ? state.workflows.find(w => w.id === id(operation.workflowId, 'workflow')) : null;
-          if (operation.workflowId && !item) throw fail('not_found', 'That workflow was not found.', 404);
+          let item = operation.workflowId !== undefined ? state.workflows.find(w => w.id === id(operation.workflowId, 'workflow')) : null;
+          if (operation.workflowId !== undefined && !item) throw fail('not_found', 'That workflow was not found.', 404);
           if (!item && state.workflows.length >= 100) throw fail('workspace_limit', 'Keep at most 100 workflows.');
           if (operation.enabled !== undefined && typeof operation.enabled !== 'boolean') throw fail('invalid_input', 'Enabled must be true or false.');
-          const update = { name: text(operation.name, 200, 'Workflow name'), description: optionalText(operation.description, 2000, 'Workflow description'), steps: validateWorkflowSteps(operation.steps,workflowCatalog), enabled: operation.enabled ?? true, updatedAt: at };
+          if (item && !['name','description','steps','enabled'].some(key => operation[key] !== undefined)) throw fail('invalid_input', 'Choose at least one routine field to change.');
+          if (item) checkWorkflowHash(operation, item, state.revision);
+          else if (operation.expectedDefinitionHash !== undefined) throw fail('invalid_input', 'A new routine has no previous definition hash.');
+          const update = { name: operation.name === undefined && item ? item.name : text(operation.name, 200, 'Workflow name'),
+            description: operation.description === undefined && item ? item.description : optionalText(operation.description, 2000, 'Workflow description'),
+            steps: workflowSteps(operation.steps, item), enabled: operation.enabled ?? item?.enabled ?? true, updatedAt: at };
           if (item) Object.assign(item, update); else { item = { id: operation.operationId, ...update, createdAt: at }; state.workflows.push(item); }
+          changedWorkflow = item;
           summary = `Saved workflow: ${item.name}`; break;
+        }
+        case 'setWorkflowEnabled': {
+          if (Object.keys(operation).some(key => !['operationId','expectedRevision','type','workflowId','enabled','expectedDefinitionHash'].includes(key)) || typeof operation.enabled !== 'boolean') throw fail('invalid_input', 'Choose one routine and an enabled state.');
+          const item = state.workflows.find(workflow => workflow.id === id(operation.workflowId, 'workflow'));
+          if (!item) throw fail('not_found', 'That workflow was not found.', 404);
+          checkWorkflowHash(operation, item, state.revision);
+          item.enabled = operation.enabled; item.updatedAt = at; changedWorkflow = item;
+          summary = `${item.enabled ? 'Enabled' : 'Disabled'} workflow: ${item.name}`; break;
         }
         case 'rememberPreference': {
           const key = text(operation.key, 64, 'Preference key');
@@ -130,8 +174,15 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
       const encoded = JSON.stringify(state); if (Buffer.byteLength(encoded) > 8 * 1024 * 1024) throw fail('workspace_limit', 'The workspace is full. Export or archive material before adding more.');
       db.prepare('UPDATE workspace SET state=? WHERE id=1').run(encoded);
       if (db.prepare('SELECT count(*) AS count FROM workspace_receipts').get().count >= 50000) throw fail('workspace_limit', 'This workspace has reached its operation receipt limit.');
+      const result = changedWorkflow ? { workflow: structuredClone(changedWorkflow), appliedRevision: state.revision } : {};
+      const workflowResult = changedWorkflow ? JSON.stringify(result) : null;
+      if (workflowResult !== null) {
+        const retained = db.prepare('SELECT COALESCE(sum(length(CAST(result_json AS BLOB))),0) AS bytes FROM workflow_mutation_receipts').get().bytes;
+        if (retained + Buffer.byteLength(workflowResult) > workflowReceiptBytes) throw fail('workflow_receipt_limit', 'Saved routine history reached its receipt limit. Existing results are retained; no new routine change was saved.', 429);
+      }
       db.prepare('INSERT INTO workspace_receipts VALUES(?,?)').run(operation.operationId, digest);
-      db.exec('COMMIT'); return { workspace: state, replayed: false };
+      if (changedWorkflow) db.prepare('INSERT INTO workflow_mutation_receipts(id,result_json) VALUES(?,?)').run(operation.operationId, workflowResult);
+      db.exec('COMMIT'); return { workspace: state, replayed: false, ...result };
     } catch (error) { db.exec('ROLLBACK'); if (error.statusCode === 409) error.workspace = snapshot(); throw error; }
   }
   function chatReceipt(requestId, digest) {
