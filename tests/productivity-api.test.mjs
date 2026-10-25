@@ -2,16 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createSharedServer } from '../server/shared-server.mjs';
 import { createProductivityStore } from '../server/productivity-store.mjs';
 import { createProductivityTools } from '../server/productivity-tools.mjs';
+import { loadCapabilities } from '../server/capability-registry.mjs';
 
 const stopped = () => Object.assign(new Error('Synthetic request stopped.'), { name: 'AbortError' });
 const unavailable = () => Object.assign(new Error('Synthetic provider unavailable.'), { code: 'provider_unavailable', statusCode: 503 });
-async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.', toolCalls: [] }), desktop } = {}) {
+async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.', toolCalls: [] }), desktop, capabilities = [], capabilityRoot } = {}) {
   const dataDirectory = await mkdtemp(path.join(tmpdir(), 'companion-productivity-api-'));
   let store = await createProductivityStore({ dataDirectory });
   const stores = [store], apps = [], calls = [], jobs = [], builderCalls = []; let runtimeCount = 0;
@@ -35,7 +36,7 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
     async stopPending(owner) { builderCalls.push({type:'stopPending',owner}); const builds=[]; for(const job of jobs) if(['queued','generating','validating'].includes(job.status)) builds.push(await this.cancel(job.id,owner)); return {stopped:true,builds}; },
     async close() {},
   };
-  let tools = createProductivityTools({ store, builder, desktop });
+  let tools = createProductivityTools({ store, builder, desktop, capabilities, root:capabilityRoot });
   const legacyProvider = { getStatus: async () => ({ provider: 'local', reasoningReady: false, transcriptionReady: false }), ask: async () => ({ text: 'Legacy synthetic response.' }), transcribe: async () => ({ text: 'Synthetic transcript.' }), cancel() {}, cancelScope() {} };
   const createApp = () => createSharedServer({ dbPath: path.join(dataDirectory, 'room.sqlite'), port: 0, assistantProvider: legacyProvider, assistantOptions: { createProductivityRuntime: async () => { runtimeCount += 1; return { router, store, builder, tools, desktop }; } } });
   let app = await createApp(); apps.push(app);
@@ -47,10 +48,18 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
   }
   async function session() { const result = await request('GET', '/api/assistant/session'); assert.equal(result.status, 200); return { csrfToken: result.value.csrfToken, cookie: result.headers.get('set-cookie').split(';')[0] }; }
   async function restart() {
-    await app.close(); store.close(); store = await createProductivityStore({ dataDirectory }); stores.push(store); tools = createProductivityTools({ store, builder, desktop });
+    await app.close(); store.close(); store = await createProductivityStore({ dataDirectory }); stores.push(store); if(capabilityRoot)capabilities=await loadCapabilities({root:capabilityRoot}); tools = createProductivityTools({ store, builder, desktop, capabilities, root:capabilityRoot });
     app = await createApp(); apps.push(app); address = await app.listen(); origin = new URL(address.url).origin; return store;
   }
   return { app, store, router, tools, calls, builderCalls, origin, request, session, restart, runtimeCount: () => runtimeCount };
+}
+
+async function capabilityFixture(t, {workspace=false,code}={}) {
+  const root=await mkdtemp(path.join(tmpdir(),'companion-api-capability-')),directory=path.join(root,'server','capabilities');await mkdir(directory,{recursive:true});
+  t.after(async()=>{const target=path.resolve(root);assert.ok(target.startsWith(path.resolve(tmpdir())+path.sep+'companion-api-capability-'));await rm(target,{recursive:true,force:true});});
+  const entry={id:'double-value',title:'Double value',module:'./double-value.mjs',version:1,tool:{name:'cap_double_value',description:'Double the supplied number.',parameters:{type:'object',properties:{value:{type:'integer'}},required:['value'],additionalProperties:false}},workflowAllowed:true,effectPolicy:workspace?'workspace':'pure',acceptance:[{name:'Known result',arguments:{value:3},expected:{total:6}}]};
+  const modulePath=path.join(directory,'double-value.mjs');await writeFile(modulePath,code||'export function execute(args){return {total:args.value*2};}');await writeFile(path.join(directory,'manifest.json'),JSON.stringify({version:1,capabilities:[entry]}));
+  return {capabilityRoot:root,capabilities:await loadCapabilities({root}),modulePath};
 }
 
 test('new productivity routes require a personal session, exact Origin and CSRF before lazy initialization', async t => {
@@ -176,6 +185,53 @@ test('saved cancelled turns show completed actions and do not repeat them on exp
   const detail = await f.request('GET',`/api/assistant/conversations/${conversationId}`,undefined,user); assert.equal(detail.value.turns[0].status,'cancelled'); assert.equal(detail.value.turns[0].error.actions[0].result.task.title,'Retain saved partial work');
   assert.equal((await f.request('POST','/api/assistant/chat',body,user)).status,499); assert.equal(f.calls.length,2); assert.equal(f.store.snapshot().tasks.length,1);
   await f.restart(); const next = await f.session(); assert.equal((await f.request('POST','/api/assistant/chat',body,next)).status,499); assert.equal(f.calls.length,2);
+});
+
+test('one executable capability is shared by catalog, direct tools, gateway chat, and pinned workflows',async t=>{
+  const custom=await capabilityFixture(t);
+  const f=await fixture(t,{...custom,complete:async(input,round)=>{
+    if(round===1)return {text:'',toolCalls:[{id:'shared-capability',name:'run_capability',arguments:{name:'cap_double_value',arguments:{value:3}}}]};
+    const receipt=JSON.parse(input.messages.at(-1).content);assert.equal(receipt.value.total,6);assert.equal(receipt.capability.id,'double-value');return {text:'The registered result is 6.',toolCalls:[]};
+  }}),user=await f.session();
+  assert.ok(f.tools.definitions.length<=32);assert.ok(!f.tools.definitions.some(tool=>tool.name==='cap_double_value'));
+  const catalog=(await f.request('GET','/api/assistant/integrations',undefined,user)).value.tools,descriptor=catalog.find(tool=>tool.name==='cap_double_value');assert.equal(descriptor.workflowAllowed,true);assert.ok(descriptor.hash);assert.ok(!JSON.stringify(catalog).includes(custom.capabilityRoot));
+  const operationId=randomUUID(),body={tool:'cap_double_value',arguments:{value:3},operationId};
+  const direct=await f.request('POST','/api/assistant/tools/run',body,user);assert.equal(direct.status,200);assert.deepEqual(direct.value.result.value,{total:6});
+  const workflowId=randomUUID();assert.equal((await f.request('POST','/api/assistant/workspace/operations',{operationId:workflowId,expectedRevision:0,type:'saveWorkflow',name:'Use installed double action',steps:[{tool:'cap_double_value',arguments:{value:3}}]},user)).status,200);
+  const workflowBody={operationId:randomUUID()};const workflow=await f.request('POST',`/api/assistant/workspace/workflows/${workflowId}/run`,workflowBody,user);assert.equal(workflow.value.status,'completed');assert.deepEqual(workflow.value.steps[0].result.value,{total:6});
+  const chat=await f.request('POST','/api/assistant/chat',{id:'shared-capability-chat',message:'Double 3 using the installed action.'},user);assert.equal(chat.status,200);assert.deepEqual(chat.value.actions[0].result.value,{total:6});
+  assert.equal((await f.request('POST','/api/assistant/tools/run',{...body,operationId:randomUUID(),arguments:{value:'3'}},user)).status,400);
+  await writeFile(custom.modulePath,'export function execute(args){return {total:args.value*3};}');await f.restart();const next=await f.session();
+  const replay=await f.request('POST','/api/assistant/tools/run',body,next);assert.equal(replay.status,200);assert.equal(replay.value.result.replayed,true);assert.deepEqual(replay.value.result.value,{total:6});
+  const workflowReplay=await f.request('POST',`/api/assistant/workspace/workflows/${workflowId}/run`,workflowBody,next);assert.equal(workflowReplay.value.replayed,true);assert.deepEqual(workflowReplay.value.steps[0].result.value,{total:6});
+  const changed=await f.request('POST',`/api/assistant/workspace/workflows/${workflowId}/run`,{operationId:randomUUID()},next);assert.equal(changed.status,409);assert.match(changed.value.error.code,/capability/);
+});
+
+test('direct capability failure retains actual nested effects for panels and MCP without rerunning them',async t=>{
+  const custom=await capabilityFixture(t,{workspace:true,code:'export async function execute(args,ctx){await ctx.runTool("create_task",{title:"Retained capability effect"});throw new Error("Synthetic later failure");}'});
+  const f=await fixture(t,custom),user=await f.session(),body={tool:'cap_double_value',arguments:{value:1},operationId:randomUUID()};
+  const failed=await f.request('POST','/api/assistant/tools/run',body,user);assert.ok(failed.status>=400);assert.equal(failed.value.capability.id,'double-value');assert.equal(failed.value.hostActions[0].result.task.title,'Retained capability effect');assert.equal(f.store.snapshot().tasks.length,1);
+  assert.ok((await f.request('POST','/api/assistant/tools/run',body,user)).status>=400);assert.equal(f.store.snapshot().tasks.length,1);
+});
+
+test('cancelled capability chat checkpoints its actual nested task and exact retries cannot repeat it', {timeout:10000},async t=>{
+  const custom=await capabilityFixture(t,{workspace:true,code:'export async function execute(args,ctx){await ctx.runTool("create_task",{title:"Task before capability cancellation"});await new Promise(resolve=>setTimeout(resolve,5000));return {total:2};}'});
+  const f=await fixture(t,{...custom,complete:async()=>({text:'',toolCalls:[{id:'cancelled-capability',name:'run_capability',arguments:{name:'cap_double_value',arguments:{value:1}}}]})}),user=await f.session(),conversationId=randomUUID();await f.request('POST','/api/assistant/conversations',{id:conversationId},user);
+  const body={id:'nested-capability-cancel',message:'Start the synthetic capability then wait.',conversationId,expectedRevision:0};const pending=f.request('POST','/api/assistant/chat',body,user);
+  const until=Date.now()+4000;while(f.store.snapshot().tasks.length===0&&Date.now()<until)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(f.store.snapshot().tasks.length,1);
+  await f.request('POST','/api/assistant/cancel',{id:body.id},user);const stopped=await pending;assert.equal(stopped.status,499);assert.equal(stopped.value.actions[0].result.hostActions[0].result.task.title,'Task before capability cancellation');
+  const detail=await f.request('GET',`/api/assistant/conversations/${conversationId}`,undefined,user);assert.equal(detail.value.turns[0].error.actions[0].result.hostActions[0].status,'completed');assert.equal((await f.request('POST','/api/assistant/chat',body,user)).status,499);assert.equal(f.store.snapshot().tasks.length,1);
+});
+
+test('a malformed installed registry leaves real workspace and source-recovery routes usable',async t=>{
+  const temporary=await mkdtemp(path.join(tmpdir(),'companion-registry-recovery-')),root=path.join(temporary,'source');await mkdir(path.join(root,'server','capabilities'),{recursive:true});await writeFile(path.join(root,'server','capabilities','manifest.json'),'{"version":99,"capabilities":[]}');
+  await mkdir(path.join(root,'scripts'));await writeFile(path.join(root,'scripts','desktop-bridge.ps1'),'# Synthetic bridge fixture; never executed.');
+  let app;t.after(async()=>{await app?.close();const target=path.resolve(temporary);assert.ok(target.startsWith(path.resolve(tmpdir())+path.sep+'companion-registry-recovery-'));await rm(target,{recursive:true,force:true});});
+  app=await createSharedServer({root,dbPath:path.join(temporary,'room.sqlite'),port:0,assistantProvider:{getStatus:async()=>({reasoningReady:false,transcriptionReady:false}),ask:async()=>({text:'Unused fixture.'}),transcribe:async()=>({text:'Unused fixture.'}),cancel(){},cancelScope(){}}});
+  const {url}=await app.listen(),origin=new URL(url).origin,bootstrap=await fetch(origin+'/api/assistant/session'),cookie=bootstrap.headers.get('set-cookie').split(';')[0],csrf=(await bootstrap.json()).csrfToken;
+  const catalog=await fetch(origin+'/api/assistant/integrations',{headers:{Cookie:cookie}});assert.equal(catalog.status,200);const metadata=await catalog.json();assert.equal(metadata.capabilityStatus.ready,false);assert.ok(metadata.tools.some(tool=>tool.name==='create_task'));
+  const update=await fetch(origin+'/api/assistant/workspace/operations',{method:'POST',headers:{Cookie:cookie,Origin:origin,'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({operationId:randomUUID(),expectedRevision:0,type:'addTask',title:'Recovery workspace remains usable'})});assert.equal(update.status,200);assert.equal((await update.json()).workspace.tasks.length,1);
+  assert.equal((await fetch(origin+'/api/assistant/features/source',{headers:{Cookie:cookie}})).status,200);assert.equal((await fetch(origin+'/api/assistant/features',{headers:{Cookie:cookie}})).status,200);
 });
 
 test('workspace HTTP CAS and replay return the real current SQLite snapshot without creating a group account', async t => {

@@ -43,7 +43,7 @@ function createLocks() {
   return { request: async (name, options, callback) => { if (held.has(name)) return callback(null); held.add(name); try { return await callback({ name }); } finally { held.delete(name); } } };
 }
 
-async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [] } = {}) {
+async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], catalog = [] } = {}) {
   const nodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(match => [match[1], new Element()]));
   nodes.get('provider-type').value = 'openai';
   const records = new Map(saved.map(item => [item.id, structuredClone(item)]));
@@ -77,6 +77,7 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
     if (route === 'status') return response({ transcriptionReady: true });
     if (route === 'workspace') return response(workspace);
     if (route === 'features') return response({ jobs: [] });
+    if (route === 'integrations') return response({ mcp: { command: 'C:/Node/node.exe', args: ['C:/Companion/server/mcp-server.mjs'] }, tools: catalog, capabilityStatus: { ready: true } });
     if (route === 'runtime') return response({ managed: true, restarting: false, workerPid: 100 });
     if (route === 'desktop') return response({ available: true, capabilities: { installedApps: true, windows: true, read: true, open: true, reviewedInput: true }, pendingCount: 0 });
     if (route === 'desktop/actions') return response({ actions: [] });
@@ -97,7 +98,7 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
   }
   const window = { MediaRecorder: Recorder, AudioContext, addEventListener() {} };
   const context = vm.createContext({ createVoiceSession, window, document, navigator: { locks, permissions: { query: async () => ({ state: 'granted' }) }, mediaDevices: { getUserMedia: () => { permission = deferred(); return permission.promise; } } }, MediaRecorder: Recorder, fetch: fetchMock, Headers, AbortController, Blob, URL, URLSearchParams, DOMException, crypto: webcrypto, structuredClone, performance, console, localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) }, location: { search: '', reload() {}, assign() {} }, Event: class {}, setTimeout: (callback, milliseconds) => { const timer = setTimeout(callback, milliseconds); timer.unref(); timers.add(timer); return timer; }, clearTimeout, setInterval: callback => { intervals.push(callback); return intervals.length; }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} });
-  vm.runInContext(source + '\nglobalThis.ui={ready:()=>checkingService,selectConversation,refreshConversations,refreshConversation,loadEarlierConversation,runCommand,cancelTurn,startRecording,setVoiceVisible,renderSavedConversation,rememberDesktopAction,captureConversationContext,setChatOpen,showDialog,openDesktopReview,addMessage,processVoiceSegment,get:()=>({id:conversationId,detail:conversationDetail,localChatTurn,turnBusy,recording,voiceState:voiceSessionState,chatOpen,currentView,ownsVoice:voiceOwnsCapture,initial:conversationInitialized,listPending:!!conversationListPending,detailPending:!!conversationDetailRequest,desktop:desktopActions})};', context);
+  vm.runInContext(source + '\nglobalThis.ui={ready:()=>checkingService,selectConversation,refreshConversations,refreshConversation,loadEarlierConversation,runCommand,cancelTurn,startRecording,setVoiceVisible,renderSavedConversation,rememberDesktopAction,captureConversationContext,setChatOpen,showDialog,openDesktopReview,addMessage,processVoiceSegment,refreshToolCatalog,applyToolCatalog,applyExtensionManifest,openFeatureByName,openWorkflow,renderWorkflowSteps,validateWorkflowSteps,runWorkflow,renderActionReceipts,appendInstalledFeatureReady,setExtensionLoader:loader=>loadExtensionModule=loader,get:()=>({id:conversationId,detail:conversationDetail,localChatTurn,turnBusy,recording,voiceState:voiceSessionState,chatOpen,currentView,ownsVoice:voiceOwnsCapture,initial:conversationInitialized,listPending:!!conversationListPending,detailPending:!!conversationDetailRequest,desktop:desktopActions,workflowDraft,toolCatalog,extensions:[...extensions.values()],workspace})};', context);
   await context.ui.ready();
   if (waitForConversations) await until(() => !context.ui.get().listPending && !context.ui.get().detailPending, 'initial conversation load');
   return { ui: context.ui, nodes, records, storage, requests, document, intervals, setIntercept: value => { custom = value; }, get waitingForMicrophone() { return !!permission; }, grantMicrophone: () => { const pending = permission; permission = null; pending.resolve({ getTracks: () => [{ stop: () => stoppedTracks++ }] }); }, get stoppedTracks() { return stoppedTracks; }, close: () => { context.ui.cancelTurn(false); for (const timer of timers) clearTimeout(timer); } };
@@ -326,5 +327,129 @@ test('Memory shows actual saved preferences and Forget and Remember again use re
     assert.match(app.nodes.get('memory-list').textContent, /Remember again/);
     await app.nodes.get('memory-list').children[0].children.at(-1).dispatch('click'); await until(() => /Forget/.test(app.nodes.get('memory-list').textContent));
     assert.equal(calls.length, 2); assert.notEqual(calls[0].operationId, calls[1].operationId);
+  } finally { app.close(); }
+});
+
+const feature = (id, title, aliases = []) => ({ id, title, aliases, module: './features/' + id + '.mjs' });
+const descendants = node => [node, ...node.children.flatMap(descendants)];
+const argumentField = (app, name) => descendants(app.nodes.get('workflow-steps')).find(node => node.dataset.argument === name);
+const customAction = (overrides = {}) => ({ name: 'cap_scale', title: 'Scale values', description: 'Scale a small list of values.', kind: 'capability', capabilityId: 'scale', featureId: 'scale-panel', version: '1', hash: 'a'.repeat(64), workflowAllowed: true, effectPolicy: 'pure', parameters: { type: 'object', additionalProperties: false, properties: { name: { type: 'string', minLength: 1, maxLength: 40 }, count: { type: 'integer', minimum: 1, maximum: 5 }, rate: { type: 'number', minimum: 0, maximum: 1 }, rounded: { type: 'boolean' }, unit: { type: 'string', enum: ['meters', 'feet'] }, values: { type: 'array', items: { type: 'number' }, maxItems: 3 }, options: { type: 'object', properties: { tag: { type: 'string' } }, required: ['tag'], additionalProperties: false } }, required: ['name', 'count', 'rate', 'rounded', 'unit', 'values', 'options'] }, ...overrides });
+
+test('an installed panel opens through its normalized voice alias and assistant text never opens it', async () => {
+  const app = await createUI();
+  try {
+    app.ui.setExtensionLoader(async () => ({ mount: ({ container }) => { container.textContent = 'A real mounted fixture'; } }));
+    await app.ui.applyExtensionManifest({ version: 1, features: [feature('time-zones', 'Time zones', ['Zone converter'])] });
+    app.ui.addMessage('assistant', 'open zone converter'); assert.equal(app.ui.get().currentView, 'today');
+    await app.ui.runCommand('show ＺＯＮＥ ＣＯＮＶＥＲＴＥＲ', { voice: true, conversationContext: copy(app.ui.captureConversationContext()), approvalContext: null });
+    assert.equal(app.ui.get().currentView, 'extension-time-zones');
+    assert.match(app.nodes.get('extension-nav').textContent, /Say “open Time zones”/);
+    assert.equal(app.requests.filter(request => request.url.endsWith('/chat')).length, 0);
+  } finally { app.close(); }
+});
+
+test('ambiguous, failed, duplicate and removed panel names open Tools without choosing a different feature', async () => {
+  const app = await createUI();
+  try {
+    app.ui.setExtensionLoader(async url => { if (url.includes('broken')) throw new Error('Synthetic missing module'); return { mount() {} }; });
+    await app.ui.applyExtensionManifest({ version: 1, features: [feature('first', 'First', ['converter']), feature('second', 'Second', ['converter']), feature('broken', 'Broken')] });
+    app.ui.openFeatureByName('converter'); assert.equal(app.nodes.get('tools-menu').open, true); assert.match(app.nodes.get('tools-message').textContent, /More than one/); assert.equal(app.ui.get().currentView, 'today');
+    app.ui.openFeatureByName('Broken'); assert.match(app.nodes.get('tools-message').textContent, /could not open/); assert.equal(app.ui.get().currentView, 'today');
+    await app.ui.applyExtensionManifest({ version: 1, features: [feature('same', 'Duplicate one'), feature('same', 'Duplicate two')] });
+    assert.equal(app.ui.get().extensions.length, 0); assert.match(app.nodes.get('extension-nav').textContent, /duplicate installation ID/);
+    await app.ui.applyExtensionManifest({ version: 1, features: [] });
+    await app.ui.runCommand('open First', { voice: true, conversationContext: copy(app.ui.captureConversationContext()), approvalContext: null });
+    assert.match(app.nodes.get('tools-message').textContent, /not available/); assert.equal(app.requests.filter(request => request.url.endsWith('/chat')).length, 0);
+  } finally { app.close(); }
+});
+
+test('capability-only tools remain discoverable and an unavailable registry is not labeled uninstalled', async () => {
+  const app = await createUI({ catalog: [customAction()] });
+  try {
+    await app.ui.refreshToolCatalog();
+    assert.match(app.nodes.get('extension-nav').textContent, /Scale valuesAvailable by voice/);
+    await app.ui.runCommand('open Scale values', { voice: true, conversationContext: copy(app.ui.captureConversationContext()), approvalContext: null });
+    assert.match(app.nodes.get('tools-message').textContent, /available by voice/); assert.equal(app.ui.get().currentView, 'today');
+    app.ui.applyToolCatalog({ tools: [], capabilityStatus: { ready: false, message: 'Installed action registry needs attention.' } });
+    assert.match(app.nodes.get('extension-nav').textContent, /needs attention/); assert.doesNotMatch(app.nodes.get('extension-nav').textContent, /No installed tools yet/);
+  } finally { app.close(); }
+});
+
+test('workflow fields come from the catalog and preserve typed values and invalid structured drafts', async () => {
+  const meta = customAction(), forbidden = customAction({ name: 'desktop_forbidden', title: 'External input', workflowAllowed: false });
+  const app = await createUI({ catalog: [meta, forbidden] });
+  try {
+    await app.ui.refreshToolCatalog(); app.ui.openWorkflow();
+    const choose = app.nodes.get('workflow-steps').children[0].children[0].children[1];
+    assert.ok(choose.children.some(node => node.value === 'cap_scale')); assert.equal(choose.children.some(node => node.value === 'desktop_forbidden'), false);
+    choose.value = 'cap_scale'; await choose.dispatch('change');
+    for (const [name, value, event] of [['name', 'Fixture', 'input'], ['count', '3', 'input'], ['rate', '0.5', 'input'], ['rounded', 'false', 'change'], ['unit', '1', 'change'], ['values', '[1,2]', 'input'], ['options', '{"tag":"test"}', 'input']]) { const input = argumentField(app, name); input.value = value; await input.dispatch(event); }
+    let step = app.ui.get().workflowDraft[0]; assert.equal(step.arguments.count, 3); assert.equal(step.arguments.rate, 0.5); assert.equal(step.arguments.rounded, false); assert.equal(step.arguments.unit, 'feet');
+    app.ui.validateWorkflowSteps(app.ui.get().workflowDraft);
+    const list = argumentField(app, 'values'); list.value = '['; await list.dispatch('input'); assert.throws(() => app.ui.validateWorkflowSteps(app.ui.get().workflowDraft), /valid list/);
+    app.ui.renderWorkflowSteps(); assert.equal(argumentField(app, 'values').value, '['); assert.equal(app.ui.get().workflowDraft[0].arguments.values.length, 2);
+    const fixed = argumentField(app, 'values'); fixed.value = '[1,2,3,4]'; await fixed.dispatch('input'); assert.throws(() => app.ui.validateWorkflowSteps(app.ui.get().workflowDraft), /number of items/);
+  } finally { app.close(); }
+});
+
+test('missing or changed saved capability steps retain their pin and values until explicit reselection', async () => {
+  const meta = customAction({ parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } });
+  const app = await createUI({ catalog: [meta] });
+  try {
+    await app.ui.refreshToolCatalog();
+    app.ui.openWorkflow({ id: A, name: 'Saved', steps: [{ tool: 'cap_scale', arguments: { text: 'Preserve this' }, capability: { id: 'scale', version: '0', hash: 'b'.repeat(64) } }] });
+    assert.throws(() => app.ui.validateWorkflowSteps(app.ui.get().workflowDraft), /tool changed/);
+    assert.equal(app.ui.get().workflowDraft[0].arguments.text, 'Preserve this'); assert.equal(app.ui.get().workflowDraft[0].capability.version, '0');
+    const update = descendants(app.nodes.get('workflow-steps')).find(node => node.textContent === 'Use updated action'); await update.dispatch('click');
+    assert.equal(app.ui.get().workflowDraft[0].capability, undefined); assert.equal(app.ui.get().workflowDraft[0].arguments.text, 'Preserve this'); app.ui.validateWorkflowSteps(app.ui.get().workflowDraft);
+    app.ui.openWorkflow({ id: A, name: 'Missing', steps: [{ tool: 'cap_removed', arguments: { text: 'Retained value' }, capability: { id: 'removed', version: '1', hash: 'c'.repeat(64) } }] });
+    assert.match(app.nodes.get('workflow-steps').textContent, /not installed/); assert.match(app.nodes.get('workflow-steps').textContent, /Retained value/);
+    assert.throws(() => app.ui.validateWorkflowSteps(app.ui.get().workflowDraft), /not installed/); assert.equal(app.ui.get().workflowDraft[0].tool, 'cap_removed');
+  } finally { app.close(); }
+});
+
+test('a ready installed feature gets an explicit Open action and failed panels are never labeled ready', async () => {
+  const app = await createUI();
+  try {
+    app.ui.setExtensionLoader(async () => ({ mount() {} })); await app.ui.applyExtensionManifest({ version: 1, features: [feature('ready-panel', 'Ready panel')] });
+    const container = new Element(); app.ui.appendInstalledFeatureReady(container, { status: 'applied', providedFeatures: [{ id: 'ready-panel', title: 'Ready panel' }] });
+    assert.match(container.textContent, /Ready panel ready/); await container.children[0].children[1].dispatch('click'); assert.equal(app.ui.get().currentView, 'extension-ready-panel');
+    app.ui.setExtensionLoader(async () => { throw new Error('Synthetic mount failure'); }); await app.ui.applyExtensionManifest({ version: 1, features: [feature('ready-panel', 'Ready panel')] });
+    const failed = new Element(); app.ui.appendInstalledFeatureReady(failed, { status: 'applied', installedFeatures: [{ id: 'ready-panel', title: 'Ready panel' }] });
+    assert.doesNotMatch(failed.textContent, /ready\./); assert.match(failed.textContent, /could not open/);
+    await app.ui.applyExtensionManifest({ version: 1, features: [] }); const removed = new Element(); app.ui.appendInstalledFeatureReady(removed, { status: 'applied', providedFeatures: [{ id: 'ready-panel', title: 'Ready panel' }] });
+    assert.match(removed.textContent, /not currently available/); assert.doesNotMatch(removed.textContent, /is installed|ready\./);
+  } finally { app.close(); }
+});
+
+test('panel action helpers use real tool receipts and retain partial error receipts without retrying', async () => {
+  const app = await createUI({ catalog: [customAction()] });
+  try {
+    let api, calls = 0; app.ui.setExtensionLoader(async () => ({ mount: value => { api = value.api; } })); await app.ui.applyExtensionManifest({ version: 1, features: [feature('scale-panel', 'Scale values')] });
+    app.setIntercept((url, options, { workspace }) => {
+      if (!url.endsWith('/tools/run')) return null;
+      const body = JSON.parse(options.body); assert.equal(body.tool, 'cap_scale'); assert.equal(body.arguments.count, 2); calls++;
+      if (calls === 1) { workspace.revision++; workspace.tasks.push({ id: A, title: 'Actual server task', status: 'todo' }); return response({ tool: body.tool, result: { capability: { id: 'scale', name: 'cap_scale' }, value: { total: 8 }, hostActions: [] }, workspace }); }
+      return response({ error: { code: 'capability_failed', message: 'Synthetic partial failure' }, capability: { id: 'scale', name: 'cap_scale' }, hostActions: [{ tool: 'create_task', status: 'completed', result: { task: { title: 'Actual server task' } } }] }, 500);
+    });
+    const value = await api.runTool('cap_scale', { count: 2 }); assert.equal(value.result.value.total, 8); assert.equal(app.ui.get().workspace.tasks.length, 1);
+    await assert.rejects(api.runTool('cap_scale', { count: 2 }), error => error.code === 'capability_failed' && error.hostActions.length === 1 && error.capability.id === 'scale'); assert.equal(calls, 2);
+    const receipt = new Element(); app.ui.renderActionReceipts(receipt, [{ tool: 'run_capability', arguments: { name: 'cap_scale' }, status: 'failed', result: { error: 'Synthetic partial failure', hostActions: [{ tool: 'create_task', status: 'completed', result: { task: { title: 'Actual server task' } } }] } }]);
+    assert.match(receipt.textContent, /could not finish/); assert.match(receipt.textContent, /Actual server task/); assert.doesNotMatch(receipt.textContent, /Scale values · completed/);
+  } finally { app.close(); }
+});
+
+test('saving edited workflows preserves existing capability pins and leaves new steps for server pinning', async () => {
+  const meta = customAction({ parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } });
+  const app = await createUI({ catalog: [meta] });
+  try {
+    await app.ui.refreshToolCatalog(); const pin = { id: meta.capabilityId, version: meta.version, hash: meta.hash };
+    app.ui.openWorkflow({ id: A, name: 'Saved', steps: [{ tool: 'cap_scale', arguments: { text: 'Existing value' }, capability: pin }] });
+    await app.nodes.get('add-workflow-step').dispatch('click'); const row = app.nodes.get('workflow-steps').children[1], choose = row.children[0].children[1]; choose.value = 'cap_scale'; await choose.dispatch('change');
+    const inputs = descendants(app.nodes.get('workflow-steps')).filter(node => node.dataset.argument === 'text'); inputs[1].value = 'New value'; await inputs[1].dispatch('input');
+    let saved;
+    app.setIntercept((url, options, { workspace }) => { if (!url.endsWith('/workspace/operations')) return null; saved = JSON.parse(options.body); workspace.revision++; workspace.workflows = [{ id: A, name: saved.name, steps: saved.steps }]; return response({ workspace, replayed: false }); });
+    await app.nodes.get('workflow-form').dispatch('submit', { preventDefault() {} });
+    assert.equal(saved.type, 'saveWorkflow'); assert.deepEqual(saved.steps[0].capability, pin); assert.equal(saved.steps[0].arguments.text, 'Existing value'); assert.equal(saved.steps[1].arguments.text, 'New value'); assert.equal('capability' in saved.steps[1], false);
   } finally { app.close(); }
 });

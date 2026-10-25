@@ -7,6 +7,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createProductivityStore } from '../server/productivity-store.mjs';
 import { createProductivityTools } from '../server/productivity-tools.mjs';
+import { capabilityHash } from '../server/capability-registry.mjs';
 
 async function fixture(t, options = {}) {
   const dataDirectory = await mkdtemp(path.join(tmpdir(), 'companion-productivity-store-')), stores = [];
@@ -16,6 +17,61 @@ async function fixture(t, options = {}) {
   const apply = (type, fields = {}, target = store) => target.apply({ operationId: randomUUID(), expectedRevision: target.snapshot().revision, type, ...fields });
   return { store, open, apply, dataDirectory };
 }
+const executionId=(prefix,request,call)=>{const h=createHash('sha256').update(`${request}:${call}`).digest('hex').slice(0,32);return`${prefix}:${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;};
+const fakeCapability=(version=1)=>({id:'fixture',title:'Fixture',module:'./fixture.mjs',modulePath:path.join(tmpdir(),'fixture.mjs'),moduleHash:'a'.repeat(64),version,hash:String(version).repeat(64),effectPolicy:'workspace',workflowAllowed:true,tool:{name:'cap_fixture',description:'Synthetic capability.',parameters:{type:'object',properties:{text:{type:'string',minLength:1,maxLength:100}},required:['text'],additionalProperties:false}}});
+
+test('workflow terminal receipts pin the original definition across edits, disabling, intervening changes and restart',async t=>{
+  const f=await fixture(t);let tools=createProductivityTools({store:f.store});const flow=f.apply('saveWorkflow',{name:'Original sequence',steps:[{tool:'create_task',arguments:{title:'Original task'}},{tool:'save_note',arguments:{text:'Original note'}}]}).workspace.workflows[0],context={requestId:'stable-workflow'};
+  const first=await tools.runWorkflow(flow.id,context);assert.equal(first.steps.length,2);
+  f.apply('saveWorkflow',{workflowId:flow.id,name:'Edited sequence',enabled:false,steps:[...flow.steps,{tool:'save_note',arguments:{text:'Must never run on original retry'}}]});
+  const replay=await tools.runWorkflow(flow.id,context);assert.deepEqual(replay.steps,first.steps);assert.equal(f.store.snapshot().notes.length,1);
+  f.store.close();const restarted=await f.open();tools=createProductivityTools({store:restarted});assert.deepEqual((await tools.runWorkflow(flow.id,context)).steps,first.steps);assert.equal(restarted.snapshot().tasks.length,1);
+  const other=f.apply('saveWorkflow',{name:'Other sequence',steps:[{tool:'get_time',arguments:{}}]},restarted).workspace.workflows.at(-1);await assert.rejects(tools.runWorkflow(other.id,context),{code:'request_conflict'});
+});
+
+test('central workflow schema validation preflights every step and custom version pins cannot silently change',async t=>{
+  const f=await fixture(t),capability=fakeCapability();let runs=0;createProductivityTools({store:f.store,capabilities:[capability],executeCapability:async()=>{runs++;return{value:{},hostActions:[]};}});
+  const before=f.store.snapshot();assert.throws(()=>f.apply('saveWorkflow',{name:'Invalid later step',steps:[{tool:'create_task',arguments:{title:'Must not be saved'}},{tool:'start_focus',arguments:{minutes:'twenty'}}]}),{code:'invalid_tool'});assert.deepEqual(f.store.snapshot(),before);
+  const flow=f.apply('saveWorkflow',{name:'Pinned capability',steps:[{tool:'create_task',arguments:{title:'Must not run after stale pin'}},{tool:'cap_fixture',arguments:{text:'Original'}}]}).workspace.workflows[0];assert.deepEqual(flow.steps[1].capability,{id:'fixture',version:1,hash:capability.hash});
+  const tools=createProductivityTools({store:f.store,capabilities:[fakeCapability(2)],executeCapability:async()=>{runs++;return{value:{},hostActions:[]};}});
+  await assert.rejects(tools.runWorkflow(flow.id,{requestId:'stale-workflow'}),{code:'capability_changed'});assert.equal(f.store.snapshot().tasks.length,0);assert.equal(runs,0);
+  assert.throws(()=>f.apply('saveWorkflow',{workflowId:flow.id,name:'Keep stale pin',steps:flow.steps}),{code:'capability_changed'});
+  const changed=f.apply('saveWorkflow',{workflowId:flow.id,name:'Explicit updated selection',steps:[{tool:'cap_fixture',arguments:{text:'Updated'}}]}).workspace.workflows[0];assert.equal(changed.steps[0].capability.version,2);
+  const missing=createProductivityTools({store:f.store});await assert.rejects(missing.runWorkflow(flow.id,{requestId:'missing-capability'}),{code:'capability_unavailable'});
+});
+
+test('interrupted workflow and capability executions retain real partial effects and never resume after restart',async t=>{
+  const f=await fixture(t),tools=createProductivityTools({store:f.store}),flow=f.apply('saveWorkflow',{name:'Interrupted sequence',steps:[{tool:'create_task',arguments:{title:'Actually completed'}},{tool:'save_note',arguments:{text:'Must not resume'}}]}).workspace.workflows[0];
+  const id=executionId('workflow','interrupted-workflow','workflow'),digest=capabilityHash({workflowId:flow.id});f.store.beginExecution({id,digest,definition:flow});
+  const task=await tools.execute('create_task',{title:'Actually completed'},{requestId:id,callId:'step:0'});f.store.checkpointExecution({id,digest,checkpoint:{steps:[{tool:'create_task',result:task}]}});
+  const capabilityId=executionId('capability','interrupted-capability','one'),capabilityDigest=capabilityHash({name:'cap_fixture',arguments:{text:'Original'}});f.store.beginExecution({id:capabilityId,digest:capabilityDigest,definition:{id:'fixture',version:1,hash:'a'.repeat(64)}});f.store.checkpointExecution({id:capabilityId,digest:capabilityDigest,checkpoint:{hostActions:[{id:'host:1',tool:'create_task',status:'completed',result:task}]}});
+  f.store.close();const restarted=await f.open(),after=createProductivityTools({store:restarted});const replay=await after.runWorkflow(flow.id,{requestId:'interrupted-workflow'});assert.equal(replay.status,'interrupted');assert.equal(replay.steps[0].result.task.id,task.task.id);assert.equal(restarted.snapshot().tasks.length,1);assert.equal(restarted.snapshot().notes.length,0);
+  await assert.rejects(after.execute('cap_fixture',{text:'Original'},{requestId:'interrupted-capability',callId:'one'}),error=>error.code==='capability_interrupted'&&error.hostActions[0].result.task.id===task.task.id);
+});
+
+test('capability cancellation inside a workflow retains parent-confirmed effects and terminal retries execute nothing',async t=>{
+  const f=await fixture(t),controller=new AbortController();let runs=0;const tools=createProductivityTools({store:f.store,capabilities:[fakeCapability()],executeCapability:async({runTool})=>{runs++;await runTool('create_task',{title:'Real effect before stop'});controller.abort();throw Object.assign(new Error('Stopped after a real effect'),{name:'AbortError'});}});
+  const flow=f.apply('saveWorkflow',{name:'Stop after actual effect',steps:[{tool:'save_note',arguments:{text:'First actual note'}},{tool:'cap_fixture',arguments:{text:'Continue'}},{tool:'save_note',arguments:{text:'Never run'}}]}).workspace.workflows[0],context={requestId:'cancelled-workflow',signal:controller.signal};
+  const result=await tools.runWorkflow(flow.id,context);assert.equal(result.status,'cancelled');assert.equal(result.steps.length,1);assert.equal(result.failedStep.hostActions[0].result.task.id,f.store.snapshot().tasks[0].id);
+  const retry=await tools.runWorkflow(flow.id,{requestId:context.requestId});assert.equal(retry.status,'cancelled');assert.deepEqual(retry.failedStep,result.failedStep);assert.equal(runs,1);assert.equal(f.store.snapshot().notes.length,1);assert.equal(f.store.snapshot().tasks.length,1);
+});
+
+test('large execution and conversation compaction retain all nested capability effect IDs and uncertainty flags',async t=>{
+  const f=await fixture(t,{conversationLimits:{outcomeBytes:16000}}),hostActions=Array.from({length:12},(_,index)=>({id:'host:'+(index+1),tool:'save_note',status:'completed',result:{note:{id:randomUUID(),title:'Note '+index,text:'x'.repeat(12000)}}}));
+  hostActions[11]={id:'host:12',tool:'create_task',status:'pending',result:{outcomeUnknown:true,task:{id:randomUUID()}}};
+  const conversationId=randomUUID(),digest=createHash('sha256').update('nested-capabilities').digest('hex');f.store.createConversation({id:conversationId});f.store.beginConversationTurn({conversationId,expectedRevision:0,id:'nested',message:'Retain actual effects',providerId:'fixture',digest});
+  const action={id:'capability-call',tool:'run_capability',status:'failed',result:{capability:{id:'fixture',name:'cap_fixture',version:1,hash:'b'.repeat(64)},hostActions,error:'Later failure'}};f.store.recordConversationActions({conversationId,id:'nested',digest,actions:[action]});
+  const retained=f.store.getConversation(conversationId).turns[0].actions[0].result;assert.equal(retained.hostActions.length,12);assert.deepEqual(retained.hostActions.map(item=>item.result.note?.id||item.result.task?.id),hostActions.map(item=>item.result.note?.id||item.result.task?.id));assert.equal(retained.hostActions[11].result.outcomeUnknown,true);assert.equal(retained.capability.hash,'b'.repeat(64));
+  const execution='workflow:synthetic-large',executionDigest='c'.repeat(64);f.store.beginExecution({id:execution,digest:executionDigest,definition:{id:randomUUID()}});const steps=Array.from({length:12},()=>({tool:'cap_fixture',result:{capability:retained.capability,hostActions}}));
+  const finished=f.store.finishExecution({id:execution,digest:executionDigest,result:{status:'failed',steps}});assert.equal(finished.result.detailsTruncated,true);for(const step of finished.result.steps){assert.equal(step.result.hostActions.length,12);assert.equal(step.result.hostActions[11].result.task.id,hostActions[11].result.task.id);assert.equal(step.result.hostActions[11].result.outcomeUnknown,true);}
+});
+
+test('one shared budget bounds nested workflow capability effects and terminal replay cannot resume exhausted work',async t=>{
+  const f=await fixture(t);let runs=0;const tools=createProductivityTools({store:f.store,capabilities:[fakeCapability()],executeCapability:async({runTool})=>{runs++;await runTool('create_task',{title:'Only permitted nested effect'});try{await runTool('save_note',{text:'No remaining budget'});}catch{}return{value:{attempted:true},hostActions:[]};}});
+  const flow=f.apply('saveWorkflow',{name:'Bounded nested work',steps:[{tool:'cap_fixture',arguments:{text:'one'}},{tool:'create_task',arguments:{title:'Must never run'}}]}).workspace.workflows[0],budget={remaining:2};
+  const result=await tools.runWorkflow(flow.id,{requestId:'bounded-workflow',executionBudget:budget});assert.equal(result.status,'failed');assert.equal(result.code,'execution_budget_exceeded');assert.equal(budget.remaining,0);assert.equal(result.failedStep.hostActions[0].status,'completed');assert.equal(result.failedStep.hostActions[1].status,'failed');assert.equal(f.store.snapshot().tasks.length,1);assert.equal(f.store.snapshot().notes.length,0);
+  const replay=await tools.runWorkflow(flow.id,{requestId:'bounded-workflow',executionBudget:{remaining:48}});assert.equal(replay.code,result.code);assert.deepEqual(replay.failedStep,result.failedStep);assert.equal(runs,1);assert.equal(f.store.snapshot().tasks.length,1);
+});
 
 test('workspace compare-and-swap, exact replay and cross-operation ID conflicts survive SQLite restart', async t => {
   const f = await fixture(t); const operation = { operationId: randomUUID(), expectedRevision: 0, type: 'addTask', title: 'Review a synthetic draft' };

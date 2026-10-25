@@ -54,6 +54,7 @@ test('a requested feature becomes real verified source, registered runtime behav
   const job = await finished(f.builder, queued.id);
   assert.equal(job.status, 'applied', JSON.stringify(job.verification));
   assert.equal(job.reviewRequired, false); assert.equal(job.verification.passed, true);
+  assert.deepEqual(job.providedFeatures,[{id:'focus-timer',title:'Focus timer'}]);
   assert.ok(job.verification.checks.some(check => check.name === 'Existing trusted regression tests'));
   assert.ok(job.verification.checks.some(check => check.name === 'Feature registration and module exports'));
   assert.ok(job.verification.checks.some(check => check.name === 'Feature-specific tests'));
@@ -63,6 +64,7 @@ test('a requested feature becomes real verified source, registered runtime behav
   assert.equal(f.completions[0].providerId, 'synthetic-codex'); assert.equal(f.completions[0].schema.type, 'object');
   const rolledBack = await f.builder.rollback(job.id, OWNER);
   assert.equal(rolledBack.status, 'rolled_back'); await absent(path.join(f.root, 'src/features/focus-timer.mjs'));
+  assert.deepEqual(rolledBack.providedFeatures,[]);
   assert.match(await readFile(path.join(f.root, 'src/runtime.mjs'), 'utf8'), /42/);
 });
 
@@ -95,6 +97,26 @@ test('microphone-session source changes require review before they can affect ca
   const f = await fixture(t, {complete:async()=>({summary:'Prepare a reviewed microphone implementation.',files:[{path:'src/voice-session.mjs',content:'export const microphonePolicy = "review required";\n'}],tests:[]})});
   const job=await finished(f.builder,(await f.builder.request({prompt:'Prepare the microphone policy change.',providerId:'synthetic',autoApply:true},OWNER)).id);
   assert.equal(job.status,'review_required'); assert.equal(job.files[0].protected,true); await absent(path.join(f.root,'src/voice-session.mjs'));
+});
+
+function executablePatch(code='export function execute(args){return {total:args.value*2};}') {
+  const capability={id:'double-value',title:'Double value',module:'./double-value.mjs',version:1,tool:{name:'cap_double_value',description:'Double one number.',parameters:{type:'object',properties:{value:{type:'integer'}},required:['value'],additionalProperties:false}},workflowAllowed:true,effectPolicy:'pure',acceptance:[{name:'Known result',arguments:{value:3},expected:{total:6}}]};
+  return {summary:'Add one executable registered capability.',files:[{path:'server/capabilities/manifest.json',content:JSON.stringify({version:1,capabilities:[capability]})},{path:'server/capabilities/double-value.mjs',content:code}],tests:[]};
+}
+test('executable capabilities require real behavior verification and protected activation',async t=>{
+  const f=await fixture(t,{complete:async()=>executablePatch()});
+  const job=await finished(f.builder,(await f.builder.request({prompt:'Add a tested callable action.',providerId:'synthetic',autoApply:true},OWNER)).id);
+  assert.equal(job.status,'review_required',JSON.stringify(job.verification));assert.equal(job.reviewRequired,true);assert.ok(job.verification.checks.find(check=>check.name==='Registered capability behavior')?.passed);
+  await absent(path.join(f.root,'server/capabilities/double-value.mjs'));await f.builder.apply(job.id,OWNER);
+  assert.match(await readFile(path.join(f.root,'server/capabilities/double-value.mjs'),'utf8'),/args.value\*2/);
+  await f.builder.rollback(job.id,OWNER);await absent(path.join(f.root,'server/capabilities/manifest.json'));
+});
+test('registered empty or incorrect capability behavior cannot be activated',async t=>{
+  for(const code of ['export function execute(){}','export function execute(args){return {total:args.value+1};}']){
+    const f=await fixture(t,{complete:async()=>executablePatch(code)});
+    const job=await finished(f.builder,(await f.builder.request({prompt:'Validate the actual capability behavior.',providerId:'synthetic'},OWNER)).id);
+    assert.equal(job.status,'failed');assert.equal(job.verification.checks.find(check=>check.name==='Registered capability behavior')?.passed,false);await absent(path.join(f.root,'server/capabilities/double-value.mjs'));
+  }
 });
 
 test('CAS prevents activation when source changed after the verified snapshot', async t => {
@@ -212,10 +234,13 @@ test('large repositories use planning and bounded lossless source messages with 
     return { text: JSON.stringify(feature) };
   } });
   await writeFile(path.join(f.root, 'src/large.mjs'), '// OMIT_LARGE_CONTEXT\n' + '// enough source to require planning\n'.repeat(6000));
+  await mkdir(path.join(f.root,'server/capabilities'));await writeFile(path.join(f.root,'server/capabilities/manifest.json'),'{"version":1,"capabilities":[]}');
+  await mkdir(path.join(f.root,'docs'));await writeFile(path.join(f.root,'docs/CAPABILITIES.md'),'CAPABILITY_CONTRACT_MUST_BE_SUPPLIED');
   const job = await finished(f.builder, (await f.builder.request({ prompt: 'Add focus', providerId: 'synthetic', autoApply: false }, OWNER)).id);
   assert.equal(job.status, 'ready', job.error);
   assert.equal(calls.length, 2); assert.ok(calls[0].schema.required.includes('paths'));
   const generation = calls[1]; assert.ok(generation.schema.required.includes('tests'));
+  const supplied=generation.messages.slice(1).map(message=>JSON.parse(message.content));assert.ok(supplied.some(file=>file.source_file==='server/capabilities/manifest.json'&&file.content==='{"version":1,"capabilities":[]}'));assert.ok(supplied.some(file=>file.source_file==='docs/CAPABILITIES.md'&&file.content.includes('CAPABILITY_CONTRACT_MUST_BE_SUPPLIED')));
   assert.ok(generation.messages.every(message => Buffer.byteLength(message.content) <= 90000));
   assert.ok(generation.messages.reduce((sum, message) => sum + Buffer.byteLength(message.content), 0) <= 420000);
   assert.ok(!generation.messages.some(message => message.content.includes('OMIT_LARGE_CONTEXT')));
