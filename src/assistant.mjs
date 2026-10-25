@@ -1,6 +1,7 @@
 import { createVoiceSession } from './voice-session.mjs';
 import { createProjectFilesUI } from './project-files.mjs';
 import {createBuildContinuationUI} from './build-continuation.mjs';
+import { createBuildAttemptsUI } from './build-attempts.mjs';
 const $ = id => document.getElementById(id);
 const shellCandidate = window.companionShell;
 const nativeShell = shellCandidate?.desktop===true&&['corner','workspace'].includes(shellCandidate.mode)
@@ -25,6 +26,7 @@ let desktopReviewGeneration=0;
 let selectedWindowContext=null,windowContextGeneration=0,windowContextRenderKey='';
 let projectFilesUI=null,selectedProject=null,projectSelectionGeneration=0,projectAccessPending=null,projectRestored=false;
 let buildContinuationUI=null,continuationBuildId=null,continuationSelectionGeneration=0;
+let buildAttemptsUI=null;
 let voiceDialogOverride=false;
 let voiceSession=null,voiceSessionState={enabled:false,optedIn:false,visible:true,status:'off'},voiceCaptureContext=null,voiceFirstContext=null,activeVoiceSegment=null,voiceOwnershipRequest=null,voiceOwnsCapture=false;
 let chatOpen=false,memoryBusy=false;
@@ -275,6 +277,7 @@ async function continuationApi(path,options={},milliseconds=20000){
   const controller=new AbortController(),abort=()=>controller.abort();options.signal?.addEventListener('abort',abort,{once:true});if(options.signal?.aborted)controller.abort();const timeout=setTimeout(abort,milliseconds);
   try{return await api(path,{...options,signal:controller.signal});}finally{clearTimeout(timeout);options.signal?.removeEventListener('abort',abort);}
 }
+function initBuildAttemptsUI(){buildAttemptsUI=createBuildAttemptsUI({api:continuationApi});}
 function initBuildContinuationUI(){buildContinuationUI=createBuildContinuationUI({container:$('build-continuation-container'),api:continuationApi,openWork:id=>openWork(id),notify:toast});}
 async function continueBuildOriginal(context){
   if(!context?.buildId||!currentBuildContinuationContext(context))throw new Error('Open the original build, then say “continue original request” for that selection.');
@@ -874,9 +877,10 @@ $('provider-form').addEventListener('submit',async event=>{event.preventDefault(
 $('connect-panel').addEventListener('toggle',()=>{if(!$('connect-panel').open){$('provider-key').value='';editingProviderId=null;}});
 async function refreshJobs(){if(jobsPending||destroyed)return;jobsPending=true;try{const value=await boundedApi('features');if(!Array.isArray(value.jobs))throw new Error('Feature builds could not be read.');jobs=value.jobs;if(!selectedJobId&&jobs.length)selectedJobId=jobs[0].id;renderJobs();const activation=jobs.filter(job=>['applied','rolled_back'].includes(job.status)).map(job=>job.id+':'+job.status+':'+job.updatedAt).join('|');if(activation!==extensionRefreshKey){extensionRefreshKey=activation;void loadExtensions();}renderSavedConversation();}finally{jobsPending=false;}}
 function refreshJobsSafely(){if(runtimeReconnectPromise)return;void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});}
+function jobDetailFresh(detail,summary){return !!detail&&String(detail.updatedAt)>=String(summary.updatedAt)&&(!Number.isSafeInteger(summary.generationAttempt)||detail.generationAttempt===summary.generationAttempt);}
 function rememberJob(job){if(!job?.id)return;if(Array.isArray(job.files)&&(!jobDetails.get(job.id)||String(job.updatedAt)>=String(jobDetails.get(job.id).updatedAt)))jobDetails.set(job.id,job);while(jobDetails.size>12){const id=jobDetails.keys().next().value;if(id===selectedJobId){const value=jobDetails.get(id);jobDetails.delete(id);jobDetails.set(id,value);}else jobDetails.delete(id);}}
 async function ensureJobDetail(id){
-  const summary=jobs.find(job=>job.id===id);if(runtimeReconnectPromise||!summary||jobDetailPending.has(id)||Date.now()<(jobDetailRetryAt.get(id)||0)||(jobDetails.get(id)&&String(jobDetails.get(id).updatedAt)>=String(summary.updatedAt)))return;
+  const summary=jobs.find(job=>job.id===id);if(runtimeReconnectPromise||!summary||jobDetailPending.has(id)||Date.now()<(jobDetailRetryAt.get(id)||0)||jobDetailFresh(jobDetails.get(id),summary))return;
   jobDetailPending.add(id);
   try{const value=await boundedApi(`features/${encodeURIComponent(id)}`),job=value.job||value;if(job.id!==id)throw new Error('The build details could not be matched.');rememberJob(job);jobDetailRetryAt.delete(id);}
   catch(error){$('build-error').textContent=error.message;jobDetailRetryAt.set(id,Date.now()+5000);}
@@ -894,10 +898,13 @@ function renderJobs(){
   for(const job of [...jobs].sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt)))){const item=button('','job-button'+(job.id===selectedJobId?' active':''),()=>{selectedJobId=job.id;renderJobs();});item.append(element('span','job-name',conciseBuildTitle(job,64)),jobStatus(job));list.append(item);}
   const detail=$('job-detail'),summary=jobs.find(item=>item.id===selectedJobId);detail.replaceChildren();
   if(!summary){detail.append(emptyState('Build a feature.','Describe it above. Changes and checks will appear here.'));return;}
-  const fresh=!!cached&&String(cached.updatedAt)>=String(summary.updatedAt);
+  const fresh=jobDetailFresh(cached,summary);
   const job=fresh?cached:summary;
   if(!fresh)void ensureJobDetail(job.id);
   const header=element('div','job-header'),heading=element('div');heading.append(element('h2','',conciseBuildTitle(job)),jobStatus(job));header.append(heading);detail.append(header);
+  const attempt=job.generationAttempt,attemptLimit=job.generationAttemptLimit;
+  if(Number.isSafeInteger(attempt)&&Number.isSafeInteger(attemptLimit)&&attempt>=1&&attempt<=attemptLimit&&attemptLimit<=2){const stage=job.status==='generating'?(attempt>1?'Correcting check failures':'Preparing changes'):job.status==='validating'?'Checking changes':JOB_LABELS[job.status]||job.status;detail.append(element('p','build-attempt-progress',`Attempt ${attempt} of ${attemptLimit} · ${stage}`));}
+  if(job.status==='failed'&&attempt===2&&attemptLimit===2&&Array.isArray(job.attempts)&&job.attempts.length===2&&job.attempts.every(item=>item.status==='failed'&&item.verification?.passed===false))detail.append(element('p','attempt-exhausted','Both attempts failed checks. Open Attempt history to review the failures before requesting another build.'));
   if(job.summary)detail.append(element('p','job-summary',job.summary));
   else detail.append(element('p','job-summary',ACTIVE_JOBS.has(job.status)?'The build is running. Actual changes and check results will appear here as they are available.':'No build summary was returned.'));
   if(job.error)detail.append(element('p','inline-error',typeof job.error==='string'?job.error:job.error.message||'This build could not finish.'));
@@ -911,6 +918,7 @@ function renderJobs(){
   if(!fresh)detail.append(element('p','form-hint','Loading the actual file changes and check results…'));
   if(job.files?.length){detail.append(element('h3','checks-heading','Changes'));for(const file of job.files){const section=element('details','change-file');section.dataset.path=file.path;section.open=openFiles.has(file.path);const summary=element('summary');summary.append(element('span','',file.path),element('span','change-count',`+${file.added||0} −${file.removed||0}`));section.append(summary,element('pre','file-diff',typeof file.diff==='string'?file.diff:JSON.stringify(file.diff,null,2)));detail.append(section);}}
   const checks=job.verification?.checks||[];if(checks.length){detail.append(element('h3','checks-heading','Checks'));for(const check of checks){const row=element('div','verification-check'+(check.passed?'':' failed'));row.append(element('strong','',(check.passed?'✓ ':'× ')+check.name));if(check.output)row.append(element('pre','',check.output));detail.append(row);}}
+  buildAttemptsUI?.render(detail,job);
   if(job.events?.length){const events=element('div','job-events');for(const event of [...job.events].slice(-12).reverse()){const row=element('div','job-event');row.append(element('time','',timeLabel(event.at)),element('span','',event.message||event.type));events.append(row);}detail.append(events);}
 }
 async function jobAction(job,action){
@@ -1252,9 +1260,9 @@ $('hands-free').addEventListener('change',()=>{if($('hands-free').checked)void s
 $('settings-read-aloud').addEventListener('change',()=>{$('read-aloud').checked=$('settings-read-aloud').checked;$('read-aloud').dispatchEvent(new Event('change'));});
 $('read-aloud').addEventListener('change',()=>{$('settings-read-aloud').checked=$('read-aloud').checked;});
 document.addEventListener('visibilitychange',()=>{if(document.hidden){setVoiceVisible(false);if(voicePipeline||recording||microphoneOpening)cancelTurn(false,{preserveVoice:true});else{disableHandsFree();stopSpeech();}$('provider-key').value='';}else{void setVoiceVisible(true);void checkService();void refreshConversations({initialize:true,quiet:true});}});
-window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;projectFilesUI?.close();buildContinuationUI?.close();for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
+window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;projectFilesUI?.close();buildContinuationUI?.close();buildAttemptsUI?.close();for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
 window.addEventListener('pageshow',event=>{if(!event.persisted)return;destroyed=false;setBusy(false);setState('idle');updateVoiceHelp();void setVoiceVisible(true);void checkService();void loadExtensions();});
-initProjectFiles();initBuildContinuationUI();initNativeShell();initVoiceSession();renderWindowContext();renderProjectContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
+initProjectFiles();initBuildContinuationUI();initBuildAttemptsUI();initNativeShell();initVoiceSession();renderWindowContext();renderProjectContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
 void checkService();void loadExtensions();
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;renderFocus();if(currentView==='build')void buildContinuationUI?.refresh();if(jobs.some(job=>ACTIVE_JOBS.has(job.status))||currentView==='build')void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});},2000);
 setInterval(()=>{if(!document.hidden&&!destroyed&&!operationBusy&&!runtimeReconnectPromise)void refreshWorkspace().catch(error=>{$('connection-label').textContent=error.message;});},5000);
