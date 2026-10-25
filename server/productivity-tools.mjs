@@ -23,8 +23,8 @@ export const TOOL_DEFINITIONS = [
 const allowed = new Map(TOOL_DEFINITIONS.map(tool => [tool.name, tool]));
 const fail = (message, code = 'invalid_tool') => Object.assign(new Error(message), { code, statusCode: 400 });
 function operationId(requestId, callId) { const h = createHash('sha256').update(`${requestId}:${callId}`).digest('hex').slice(0, 32); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`; }
-function validateArguments(name, value) {
-  const definition = allowed.get(name);
+function validateArguments(name, value, registry = allowed) {
+  const definition = registry.get(name);
   if (!definition) throw fail('That tool is not registered. Ask Companion to build the missing feature.');
   if (!value || typeof value !== 'object' || Array.isArray(value) || JSON.stringify(value).length > 80000) throw fail('Provide a bounded tool argument object.');
   const properties = definition.parameters.properties;
@@ -40,11 +40,39 @@ function validateArguments(name, value) {
   return value;
 }
 
-export function createProductivityTools({ store, builder, owner = 'local-workspace', now = Date.now } = {}) {
+export function createProductivityTools({ store, builder, desktop, owner = 'local-workspace', now = Date.now } = {}) {
   if (!store) throw new Error('The productivity store is required.');
+  const definitions = [...TOOL_DEFINITIONS, ...(desktop?.definitions || [])];
+  const registry = new Map(definitions.map(tool => [tool.name, tool]));
+  if (registry.size !== definitions.length) throw new Error('Tool names must be unique.');
+  const desktopNames = new Set((desktop?.definitions || []).map(tool => tool.name));
+  const desktopReads = new Set(['desktop_list_apps','desktop_list_windows','desktop_read_window']);
   const execute = async (name, raw = {}, { requestId, callId, providerId, signal } = {}) => {
     if (signal?.aborted) throw Object.assign(new Error('Request stopped.'), { name: 'AbortError' });
-    const args = validateArguments(name, raw);
+    const args = validateArguments(name, raw, registry);
+    if (desktopNames.has(name)) {
+      if (desktopReads.has(name)) return desktop.execute(name, args, { signal, requestId });
+      const receiptId = `desktop:${operationId(requestId || 'local', callId || JSON.stringify([name,args]))}`;
+      const digest = createHash('sha256').update(JSON.stringify({ name, args })).digest('hex');
+      const saved = store.beginChat(receiptId, digest);
+      if (saved) {
+        if (saved.state === 'in_progress') throw Object.assign(fail('This desktop action is running or was interrupted. Inspect the target before requesting another action.', 'desktop_action_uncertain'), { statusCode: 409 });
+        if (saved.state === 'failed') throw Object.assign(fail(saved.reply.message, saved.reply.code), { statusCode: saved.reply.statusCode });
+        if (saved.reply.desktopAction) {
+          const current = (await desktop.listActions()).find(action => action.id === saved.reply.desktopAction.id);
+          if (!current || ['cancelled','expired','failed','uncertain'].includes(current.status)) throw Object.assign(fail('This desktop action is no longer pending. Read its actual result and request a fresh action if needed.', 'desktop_action_expired'), { statusCode: 409 });
+          return { ...saved.reply, desktopAction: current };
+        }
+        return saved.reply;
+      }
+      try {
+        const result = await desktop.execute(name, args, { signal, requestId: receiptId });
+        store.finishChat(receiptId, digest, result); return result;
+      } catch (error) {
+        const receipt = { message: error.message || 'The desktop action could not complete. Inspect its target before retrying.', code: error.code || 'desktop_action_failed', statusCode: error.statusCode || 500 };
+        store.finishChat(receiptId, digest, receipt, true); throw error;
+      }
+    }
     const state = store.snapshot();
     const mutate = (type, fields) => {
       const entityId = operationId(requestId || 'local', callId || JSON.stringify([name, args, state.revision]));
@@ -105,5 +133,5 @@ export function createProductivityTools({ store, builder, owner = 'local-workspa
     }
     return { id: workflowId, status: 'completed', steps: results, workspace: store.snapshot() };
   }
-  return { definitions: TOOL_DEFINITIONS, execute, runWorkflow };
+  return { definitions, execute, runWorkflow };
 }

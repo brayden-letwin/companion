@@ -2,7 +2,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdir, realpath, stat } from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { createReadStream, readFileSync } from 'node:fs';
 import { randomBytes, randomUUID, createHash, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
@@ -11,6 +11,7 @@ import { createSharedState, applySharedOperation } from '../src/core/shared-disc
 import { createAssistantApi } from './assistant-api.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const APP_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const COOKIE_PREFIX = 'companion_shared_session_v1_';
 const SESSION_MS = 8 * 60 * 60 * 1000;
 const INVITE_MS = 24 * 60 * 60 * 1000;
@@ -206,7 +207,7 @@ export async function createSharedServer({ dbPath, port = 4174, root = REPO_ROOT
         await assets(req, res, route); return;
       }
       if (req.method === 'GET') {
-        if (route === '/api/health') { json(res, 200, { service: 'companion-shared', version: '0.6.0', setupRequired: !roomRow() }); return; }
+        if (route === '/api/health') { json(res, 200, { service: 'companion-shared', version: APP_VERSION, setupRequired: !roomRow() }); return; }
         if (route === '/api/session') {
           const session = requestSession(req);
           json(res, 200, { setupRequired: !roomRow(), user: session?.user || null, ...(session ? { csrfToken: session.csrf } : {}) }); return;
