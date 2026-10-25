@@ -10,7 +10,7 @@ const clone = value => structuredClone(value);
 const SOURCE_DIRS = new Set(['src', 'server', 'electron', 'scripts', 'tests', 'docs']);
 const SOURCE_TYPES = new Set(['.mjs', '.cjs', '.js', '.css', '.html', '.json', '.md', '.ps1', '.cmd', '.txt']);
 const ROOT_DOCS = new Set(['README.md', 'DESIGN.md', 'CONTRIBUTING.md', 'ROADMAP.md', 'DISCUSSION_FLOW.md', 'QA.md', 'START_HERE.txt', 'AGENTS.md', 'Start Companion.cmd', 'Start Desktop Companion.cmd', 'mcp.example.json', 'package.json']);
-const TRUSTED_TESTS = ['math.test.mjs', 'tutor.test.mjs', 'discussion.test.mjs', 'shared-discussion.test.mjs', 'assistant.test.mjs', 'provider.test.cjs', 'local-provider.test.cjs', 'training-data.test.mjs'];
+const TRUSTED_TESTS = ['math.test.mjs', 'tutor.test.mjs', 'discussion.test.mjs', 'shared-discussion.test.mjs', 'assistant.test.mjs', 'provider.test.cjs', 'local-provider.test.cjs', 'training-data.test.mjs', 'productivity-store.test.mjs', 'productivity-conversations-ui.test.mjs', 'voice-session.test.mjs'];
 const LIMITS = Object.freeze({ files: 24, fileBytes: 250000, patchBytes: 1000000, snapshotBytes: 2000000, sourceFiles: 300, jobs: 100, prompt: 12000, output: 64000, verificationMs: 30000 });
 const TERMINAL = new Set(['applied', 'failed', 'cancelled', 'conflict', 'rolled_back', 'interrupted', 'recovery_required']);
 
@@ -38,7 +38,7 @@ function validPath(value) {
 function protectedPath(file) {
   const lower = file.toLowerCase();
   return /^(?:server|electron|scripts|tests)\//.test(lower) || ['package.json', 'agents.md', 'start companion.cmd', 'start desktop companion.cmd', 'mcp.example.json'].includes(lower)
-    || lower === 'src/assistant.mjs' || /^src\/core\/(?:productivity|feature|provider|credential|auth|security)/i.test(file)
+    || ['src/assistant.mjs','src/voice-session.mjs'].includes(lower) || /^src\/core\/(?:productivity|feature|provider|credential|auth|security)/i.test(file)
     || /(?:credential|auth|security|builder|model-router)/i.test(file);
 }
 function string(value, max, label) {

@@ -15,8 +15,9 @@ function tags(value = []) { if (!Array.isArray(value) || value.length > 12) thro
 function date(value) { if (value == null || value === '') return null; if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) throw fail('invalid_date', 'Choose a valid date.'); return iso(Date.parse(value)); }
 function canonical(value) { if (Array.isArray(value)) return value.map(canonical); if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])); return value; }
 const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
-const initial = () => ({ revision: 0, tasks: [], notes: [], workflows: [], focus: null, activity: [] });
+const initial = () => ({ revision: 0, tasks: [], notes: [], workflows: [], preferences: [], focus: null, activity: [] });
 const STEP_TOOLS = new Set(['list_tasks','create_task','update_task','complete_task','list_notes','save_note','search_notes','start_focus','stop_focus','get_time']);
+const CONVERSATION_DEFAULTS = Object.freeze({ conversations: 200, turns: 400, outcomeBytes: 512 * 1024, totalBytes: 64 * 1024 * 1024 });
 function steps(value) {
   if (!Array.isArray(value) || !value.length || value.length > 12) throw fail('invalid_workflow', 'A workflow needs between 1 and 12 steps.');
   return value.map(step => {
@@ -26,13 +27,19 @@ function steps(value) {
 }
 
 /** One persistent workspace for the current OS user. Reading-room accounts are separate. */
-export async function createProductivityStore({ dataDirectory, now = Date.now } = {}) {
+export async function createProductivityStore({ dataDirectory, now = Date.now, conversationLimits = {} } = {}) {
   if (!dataDirectory) throw new Error('A private data directory is required.');
+  const limits = { ...CONVERSATION_DEFAULTS, ...conversationLimits };
+  if (Object.keys(conversationLimits).some(key => !Object.hasOwn(CONVERSATION_DEFAULTS, key)) || Object.entries(limits).some(([key, value]) => !Number.isSafeInteger(value) || value < 1 || value > CONVERSATION_DEFAULTS[key]) || limits.outcomeBytes < 8192 || limits.totalBytes < 2 * limits.outcomeBytes + 65536) throw new TypeError('Use bounded conversation storage limits.');
   await mkdir(dataDirectory, { recursive: true });
   const db = new DatabaseSync(path.join(dataDirectory, 'productivity.sqlite'));
   db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL); CREATE TABLE IF NOT EXISTS workspace_receipts(id TEXT PRIMARY KEY, hash TEXT NOT NULL); CREATE TABLE IF NOT EXISTS chat_receipts(id TEXT PRIMARY KEY, hash TEXT NOT NULL, state TEXT NOT NULL, reply TEXT);');
+  db.exec(`CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,title TEXT NOT NULL,auto_title INTEGER NOT NULL,revision INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,active_request_id TEXT,last_status TEXT);
+    CREATE TABLE IF NOT EXISTS conversation_turns(sequence INTEGER PRIMARY KEY AUTOINCREMENT,conversation_id TEXT NOT NULL,request_id TEXT UNIQUE NOT NULL,digest TEXT NOT NULL,message TEXT NOT NULL,provider_id TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,outcome_json TEXT,base_bytes INTEGER NOT NULL,stored_bytes INTEGER NOT NULL,reserved_bytes INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS conversation_turns_order ON conversation_turns(conversation_id,sequence);
+    CREATE TABLE IF NOT EXISTS conversation_preferences(id INTEGER PRIMARY KEY CHECK(id=1),active_conversation_id TEXT);`);
   db.prepare('INSERT OR IGNORE INTO workspace VALUES(1,?)').run(JSON.stringify(initial()));
-  const snapshot = () => JSON.parse(db.prepare('SELECT state FROM workspace WHERE id=1').get().state);
+  const snapshot = () => { const state = JSON.parse(db.prepare('SELECT state FROM workspace WHERE id=1').get().state); if (!Object.hasOwn(state, 'preferences')) state.preferences = []; if (!Array.isArray(state.preferences)) throw fail('workspace_invalid', 'Saved preferences could not be loaded safely.', 503); return state; };
   let closed = false;
   function apply(operation) {
     if (closed) throw fail('workspace_closed', 'The workspace is shutting down.', 503);
@@ -96,6 +103,22 @@ export async function createProductivityStore({ dataDirectory, now = Date.now } 
           if (item) Object.assign(item, update); else { item = { id: operation.operationId, ...update, createdAt: at }; state.workflows.push(item); }
           summary = `Saved workflow: ${item.name}`; break;
         }
+        case 'rememberPreference': {
+          const key = text(operation.key, 64, 'Preference key');
+          if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(key)) throw fail('invalid_preference_key', 'Use a lowercase preference key with letters, numbers, underscores or hyphens.');
+          const value = text(operation.value, 1000, 'Preference value');
+          let item = state.preferences.find(preference => preference.key === key);
+          if (!item && state.preferences.length >= 50) throw fail('preference_limit', 'Keep at most 50 retained preferences, including forgotten entries.');
+          const label = operation.label === undefined ? item?.label || key : text(operation.label, 100, 'Preference label');
+          if (item) Object.assign(item, { label, value, archived: false, updatedAt: at });
+          else { item = { id: operation.operationId, key, label, value, createdAt: at, updatedAt: at, archived: false }; state.preferences.push(item); }
+          summary = `Remembered preference: ${label}`; break;
+        }
+        case 'forgetPreference': {
+          const preferenceId = id(operation.preferenceId, 'preference'); const item = state.preferences.find(preference => preference.id === preferenceId);
+          if (!item) throw fail('not_found', 'That preference was not found.', 404);
+          item.archived = true; item.updatedAt = at; summary = `Forgot preference: ${item.label}`; break;
+        }
         case 'startFocus': {
           if (!Number.isInteger(operation.minutes) || operation.minutes < 1 || operation.minutes > 240) throw fail('invalid_duration', 'Choose a focus session between 1 and 240 minutes.');
           state.focus = { id: randomUUID(), label: optionalText(operation.label, 200, 'Focus label') || 'Focus time', startedAt: at, endsAt: iso(now() + operation.minutes * 60000) }; summary = `Started ${operation.minutes} minutes of focus`; break;
@@ -128,5 +151,143 @@ export async function createProductivityStore({ dataDirectory, now = Date.now } 
     if (!chatReceipt(requestId, digest)) throw fail('missing_request', 'The request receipt was not found.');
     db.prepare('UPDATE chat_receipts SET state=?,reply=? WHERE id=? AND hash=?').run(failed ? 'failed' : 'completed', encoded, requestId, digest);
   }
-  return { snapshot, apply, chatReceipt, beginChat, finishChat, close() { if (!closed) { closed = true; db.close(); } } };
+
+  function checkOpen() { if (closed) throw fail('workspace_closed', 'The workspace is shutting down.', 503); }
+  function transaction(callback) { checkOpen(); db.exec('BEGIN IMMEDIATE'); try { const value = callback(); db.exec('COMMIT'); return value; } catch (error) { db.exec('ROLLBACK'); throw error; } }
+  function conversationRow(conversationId) { id(conversationId, 'conversation ID'); const row = db.prepare('SELECT * FROM conversations WHERE id=?').get(conversationId); if (!row) throw fail('conversation_not_found', 'That conversation was not found.', 404); return row; }
+  function requestIdentity(value) { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(value)) throw fail('invalid_id', 'Choose a valid conversation request ID.'); return value; }
+  function requestDigest(value) { if (typeof value !== 'string' || !/^[a-f\d]{64}$/.test(value)) throw fail('invalid_input', 'Use the conversation request SHA-256 digest.'); return value; }
+  function dataCopy(value) { try { return JSON.parse(JSON.stringify(value, (key, entry) => key === 'rawContinuation' ? undefined : entry)); } catch { throw fail('invalid_input', 'Conversation outcomes must contain bounded JSON data.'); } }
+  function compact(value, size = 1024, depth = 0, key = '') {
+    if (typeof value === 'string') return value.length > size ? value.slice(0, size) + '… [details truncated]' : value;
+    if (depth > 5) return '[nested details omitted]';
+    if (Array.isArray(value)) return value.slice(0, key === 'steps' ? 12 : 8).map(item => compact(item, size, depth + 1));
+    if (key === 'desktopAction' && value && typeof value === 'object') return { id: value.id, status: value.status, summary: compact(value.summary, size), target: compact(value.target, size, depth + 1), preview: value.preview, requiresApproval: value.requiresApproval, outcomeUnknown: value.outcomeUnknown, error: compact(value.error, size), ...(value.requiresFreshPreview ? { requiresFreshPreview: true } : {}) };
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).slice(0, 30).map(([childKey, entry]) => [childKey, compact(entry, size, depth + 1, childKey)]));
+    return value;
+  }
+  function boundedOutcome(value) {
+    let result = dataCopy(value), encoded = JSON.stringify(result);
+    if (Buffer.byteLength(encoded) <= limits.outcomeBytes) return { value: result, encoded };
+    const originalActions = Array.isArray(result.actions) ? result.actions : [];
+    result = { ...result, outcomeTruncated: true, ...(typeof result.text === 'string' ? { text: compact(result.text, Math.min(32000, Math.floor(limits.outcomeBytes / 16))) } : {}) };
+    for (const size of [1024, 128]) {
+      result.actions = originalActions.map(action => ({ id: action.id, tool: action.tool, status: action.status, arguments: compact(action.arguments, size), result: compact(action.result, size), resultTruncated: true }));
+      if (result.featureJob) result.featureJob = compact(result.featureJob, size);
+      encoded = JSON.stringify(result); if (Buffer.byteLength(encoded) <= limits.outcomeBytes) return { value: result, encoded };
+    }
+    result.actions = originalActions.map(action => {
+      const source = action.result || {}, references = {};
+      for (const key of ['task','note','workflow','featureJob','desktopAction','desktopReceipt']) if (source[key] && typeof source[key] === 'object') references[key] = { id: source[key].id, title: compact(source[key].title, 80), summary: compact(source[key].summary, 80), status: source[key].status, ...(typeof source[key].outcomeUnknown === 'boolean' ? { outcomeUnknown: source[key].outcomeUnknown } : {}), ...(key === 'desktopAction' ? { requiresFreshPreview: true } : {}) };
+      if (Array.isArray(source.steps)) references.steps = source.steps.slice(0, 12).map(step => ({ tool: step.tool, status: step.status, result: compact(step.result, 80, 0), ...(step.error ? { error: compact(step.error, 80) } : {}) }));
+      return { id: action.id, tool: action.tool, status: action.status, result: { ...references, ...(source.error ? { error: compact(source.error, 120), code: source.code } : {}), summary: 'Detailed result omitted; use its stored entity or build/action ID for current data.' }, resultTruncated: true };
+    });
+    if (result.featureJob) result.featureJob = { id: result.featureJob.id, status: result.featureJob.status, summary: compact(result.featureJob.summary, 80) };
+    encoded = JSON.stringify(result);
+    if (Buffer.byteLength(encoded) > limits.outcomeBytes) { result.text = '[Reply details omitted to preserve the durable action receipts.]'; encoded = JSON.stringify(result); }
+    // Tool names and IDs are bounded by the API/router; 24 minimal receipts fit the minimum 8 KiB budget.
+    if (Buffer.byteLength(encoded) > limits.outcomeBytes) throw fail('response_limit', 'The conversation outcome exceeds its retained receipt limit.', 413);
+    return { value: result, encoded };
+  }
+  function normalizedActions(value = []) { if (!Array.isArray(value) || value.length > 24 || value.some(action => !action || typeof action !== 'object' || typeof action.id !== 'string' || action.id.length > 160 || typeof action.tool !== 'string' || action.tool.length > 80 || !['pending','completed','failed'].includes(action.status))) throw fail('invalid_input', 'Use at most 24 actual action receipts.'); return dataCopy(value); }
+  function detail(row) {
+    const turns = db.prepare('SELECT * FROM conversation_turns WHERE conversation_id=? ORDER BY sequence').all(row.id).map(saved => {
+      const outcome = saved.outcome_json ? JSON.parse(saved.outcome_json) : {};
+      return { id: saved.request_id, message: saved.message, providerId: saved.provider_id, status: saved.status, startedAt: saved.started_at, ...(saved.finished_at ? { finishedAt: saved.finished_at } : {}), actions: outcome.actions || [], featureJob: outcome.featureJob || null,
+        ...(outcome.outcomeTruncated ? { outcomeTruncated: true } : {}), ...(saved.status === 'completed' ? { reply: outcome } : !['running'].includes(saved.status) ? { error: outcome } : {}) };
+    });
+    return { id: row.id, title: row.title, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at, activeRequestId: row.active_request_id, turns };
+  }
+  function getConversation(conversationId) { checkOpen(); return detail(conversationRow(conversationId)); }
+  function listConversations() {
+    checkOpen(); const rows = db.prepare('SELECT conversations.*,(SELECT count(*) FROM conversation_turns WHERE conversation_id=conversations.id) AS turn_count FROM conversations ORDER BY updated_at DESC,rowid DESC').all();
+    return { conversations: rows.map(row => ({ id: row.id, title: row.title, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at, activeRequestId: row.active_request_id, turnCount: row.turn_count, lastStatus: row.last_status })), activeConversationId: db.prepare('SELECT active_conversation_id AS id FROM conversation_preferences WHERE id=1').get()?.id || null };
+  }
+  function activate(conversationId) { db.prepare('INSERT INTO conversation_preferences VALUES(1,?) ON CONFLICT(id) DO UPDATE SET active_conversation_id=excluded.active_conversation_id').run(conversationId); }
+  function createConversation(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['id','title'].includes(key))) throw fail('invalid_input', 'Provide a conversation ID and optional title.');
+    const conversationId = id(value.id, 'conversation ID'), title = value.title === undefined ? null : text(value.title, 80, 'Conversation title');
+    return transaction(() => {
+      let row = db.prepare('SELECT * FROM conversations WHERE id=?').get(conversationId);
+      if (!row) { if (db.prepare('SELECT count(*) AS count FROM conversations').get().count >= limits.conversations) throw fail('conversation_limit', 'The retained conversation limit has been reached.', 409); const at = iso(now()); db.prepare('INSERT INTO conversations VALUES(?,?,?,?,?,?,NULL,NULL)').run(conversationId, title || 'New conversation', title ? 0 : 1, 0, at, at); row = conversationRow(conversationId); }
+      activate(conversationId); return detail(row);
+    });
+  }
+  function existingTurn(conversationId, requestId, digest) {
+    const row = db.prepare('SELECT * FROM conversation_turns WHERE request_id=?').get(requestId);
+    if (row && (row.conversation_id !== conversationId || row.digest !== digest)) throw fail('request_conflict', 'That request ID was already used for different input or another conversation.', 409);
+    return row;
+  }
+  function receiptFor(requestId, digest) { const saved = chatReceipt(requestId, digest); if (!saved) throw fail('missing_request', 'The conversation effect receipt was not found.', 409); return saved; }
+  function beginConversationTurn(value) {
+    const conversationId = id(value?.conversationId, 'conversation ID'), requestId = requestIdentity(value.id), digest = requestDigest(value.digest), message = text(value.message, 12000, 'Message'), providerId = text(value.providerId ?? '', 100, 'Provider ID', true);
+    if (!Number.isSafeInteger(value.expectedRevision) || value.expectedRevision < 0) throw fail('invalid_revision', 'Use the current conversation revision.');
+    return transaction(() => {
+      const conversation = conversationRow(conversationId), previous = existingTurn(conversationId, requestId, digest);
+      if (previous) { if (previous.message !== message || previous.provider_id !== providerId) throw fail('request_conflict', 'That request ID was used for different input.', 409); return { conversation: detail(conversation), replayed: true, receipt: receiptFor(requestId, digest) }; }
+      if (chatReceipt(requestId, digest)) throw fail('request_conflict', 'That request ID belongs to an existing request outside this conversation.', 409);
+      if (conversation.revision !== value.expectedRevision) throw Object.assign(fail('conversation_revision_conflict', 'The conversation changed. Keep your draft and load its latest state.', 409), { conversation: detail(conversation) });
+      if (conversation.active_request_id) throw Object.assign(fail('conversation_busy', 'This conversation already has a running request.', 409), { conversation: detail(conversation) });
+      if (db.prepare('SELECT count(*) AS count FROM conversation_turns WHERE conversation_id=?').get(conversationId).count >= limits.turns) throw fail('conversation_turn_limit', 'This conversation reached its retained turn limit. Start another conversation.', 409);
+      if (db.prepare('SELECT count(*) AS count FROM chat_receipts').get().count >= 50000) throw fail('workspace_limit', 'The workspace reached its request receipt limit.');
+      const at = iso(now()), baseBytes = Buffer.byteLength(JSON.stringify({ id: requestId, conversationId, message, providerId, startedAt: at })) + 128, reserve = 2 * limits.outcomeBytes;
+      if (db.prepare('SELECT coalesce(sum(stored_bytes+reserved_bytes),0) AS bytes FROM conversation_turns').get().bytes + baseBytes + reserve > limits.totalBytes) throw fail('conversation_storage_limit', 'The durable conversation storage budget is full.', 409);
+      db.prepare('INSERT INTO chat_receipts VALUES(?,?,?,NULL)').run(requestId, digest, 'in_progress');
+      db.prepare('INSERT INTO conversation_turns(conversation_id,request_id,digest,message,provider_id,status,started_at,outcome_json,base_bytes,stored_bytes,reserved_bytes) VALUES(?,?,?,?,?,?,?,NULL,?,?,?)').run(conversationId, requestId, digest, message, providerId, 'running', at, baseBytes, baseBytes, reserve);
+      const title = conversation.auto_title ? message.replace(/\s+/g, ' ').slice(0, 80) : conversation.title;
+      db.prepare('UPDATE conversations SET title=?,auto_title=0,revision=revision+1,updated_at=?,active_request_id=?,last_status=? WHERE id=?').run(title, at, requestId, 'running', conversationId); activate(conversationId);
+      return { conversation: getConversation(conversationId), replayed: false, receipt: { state: 'in_progress', reply: null } };
+    });
+  }
+  function recordConversationActions(value) {
+    const conversationId = id(value?.conversationId, 'conversation ID'), requestId = requestIdentity(value.id), digest = requestDigest(value.digest), actions = normalizedActions(value.actions);
+    return transaction(() => {
+      const conversation = conversationRow(conversationId), saved = existingTurn(conversationId, requestId, digest); if (!saved) throw fail('missing_request', 'That conversation turn was not found.', 404);
+      if (saved.status !== 'running' || conversation.active_request_id !== requestId) throw fail('conversation_turn_finished', 'This turn is no longer running.', 409);
+      const previous = saved.outcome_json ? JSON.parse(saved.outcome_json) : {};
+      if ((previous.actions || []).length > actions.length || (previous.actions || []).some((action, index) => action.id !== actions[index]?.id || action.tool !== actions[index]?.tool || action.status !== actions[index]?.status)) throw fail('conversation_checkpoint_conflict', 'A newer action checkpoint is already retained. Earlier receipts cannot be removed.', 409);
+      const outcome = boundedOutcome({ actions, featureJob: value.featureJob ?? previous.featureJob ?? null });
+      db.prepare('UPDATE conversation_turns SET outcome_json=?,stored_bytes=?,reserved_bytes=? WHERE request_id=?').run(outcome.encoded, saved.base_bytes + Buffer.byteLength(outcome.encoded), 2 * limits.outcomeBytes - Buffer.byteLength(outcome.encoded), requestId);
+      db.prepare('UPDATE conversations SET updated_at=? WHERE id=?').run(iso(now()), conversationId);
+      return { conversation: getConversation(conversationId), receipt: receiptFor(requestId, digest) };
+    });
+  }
+  function finishConversationTurn(value) {
+    const conversationId = id(value?.conversationId, 'conversation ID'), requestId = requestIdentity(value.id), digest = requestDigest(value.digest);
+    if (!['completed','failed','cancelled','interrupted'].includes(value.status)) throw fail('invalid_input', 'Choose a terminal conversation turn status.');
+    return transaction(() => {
+      const conversation = conversationRow(conversationId), saved = existingTurn(conversationId, requestId, digest); if (!saved) throw fail('missing_request', 'That conversation turn was not found.', 404);
+      const partial = saved.outcome_json ? JSON.parse(saved.outcome_json) : {}, source = value.status === 'completed' ? value.reply : value.error;
+      if (!source || typeof source !== 'object' || Array.isArray(source)) throw fail('invalid_input', 'Provide the actual conversation reply or error.');
+      const actions = normalizedActions(source.actions ?? partial.actions ?? []), featureJob = source.featureJob ?? partial.featureJob ?? null;
+      const conversationRevision = saved.status === 'running' ? conversation.revision + 1 : partial.conversationRevision;
+      if (value.status === 'completed') text(source.text ?? '', 1024 * 1024, 'Reply', true);
+      const wire = value.status === 'completed' ? { id: requestId, conversationId, conversationRevision, text: source.text ?? '', actions, featureJob, providerId: text(source.providerId ?? saved.provider_id, 100, 'Provider ID', true) }
+        : { statusCode: Number.isInteger(source.statusCode) && source.statusCode >= 400 && source.statusCode <= 599 ? source.statusCode : value.status === 'cancelled' ? 499 : 500, code: text(source.code || 'request_failed', 100, 'Error code'), message: text(source.message || 'The request could not finish. Inspect any completed actions.', 2000, 'Error message'), actions, featureJob, conversationId, conversationRevision };
+      const outcome = boundedOutcome(wire);
+      if (saved.status !== 'running') {
+        if (saved.status !== value.status || hash(JSON.parse(saved.outcome_json || '{}')) !== hash(outcome.value)) throw fail('request_conflict', 'That turn already has a different terminal outcome.', 409);
+        return { conversation: detail(conversation), replayed: true, receipt: receiptFor(requestId, digest) };
+      }
+      if (conversation.active_request_id !== requestId) throw fail('conversation_turn_finished', 'This is no longer the active conversation turn.', 409);
+      receiptFor(requestId, digest);
+      const at = iso(now()); db.prepare('UPDATE conversation_turns SET status=?,finished_at=?,outcome_json=?,stored_bytes=?,reserved_bytes=0 WHERE request_id=?').run(value.status, at, outcome.encoded, saved.base_bytes + 2 * Buffer.byteLength(outcome.encoded), requestId);
+      db.prepare('UPDATE chat_receipts SET state=?,reply=? WHERE id=? AND hash=?').run(value.status === 'completed' ? 'completed' : 'failed', outcome.encoded, requestId, digest);
+      db.prepare('UPDATE conversations SET revision=revision+1,updated_at=?,active_request_id=NULL,last_status=? WHERE id=?').run(at, value.status, conversationId);
+      return { conversation: getConversation(conversationId), replayed: false, receipt: { state: value.status === 'completed' ? 'completed' : 'failed', reply: outcome.value } };
+    });
+  }
+  // A fresh worker never resumes an old model/action turn. Preserve its last
+  // durable tool checkpoint and close the paired receipt in one transaction.
+  transaction(() => {
+    for (const saved of db.prepare("SELECT * FROM conversation_turns WHERE status='running'").all()) {
+      const partial = saved.outcome_json ? JSON.parse(saved.outcome_json) : {}, outcome = boundedOutcome({ statusCode: 409, code: 'request_interrupted', message: 'Companion restarted during this request. Any recorded actions remain; inspect the workspace and build history before starting another request.', actions: partial.actions || [], featureJob: partial.featureJob || null, conversationId: saved.conversation_id, conversationRevision: conversationRow(saved.conversation_id).revision + 1 });
+      const receipt = chatReceipt(saved.request_id, saved.digest); const at = iso(now());
+      if (!receipt) db.prepare('INSERT INTO chat_receipts VALUES(?,?,?,?)').run(saved.request_id, saved.digest, 'failed', outcome.encoded);
+      else db.prepare('UPDATE chat_receipts SET state=?,reply=? WHERE id=? AND hash=?').run('failed', outcome.encoded, saved.request_id, saved.digest);
+      db.prepare('UPDATE conversation_turns SET status=?,finished_at=?,outcome_json=?,stored_bytes=?,reserved_bytes=0 WHERE request_id=?').run('interrupted', at, outcome.encoded, saved.base_bytes + 2 * Buffer.byteLength(outcome.encoded), saved.request_id);
+      db.prepare('UPDATE conversations SET revision=revision+1,updated_at=?,active_request_id=NULL,last_status=? WHERE id=?').run(at, 'interrupted', saved.conversation_id);
+    }
+  });
+  return { snapshot, apply, chatReceipt, beginChat, finishChat, listConversations, createConversation, getConversation, beginConversationTurn, recordConversationActions, finishConversationTurn, close() { if (!closed) { closed = true; db.close(); } } };
 }
