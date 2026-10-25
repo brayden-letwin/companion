@@ -64,7 +64,7 @@ function validateSchema(value, rule, label = 'arguments') {
 }
 function sourcePath(value) {
   const roots = new Set(['src', 'server', 'electron', 'scripts', 'tests', 'docs']);
-  const documents = new Set(['README.md', 'DESIGN.md', 'CONTRIBUTING.md', 'ROADMAP.md', 'DISCUSSION_FLOW.md', 'QA.md', 'START_HERE.txt', 'AGENTS.md', 'Start Companion.cmd', 'Start Desktop Companion.cmd', 'mcp.example.json', 'package.json']);
+  const documents = new Set(['README.md', 'DESIGN.md', 'CONTRIBUTING.md', 'ROADMAP.md', 'DISCUSSION_FLOW.md', 'QA.md', 'START_HERE.txt', 'AGENTS.md', 'Start Companion.cmd', 'Start Desktop Companion.cmd', 'Stop Companion.cmd', 'mcp.example.json', 'package.json']);
   if (typeof value !== 'string' || !value || value.length > 200 || /[\\:\u0000-\u001f\u007f]/.test(value) || value.startsWith('/') || value.split('/').some(part => !part || part.startsWith('.') || /[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part) || /^(?:node_modules|data|userdata|logs?|backups?|credentials|secrets|sessions|jobs|release|vendor)$/i.test(part))) throw rpcError(-32602, 'Use permitted application-source paths without traversal or hidden files.');
   const parts = value.split('/');
   if (!/\.(?:mjs|cjs|js|css|html|json|md|ps1|cmd|txt)$/i.test(value) || (parts.length === 1 ? !documents.has(value) && !value.endsWith('.html') : !roots.has(parts[0]) && value !== 'training/dataset.json')) throw rpcError(-32602, 'That path is outside editable application source.');

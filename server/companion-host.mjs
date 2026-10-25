@@ -11,19 +11,20 @@ const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 const fail = (code, message, statusCode = 503) => Object.assign(new Error(message), { code, statusCode });
 
-function workerEnvironment(dataDirectory, port, instance) {
+function workerEnvironment(dataDirectory, port, instance, lifetime, supervisor) {
   const env = {};
   for (const name of ['SystemRoot', 'WINDIR', 'PATH', 'Path', 'PATHEXT', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'CODEX_HOME', 'COMPANION_LOCAL_MODEL']) {
     if (process.env[name]) env[name] = process.env[name];
   }
   return { ...env, COMPANION_SHARED_DATA_DIR: dataDirectory, COMPANION_SHARED_PORT: String(port),
-    COMPANION_MANAGED_HOST: '1', COMPANION_HOST_INSTANCE: instance, COMPANION_HOST_PID: String(process.pid) };
+    COMPANION_MANAGED_HOST: '1', COMPANION_HOST_INSTANCE: instance, COMPANION_HOST_PID: String(process.pid), COMPANION_HOST_LIFETIME: lifetime,
+    ...(supervisor ? { COMPANION_SUPERVISED_HOST: '1', COMPANION_SUPERVISOR_PID: String(supervisor.pid), COMPANION_SUPERVISOR_NONCE: supervisor.nonce, COMPANION_SUPERVISOR_INSTANCE: supervisor.instance, COMPANION_SUPERVISOR_LIFETIME: supervisor.lifetime } : {}) };
 }
 
 /** One fixed-port worker, managed restarts, bounded crash recovery and source rollback. */
 export async function createCompanionHost({ root = DEFAULT_ROOT, dataDirectory, port = 4174,
   spawnWorker, fetchImpl = globalThis.fetch, rollback, startupTimeoutMs = 15000, shutdownTimeoutMs = 10000,
-  maxCrashRestarts = 3, backoffMs = 250, onFatal = () => {} } = {}) {
+  maxCrashRestarts = 3, backoffMs = 250, onFatal = () => {}, onHostRestart } = {}) {
   const sourceRoot = await realpath(path.resolve(root));
   if (typeof dataDirectory !== 'string' || !path.isAbsolute(dataDirectory)) throw new TypeError('Use an absolute private runtime data directory.');
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new RangeError('Choose a fixed local port from 1024 to 65535.');
@@ -35,10 +36,28 @@ export async function createCompanionHost({ root = DEFAULT_ROOT, dataDirectory, 
   const lockPath = path.join(storage, 'runtime-host.lock'), metadataPath = path.join(storage, 'runtime-host.json');
   const portLockPath = path.join(sourceRoot, `.companion-runtime-${port}.lock`);
   const workerPath = path.join(sourceRoot, 'server', 'room-server.mjs');
+  const supervisorClaims = [path.join(storage, 'runtime-supervisor.lock'), path.join(sourceRoot, `.companion-supervisor-${port}.lock`)];
+  async function verifiedSupervisor() {
+    const supervised = process.env.COMPANION_SUPERVISED_HOST === '1';
+    const claims = await Promise.all(supervisorClaims.map(async file => {
+      try { const info = await lstat(file); if (!info.isFile() || info.isSymbolicLink() || info.size > 4096) throw new Error('invalid claim'); return JSON.parse(await readFile(file, 'utf8')); }
+      catch (error) { if (error.code === 'ENOENT') return null; throw fail('invalid_supervisor', 'Supervisor ownership could not be verified. No worker was launched.', 409); }
+    }));
+    if (!supervised) {
+      if (claims.some(Boolean)) throw fail('runtime_supervisor_exists', 'A supervisor owns this workspace or port. Use its normal launcher; no independent host was started.', 409);
+      return null;
+    }
+    const pid = Number(process.env.COMPANION_SUPERVISOR_PID), supervisorNonce = process.env.COMPANION_SUPERVISOR_NONCE, instance = process.env.COMPANION_SUPERVISOR_INSTANCE,lifetime=process.env.COMPANION_SUPERVISOR_LIFETIME;
+    if (typeof process.send !== 'function' || !process.connected || !Number.isInteger(pid) || pid <= 0 || pid !== process.ppid || !uuid.test(supervisorNonce || '') || !uuid.test(instance || '') || !uuid.test(lifetime||'')
+      || claims.some(claim => !claim || claim.pid !== pid || claim.nonce !== supervisorNonce || claim.port !== port || claim.sourceRoot !== sourceRoot)) throw fail('invalid_supervisor', 'The connected parent and both supervisor claims must match. No worker was launched.', 409);
+    return { pid, nonce: supervisorNonce, instance,lifetime };
+  }
+  const supervisor = await verifiedSupervisor(), hostInstanceId = randomUUID();
+  if (onHostRestart !== undefined && typeof onHostRestart !== 'function') throw new TypeError('Use a typed host restart callback.');
   const nonce = randomUUID(); let lock = null, portLock = null, current = null, closing = false, started = false, closePromise = null;
   let operations = Promise.resolve(), writes = Promise.resolve(), crashRestarts = 0;
   const metadata = { version: 1, pid: process.pid, nonce, port, sourceRoot, status: 'stopped', workerPid: null,
-    generation: 0, crashRestarts: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    generation: 0, hostInstanceId, ...(supervisor ? { supervisorPid: supervisor.pid } : {}), crashRestarts: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   const status = () => structuredClone(metadata);
   function enqueue(callback) { const work = operations.then(callback, callback); operations = work.catch(() => {}); return work; }
   async function update(values) {
@@ -85,6 +104,7 @@ export async function createCompanionHost({ root = DEFAULT_ROOT, dataDirectory, 
   }
   async function acquire() {
     if (lock) return;
+    await verifiedSupervisor();
     lock = await claimLock(lockPath);
     try { portLock = await claimLock(portLockPath); }
     catch (error) { await lock.close(); lock = null; await removeOwned(lockPath, nonce); throw error; }
@@ -133,23 +153,28 @@ export async function createCompanionHost({ root = DEFAULT_ROOT, dataDirectory, 
   }
   async function launch() {
     if (closing) throw fail('runtime_closing', 'The runtime host is shutting down.');
+    await verifiedSupervisor();
     if (!spawnWorker) {
       const info = await lstat(workerPath); const directory = await lstat(path.dirname(workerPath));
       if (!info.isFile() || info.isSymbolicLink() || directory.isSymbolicLink() || !(await realpath(workerPath)).startsWith(sourceRoot + path.sep)) throw fail('invalid_worker', 'The fixed worker entry must be a regular contained source file.');
     }
     const instance = randomUUID();
     await update({ status: 'starting', workerPid: null, generation: metadata.generation + 1, instance, error: null });
-    const child = spawnWorker ? spawnWorker({ workerPath, cwd: sourceRoot, env: workerEnvironment(storage, port, instance), instance, port })
-      : spawn(process.execPath, [workerPath], { cwd: sourceRoot, env: workerEnvironment(storage, port, instance), windowsHide: true, shell: false, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+    const child = spawnWorker ? spawnWorker({ workerPath, cwd: sourceRoot, env: workerEnvironment(storage, port, instance, hostInstanceId, supervisor), instance, port })
+      : spawn(process.execPath, [workerPath], { cwd: sourceRoot, env: workerEnvironment(storage, port, instance, hostInstanceId, supervisor), windowsHide: true, shell: false, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
     let resolveExit;
     const record = { child, instance, ready: false, ipcReady: false, expectedStop: false, exited: false, exit: new Promise(resolve => { resolveExit = resolve; }) };
     current = record;
     child.on('message', message => {
       if (!message || message.instance !== instance || current !== record) return;
       if (message.type === 'companion:ready' && message.port === port) record.ipcReady = true;
-      if (message.type === 'companion:restart-requested' && record.ipcReady && !record.restartRequested && !closing
-        && (message.jobId === undefined || typeof message.jobId === 'string' && uuid.test(message.jobId))) {
-        record.restartRequested = true; void restart({ jobId: message.jobId }).catch(() => {});
+      if (message.type === 'companion:restart-requested' && record.ipcReady && !closing
+        && (message.jobId === undefined || typeof message.jobId === 'string' && uuid.test(message.jobId)) && (message.scope === undefined || ['worker', 'host'].includes(message.scope))
+        && Object.keys(message).every(key => ['type', 'instance', 'jobId', 'scope'].includes(key))) {
+        if (message.scope === 'host') {
+          if (!supervisor || !onHostRestart || record.hostRestartRequested) return;
+          record.hostRestartRequested = true; Promise.resolve().then(() => onHostRestart({ ...(message.jobId ? { jobId: message.jobId } : {}) })).catch(() => { record.hostRestartRequested = false; });
+        } else if(!record.restartRequested&&!record.hostRestartRequested) { record.restartRequested = true; void restart({ jobId: message.jobId }).catch(() => {}); }
       }
     });
     child.on('error', error => {
@@ -226,12 +251,21 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (process.argv.includes('--help')) console.log('node server/companion-host.mjs\nCOMPANION_SHARED_PORT sets the fixed loopback port; COMPANION_SHARED_DATA_DIR sets private runtime data. The host manages only its own Node worker.');
   else {
     if (process.argv.length > 2) throw new Error('Configure the host with COMPANION_SHARED_PORT and COMPANION_SHARED_DATA_DIR.');
-    let host;
-    const stop = () => { host?.close().catch(() => { process.exitCode = 1; }); };
-    host = await createCompanionHost({ dataDirectory: path.resolve(process.env.COMPANION_SHARED_DATA_DIR || path.resolve(DEFAULT_ROOT, '..', '..', 'work', 'companion-shared')),
-      port: Number(process.env.COMPANION_SHARED_PORT || 4174), onFatal: () => { process.exitCode = 1; stop(); } });
+    let host,creating,stopping,stopRequested=false;
+    const supervised = process.env.COMPANION_SUPERVISED_HOST === '1', instance = process.env.COMPANION_SUPERVISOR_INSTANCE;
+    const send=message=>new Promise((resolve,reject)=>{if(typeof process.send!=='function'||!process.connected){reject(fail('supervisor_unavailable','The supervisor connection closed.'));return;}try{process.send(message,error=>error?reject(error):resolve());}catch(error){reject(error);}});
+    const stop = () => {stopRequested=true;return stopping ||= Promise.resolve().then(async()=>{
+      await creating?.catch(()=>{});await host?.close();
+      if(supervised&&process.connected){await send({type:'companion:host-stopped',instance});if(process.connected)process.disconnect();}
+    }).catch(error=>{process.exitCode=1;console.error('Companion host could not confirm shutdown: '+error.message);});};
     process.once('SIGINT', stop); process.once('SIGTERM', stop);
-    try { const ready = await host.start(); console.log(`Companion managed host ${ready.pid}: http://127.0.0.1:${ready.port}/assistant.html`); }
-    catch (error) { console.error(error.message); process.exitCode = 1; await host.close(); }
+    if (supervised) { process.on('message', message => { if (message?.type === 'companion:host-shutdown' && message.instance === instance && Object.keys(message).every(key => ['type', 'instance'].includes(key))) void stop(); }); process.once('disconnect', () => { void stop(); }); }
+    try {
+      if(supervised)await send({type:'companion:host-starting',instance});
+      if(!stopRequested){
+        creating=createCompanionHost({dataDirectory:path.resolve(process.env.COMPANION_SHARED_DATA_DIR||path.resolve(DEFAULT_ROOT,'..','..','work','companion-shared')),port:Number(process.env.COMPANION_SHARED_PORT||4174),onFatal:()=>{process.exitCode=1;void stop();},...(supervised?{onHostRestart:({jobId})=>send({type:'companion:host-restart-requested',instance,...(jobId?{jobId}:{})})}:{})}).then(value=>{host=value;return value;});
+        await creating;if(stopRequested)await stop();else{const ready=await host.start();if(!stopRequested){if(supervised)await send({type:'companion:host-ready',instance,status:ready});console.log(`Companion managed host ${ready.pid}: http://127.0.0.1:${ready.port}/assistant.html`);}}
+      }
+    }catch(error){console.error(error.message);process.exitCode=1;await stop();}
   }
 }

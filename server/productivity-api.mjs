@@ -138,10 +138,11 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
     return runtimePromise;
   }
   const providerStatus = async router => { const status = await router.getStatus(); return { ...status, activeProviderId: status.defaultProviderId }; };
-  function scheduleRestart(res, jobId) {
+  function scheduleRestart(res, jobId, restartScope='worker') {
     const status = getRuntimeStatus();
-    if (status.managed) res.once('finish', () => requestRuntimeRestart(jobId ? { jobId } : {}));
-    return { ...status, restartRequested: status.managed, requiresManualRestart: !status.managed };
+    const available=restartScope!=='launcher'&&status.managed&&(restartScope!=='host'||status.hostRestartAvailable);
+    if (available) res.once('finish', () => {try{requestRuntimeRestart({...((jobId)?{jobId}:{}),scope:restartScope});}catch{/* Only changed public process identities can confirm a completed restart. */}});
+    return { ...status,restartScope,restartRequested:available,requiresManualRestart:!available };
   }
   async function guardedRequest(req, res, session, id, run) {
     const key = `${session.scope}:direct:${id}`;
@@ -240,10 +241,14 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
           return true;
         }
         if (route === BASE + '/runtime/restart') {
-          fields(body, ['jobId']);
+          fields(body, ['jobId','scope']);
+          if(body.scope!==undefined&&!['worker','host'].includes(body.scope))throw fail(400,'invalid_restart_request','Choose worker or host restart scope.');
+          if(body.jobId!==undefined&&(typeof body.jobId!=='string'||!UUID.test(body.jobId)))throw fail(400,'invalid_restart_request','Use an actual feature job UUID.');
           if (body.jobId) { const job = await services.builder.get(body.jobId, OWNER); if (job.status !== 'applied') throw fail(409, 'feature_not_applied', 'Only an activated feature can be used for a managed update restart.'); }
-          if (!getRuntimeStatus().managed) throw fail(409, 'manual_restart_required', 'This development server is not managed. Restart it through Start Companion.cmd.');
-          json(res, 202, scheduleRestart(res, body.jobId)); return true;
+          const current=getRuntimeStatus();
+          if(body.scope==='host'&&!current.hostRestartAvailable)throw fail(409,'manual_host_restart_required','Use the normal launcher to restart the full host before claiming parent source was reloaded.');
+          if (!current.managed) throw fail(409, 'manual_restart_required', 'This development server is not managed. Restart it through Start Companion.cmd.');
+          json(res, 202, scheduleRestart(res, body.jobId,body.scope||'worker')); return true;
         }
         if (route === BASE + '/chat') { await chat(req, res, body, session, services); return true; }
         if (route === BASE + '/workspace/operations') { json(res, 200, services.store.apply(body)); return true; }
@@ -266,7 +271,8 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         if (action) {
           fields(body, []); const job = await services.builder[action[2]](action[1], OWNER);
           const needsRestart = ['apply','rollback'].includes(action[2]) && job.files?.some(file => file.path.startsWith('server/'));
-          json(res, 200, { ...job, ...(needsRestart ? { runtime: scheduleRestart(res, action[2] === 'apply' ? job.id : undefined) } : {}) }); return true;
+          const restartScope=job.files?.some(file=>['server/runtime-supervisor.mjs','server/runtime-host-entry.mjs'].includes(file.path))?'launcher':'host';
+          json(res, 200, { ...job, ...(needsRestart ? { runtime: scheduleRestart(res, action[2] === 'apply' ? job.id : undefined,restartScope) } : {}) }); return true;
         }
         throw fail(404, 'not_found', 'That action was not found.');
       } catch (error) {
