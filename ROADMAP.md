@@ -65,7 +65,7 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 ## Next: complete the general assistant loop
 
 - [x] Manage server-worker restarts, bounded recovery, and browser reconnection through the normal launcher.
-- [ ] Make full host-code relaunch/migration as clear and recoverable as the worker restart path.
+- [x] Full service-host relaunch reloads cached application dependencies, proves new host/worker identities, and restores a failed update once through cached trusted recovery. Stop/Start handles launcher-control changes; uncertain ownership and conflicts stay explicit.
 - [x] Expose registered executable capabilities consistently to chat/voice dispatch, workflows, panels, and external AI tools using one catalog and real receipts.
 - [x] Pin workflow definitions and custom capability versions; exact terminal retries never execute later appended steps.
 - [x] Run concrete registered-capability acceptance cases in guarded children with fixture-only host effects.

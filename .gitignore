@@ -59,4 +59,5 @@ training/.cache/
 *.sqlite-*
 .companion-shared/
 .companion-runtime-*.lock*
+.companion-supervisor-*.lock*
 .companion-source-write.lock*

@@ -10,7 +10,7 @@ A quiet, voice-first workspace for getting things done—and adding the tools yo
 
 No group account is needed. The existing development PC has a working Codex sign-in. On another PC, install **Node.js 24.15 or newer**, then use an existing Codex CLI sign-in or connect a provider in Settings. API keys belong in the app's password field, never in a chat or a Git commit.
 
-The full workspace is at **http://127.0.0.1:4174/assistant.html**. It runs on this computer; it is not a hosted service. Closing a page or hiding the corner leaves the local server running. Double-click the same launcher next time. [QA.md](QA.md) records live checks separately from automated tests and remaining hardware checks.
+The full workspace is at **http://127.0.0.1:4174/assistant.html**. It runs on this computer; it is not a hosted service. Closing a page or hiding the corner leaves the local server running. Double-click the same launcher next time. **Stop Companion.cmd** gracefully stops the background service and its owned processes while retaining saved work. [QA.md](QA.md) records live checks separately from automated tests and remaining hardware checks.
 
 Try a concrete request:
 
@@ -68,7 +68,7 @@ The compact corner is **400 × 230**, with an expanded conversation view. Use it
 
 Run `scripts/start-companion.ps1 -Browser` to choose the browser instead. `npm run desktop` opens the general native workspace after its server is running. `npm run desktop:legacy` retains the original math reader/corner.
 
-Settings offers **Restart desktop app** for the current native app. When it is running directly from editable source, relaunching loads reviewed Electron changes. A copied desktop package must be rebuilt to include repository changes; relaunching its old copy is not an update. Server-worker restart and full managed-host relaunch remain separate operations.
+Settings offers **Restart desktop app** for the current native app. When it is running directly from editable source, relaunching loads reviewed Electron changes. A copied desktop package must be rebuilt to include repository changes; relaunching its old copy is not an update. The service restart and desktop relaunch are separate operations.
 
 ## Computer actions
 
@@ -108,9 +108,9 @@ Windows API keys are encrypted with **DPAPI for the current Windows user**, boun
 
 Ask “What failed in that build?” to inspect its actual checks through chat or voice. Companion can read a selected build's original request, changed paths, and bounded diagnostics. Ask it to fix the failure to start a focused correction; asking for status alone does not request another build. An applied entry records build history, while current source and runtime availability still need separate verification.
 
-New registered panels can appear in the running workspace. **Reload interface** picks up other browser-source changes. The normal launcher now runs a managed host and server worker. Reviewed worker-side server changes trigger a worker restart after the activation response is sent; the page reconnects, refreshes its session and workspace, and confirms a different worker PID. If an updated worker fails startup and its retained source can be restored, the host rolls that feature back and the UI reports the restoration. Settings also offers **Restart Companion** for a managed worker.
+New registered panels can appear in the running workspace. **Reload interface** picks up other browser-source changes. The normal launcher now owns a replaceable service host and worker. Reviewed server changes restart both after the activation response, loading updated parent dependencies as well as worker code. The page verifies new host/worker identities and restores the saved workspace before reporting success. Settings offers **Restart Companion service** for the same full restart. An uncertain acknowledgement offers observation of the original restart, never another automatic request.
 
-**Host code needs a full relaunch.** Changing `server/companion-host.mjs` or a dependency already loaded by that parent process is not applied by restarting only its worker. Stop the owning host and launch it again. For a foreground host, use **Ctrl+C**, then `npm start`. A standalone development server reports a manual restart instruction. Closing the browser or reloading the page does not restart either process.
+If an activated update fails startup, the launcher can use its retained trusted recovery code to restore that build's source backup and start the previous version once. Conflicting edits, failed restoration or unconfirmed shutdown require review; a second service is not started against uncertain ownership. The small control kernel (`runtime-supervisor.mjs` and `runtime-host-entry.mjs`) itself needs **Stop Companion.cmd**, then **Start Companion.cmd**. A legacy direct host must be stopped with **Ctrl+C** first. Restarting the worker or reloading the page cannot load launcher-control changes. Recovery markers survive an owner's disappearance and are never silently removed to force a launch.
 
 Checks do not establish every interaction's correctness. Review the resulting behavior, and keep a useful feature's acceptance test with its source. A failed or conflicting candidate is reported as such rather than described as installed. The builder does not publish to GitHub automatically.
 
@@ -138,14 +138,16 @@ For a foreground development server:
 npm run shared
 ```
 
-The command runs the managed host with Node’s built-in server and SQLite. **Ctrl+C** stops that foreground host and its owned worker. `COMPANION_SHARED_DATA_DIR` and `COMPANION_SHARED_PORT` choose another absolute private data folder and port. Use a different folder **and** port for QA; do not populate a real user's workspace with synthetic accounts or test tasks.
+The command runs the outer launcher, service host and worker with Node’s built-in server and SQLite. **Ctrl+C** stops that foreground launcher and its owned service. `COMPANION_SHARED_DATA_DIR` and `COMPANION_SHARED_PORT` choose another absolute private data folder and port. Use a different folder **and** port for QA; do not populate a real user's workspace with synthetic accounts or test tasks. For a custom folder/port, pass the same `-DataDirectory` and `-Port` to `scripts/stop-shared.ps1`; the root Stop command uses the default workspace.
 
 ```powershell
 npm test
 npm run check
 ```
 
-The 0.13 update passed 442 Node tests and 47 JavaScript syntax checks. A real external Codex client used Companion's MCP tools to read exact source pages and submit a working Checklist panel in an isolated test app. An initial failed check stopped activation; a corrected build passed, ran through actual browser controls, and rolled back to the complete original source. The primary app now serves the new source reader with its saved workspace preserved. [QA.md](QA.md) distinguishes this live proof from automated, hardware and account checks still outstanding.
+The 0.14 update passed 466 Node tests and 49 JavaScript syntax checks. Live checks verified full service restart through Settings, cached-source restoration after a deliberately broken update, complete workspace preservation, and graceful Windows Stop plus an unchanged Already stopped retry. The primary app now uses the outer launcher. [QA.md](QA.md) distinguishes these checks from native, physical-voice and account validation still outstanding.
+
+The 0.13 update passed 442 Node tests and 47 JavaScript syntax checks. A real external Codex client used Companion's MCP tools to read exact source pages and submit a working Checklist panel in an isolated test app. An initial failed check stopped activation; a corrected build passed, ran through actual browser controls, and rolled back to the complete original source.
 
 The 0.12 update passed 431 Node tests and 46 JavaScript syntax checks. Real GPT ran two note-saving jobs while a separate foreground chat remained usable. A real MCP client handed off another job, and browser checks exercised handoff, job Stop, saved conversation access and progress. Exact retries and a managed restart preserved results without duplicate effects.
 
