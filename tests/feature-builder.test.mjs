@@ -6,6 +6,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, access, symlink, unlink } from
 import { pathToFileURL } from 'node:url';
 import { createFeatureBuilder } from '../server/feature-builder.mjs';
 import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 
 const OWNER = 'synthetic-local-workspace';
 const feature = {
@@ -208,6 +209,100 @@ test('persisted jobs are readable after restart and interrupted work is not sile
   const restarted = await createFeatureBuilder({ root: f.root, dataDirectory: f.dataDirectory, complete: async () => { called = true; } });
   t.after(() => restarted.close());
   assert.equal((await restarted.get(job.id, OWNER)).status, 'interrupted'); assert.equal(called, false);
+});
+
+test('linked requests reserve one durable identity before generation and replay after completion and restart', async t => {
+  const id = randomUUID(), key = randomUUID(), input = { prompt: 'Add the requested focus panel once.', providerId: 'synthetic', autoApply: false };
+  let release, started, calls = 0, directory;
+  const gate = new Promise(resolve => { release = resolve; }), invoked = new Promise(resolve => { started = resolve; });
+  const f = await fixture(t, { complete: async () => {
+    calls++;
+    const saved = JSON.parse(await readFile(path.join(directory, id, 'job.json'), 'utf8'));
+    assert.equal(saved.id, id); assert.equal(saved.prompt, input.prompt); assert.equal(saved.linkedRequest.version, 1);
+    started(); await gate; return feature;
+  } });
+  directory = f.dataDirectory;
+  const [first, retry] = await Promise.all([f.builder.requestLinked(input, OWNER, { id, key }), f.builder.requestLinked(input, OWNER, { id, key })]);
+  assert.equal(first.id, id); assert.equal(retry.id, id); await invoked;
+  assert.equal((await f.builder.list(OWNER)).length, 1); assert.equal(calls, 1);
+  assert.equal(Object.hasOwn(first, 'linkedRequest'), false); assert.equal(Object.hasOwn(await f.builder.get(id, OWNER), 'linkedRequest'), false);
+  release(); const done = await finished(f.builder, id); assert.equal(done.status, 'ready');
+  assert.equal((await f.builder.requestLinked(input, OWNER, { id, key })).status, 'ready'); assert.equal(calls, 1);
+  await f.builder.close();
+  let restartedCalls = 0;
+  const restarted = await createFeatureBuilder({ root: f.root, dataDirectory: f.dataDirectory, complete: async () => { restartedCalls++; return feature; } });
+  t.after(() => restarted.close());
+  assert.equal((await restarted.requestLinked(input, OWNER, { id, key })).id, id);
+  assert.equal((await restarted.requestLinked(input, OWNER, { id, key })).status, 'ready'); assert.equal(restartedCalls, 0);
+  await restarted.close(); assert.equal((await restarted.requestLinked(input, OWNER, { id, key })).status, 'ready'); assert.equal(restartedCalls, 0);
+});
+
+test('linked identities bind provider, prompt, activation policy, key and owner without replacing evidence', async t => {
+  const f = await fixture(t, { complete: async () => new Promise(() => {}) });
+  const id = randomUUID(), key = randomUUID(), input = { prompt: 'One original request.', providerId: 'synthetic', autoApply: false };
+  await f.builder.requestLinked(input, OWNER, { id, key });
+  for (const [changed, changedOwner, identity] of [
+    [{ ...input, prompt: 'A different request.' }, OWNER, { id, key }],
+    [{ ...input, providerId: 'different-provider' }, OWNER, { id, key }],
+    [{ ...input, autoApply: true }, OWNER, { id, key }],
+    [input, OWNER, { id, key: randomUUID() }],
+    [input, 'another-owner', { id, key }],
+    [input, OWNER, { id: randomUUID(), key }],
+  ]) await assert.rejects(f.builder.requestLinked(changed, changedOwner, identity), { code: 'linked_build_conflict', statusCode: 409 });
+  assert.equal((await f.builder.list(OWNER)).length, 1); assert.equal((await f.builder.get(id, OWNER)).prompt, input.prompt);
+  const ordinary = await f.builder.request(input, OWNER);
+  await assert.rejects(f.builder.requestLinked(input, OWNER, { id: ordinary.id, key: randomUUID() }), { code: 'linked_build_conflict' });
+  assert.equal((await f.builder.list(OWNER)).length, 2);
+});
+
+test('an interrupted linked build retries its retained result and never restarts generation', async t => {
+  const f = await fixture(t), id = randomUUID(), key = randomUUID(), input = { prompt: 'Prepare a linked feature.', providerId: 'synthetic', autoApply: false };
+  await finished(f.builder, (await f.builder.requestLinked(input, OWNER, { id, key })).id); await f.builder.close();
+  const metadata = path.join(f.dataDirectory, id, 'job.json'), saved = JSON.parse(await readFile(metadata, 'utf8'));
+  saved.status = 'generating'; await writeFile(metadata, JSON.stringify(saved));
+  let calls = 0;
+  const restarted = await createFeatureBuilder({ root: f.root, dataDirectory: f.dataDirectory, complete: async () => { calls++; return feature; } });
+  t.after(() => restarted.close());
+  const replay = await restarted.requestLinked(input, OWNER, { id, key });
+  assert.equal(replay.status, 'interrupted'); assert.match(replay.error, /not restarted automatically/); assert.equal(calls, 0);
+  assert.equal((await restarted.list(OWNER)).length, 1);
+});
+
+test('malformed retained linked metadata is not reused or overwritten to repair an acknowledgment', async t => {
+  const f = await fixture(t), id = randomUUID(), key = randomUUID(), input = { prompt: 'Retain the original linked evidence.', providerId: 'synthetic', autoApply: false };
+  await finished(f.builder, (await f.builder.requestLinked(input, OWNER, { id, key })).id); await f.builder.close();
+  const metadata = path.join(f.dataDirectory, id, 'job.json'), saved = JSON.parse(await readFile(metadata, 'utf8'));
+  saved.linkedRequest.digest = '0'.repeat(64); const corrupt = JSON.stringify(saved); await writeFile(metadata, corrupt);
+  let calls = 0;
+  const restarted = await createFeatureBuilder({ root: f.root, dataDirectory: f.dataDirectory, complete: async () => { calls++; return feature; } });
+  t.after(() => restarted.close());
+  await assert.rejects(restarted.get(id, OWNER), { code: 'feature_not_found' });
+  await assert.rejects(restarted.requestLinked(input, OWNER, { id, key }), { code: 'linked_build_conflict', statusCode: 409 });
+  assert.equal(await readFile(metadata, 'utf8'), corrupt); assert.equal(calls, 0);
+});
+
+test('linked build identities are internal, bounded and cannot choose a directory', async t => {
+  const f = await fixture(t), input = { prompt: 'A valid feature request.', providerId: 'synthetic' };
+  for (const link of [{ id: '../outside', key: 'one' }, { id: randomUUID(), key: '' }, { id: randomUUID(), key: 'x'.repeat(301) }, { id: randomUUID(), key: 'one', path: 'server/private.mjs' }]) {
+    await assert.rejects(f.builder.requestLinked(input, OWNER, link), error => error.statusCode === 400);
+  }
+  await assert.rejects(f.builder.requestLinked({ ...input, id: randomUUID() }, OWNER, { id: randomUUID(), key: 'one' }), { code: 'invalid_linked_build' });
+  assert.deepEqual(await f.builder.list(OWNER), []); assert.equal(f.completions.length, 0);
+});
+
+test('two builder instances cannot reserve and generate the same linked build', async t => {
+  let calls = 0, started; const invoked = new Promise(resolve => { started = resolve; });
+  const complete = async () => { calls++; started(); return new Promise(() => {}); };
+  const f = await fixture(t, { complete }), other = await createFeatureBuilder({ root: f.root, dataDirectory: f.dataDirectory, complete });
+  t.after(() => other.close());
+  const input = { prompt: 'One durable cross-instance build.', providerId: 'synthetic', autoApply: false }, identity = { id: randomUUID(), key: randomUUID() };
+  const outcomes = await Promise.allSettled([f.builder.requestLinked(input, OWNER, identity), other.requestLinked(input, OWNER, identity)]);
+  assert.equal(outcomes.filter(outcome => outcome.status === 'fulfilled').length, 1);
+  assert.equal(outcomes.find(outcome => outcome.status === 'rejected').reason.code, 'linked_build_conflict');
+  await invoked; assert.equal(calls, 1);
+  const saved = JSON.parse(await readFile(path.join(f.dataDirectory, identity.id, 'job.json'), 'utf8'));
+  assert.equal(saved.id, identity.id); assert.equal(saved.prompt, input.prompt);
+  await other.close(); await f.builder.close();
 });
 
 test('rollback refuses to overwrite edits made after activation', async t => {

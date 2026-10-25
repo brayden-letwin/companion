@@ -9,6 +9,19 @@ import {createProjectFilesStore} from '../server/project-files-store.mjs';
 const hash=value=>createHash('sha256').update(value).digest('hex');
 async function fixture(t){const dataDirectory=await mkdtemp(path.join(tmpdir(),'companion-project-store-')),stores=[];const open=async()=>{const value=await createProjectFilesStore({dataDirectory});stores.push(value);return value;},store=await open();t.after(async()=>{for(const value of stores)value.close();assert.ok(path.resolve(dataDirectory).startsWith(path.resolve(tmpdir())+path.sep+'companion-project-store-'));await rm(dataDirectory,{recursive:true,force:true});});return{store,open,dataDirectory};}
 const grantInput=(folder,identity='synthetic-directory-file-id')=>({canonicalPath:folder,identity,label:'Synthetic selected folder'});
+
+test('deep private directories keep real SQLite WAL transactions and receipts durable across restart',async t=>{
+  const temporary=await mkdtemp(path.join(tmpdir(),'companion-project-store-deep-')),stores=[];
+  let dataDirectory=temporary;while(path.join(dataDirectory,'project-files.sqlite').length<330)dataDirectory=path.join(dataDirectory,'bounded-private-segment-01234567890123456789');
+  t.after(async()=>{for(const value of stores)value.close();assert.ok(path.resolve(temporary).startsWith(path.resolve(tmpdir())+path.sep+'companion-project-store-deep-'));await rm(temporary,{recursive:true,force:true});});
+  const open=async()=>{const value=await createProjectFilesStore({dataDirectory});stores.push(value);return value;};
+  const store=await open(),grant=store.grant(grantInput(path.join(temporary,'synthetic-chosen-root'))),editId=randomUUID(),digest=hash('deep durable original edit');
+  const input={id:editId,digest,projectId:grant.projectId,grantEpoch:grant.grantEpoch,path:'notes.txt',action:'write'};
+  store.beginEdit(input);const result={id:editId,projectId:grant.projectId,grantEpoch:grant.grantEpoch,path:'notes.txt',status:'applied',beforeHash:null,afterHash:hash('actual recorded contents'),bytes:24,undoAvailable:true};
+  store.finishEdit(editId,{state:'applied',result});const revoked=store.revoke(grant);store.close();
+  const restarted=await open();assert.ok(path.join(dataDirectory,'project-files.sqlite').length>=330);assert.equal(restarted.getGrant(grant.projectId).grantEpoch,revoked.grantEpoch);assert.equal(restarted.getGrant(grant.projectId).revoked,true);
+  assert.equal(restarted.beginEdit(input).replayed,true);assert.deepEqual(restarted.findEdit(editId,digest).result,result);assert.equal(restarted.edits().length,1);
+});
 test('grant identity/epochs persist and a different physical root cannot silently replace a previous project ID',async t=>{
   const f=await fixture(t),root=path.join(f.dataDirectory,'synthetic-root'),first=f.store.grant(grantInput(root));assert.equal(f.store.grant(grantInput(root)).projectId,first.projectId);const revoked=f.store.revoke(first);assert.equal(revoked.revoked,true);assert.ok(revoked.grantEpoch>first.grantEpoch);assert.deepEqual(f.store.revoke(first),revoked);const regranted=f.store.grant(grantInput(root));assert.equal(regranted.projectId,first.projectId);assert.ok(regranted.grantEpoch>revoked.grantEpoch);assert.throws(()=>f.store.revoke(first),{code:'project_grant_changed'});
   const replaced=f.store.grant(grantInput(root,'a-different-directory-id'));assert.notEqual(replaced.projectId,first.projectId);f.store.close();const restarted=await f.open();assert.equal(restarted.getGrant(first.projectId).identity,first.identity);assert.equal(restarted.getGrant(replaced.projectId).identity,'a-different-directory-id');
