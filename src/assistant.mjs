@@ -729,18 +729,20 @@ async function ensureJobDetail(id){
   finally{jobDetailPending.delete(id);featureRenderKey='';if(selectedJobId===id)renderJobs();}
 }
 function jobStatus(job){const label=element('span','job-status'+(['failed','conflict','interrupted','recovery_required'].includes(job.status)?' error':job.status==='review_required'?' review':ACTIVE_JOBS.has(job.status)?' active':''),JOB_LABELS[job.status]||job.status);return label;}
+function conciseBuildTitle(job,limit=84){const source=typeof job.summary==='string'&&job.summary.trim()?job.summary:typeof job.prompt==='string'?job.prompt:'Feature build';const firstLine=source.trim().split(/\r?\n/,1)[0].replace(/\s+/g,' ').trim()||'Feature build';if(firstLine.length<=limit)return firstLine;const clipped=firstLine.slice(0,limit-1),space=clipped.lastIndexOf(' ');return (space>limit/2?clipped.slice(0,space):clipped).trimEnd()+'…';}
 function renderJobs(){
   if(selectedJobId)void ensureJobDetail(selectedJobId);
   const cached=jobDetails.get(selectedJobId);const key=JSON.stringify([selectedJobId,jobs,cached?.updatedAt]);if(key===featureRenderKey)return;featureRenderKey=key;
   const openFiles=new Set([...document.querySelectorAll('.change-file[open]')].map(node=>node.dataset.path));
+  const openRequests=new Set([...document.querySelectorAll('.job-original-request[open]')].map(node=>node.dataset.jobId));
   const list=$('job-list');list.replaceChildren();
-  for(const job of [...jobs].sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt)))){const item=button('','job-button'+(job.id===selectedJobId?' active':''),()=>{selectedJobId=job.id;renderJobs();});item.append(element('span','job-name',job.prompt||job.summary||'Feature build'),jobStatus(job));list.append(item);}
+  for(const job of [...jobs].sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt)))){const item=button('','job-button'+(job.id===selectedJobId?' active':''),()=>{selectedJobId=job.id;renderJobs();});item.append(element('span','job-name',conciseBuildTitle(job,64)),jobStatus(job));list.append(item);}
   const detail=$('job-detail'),summary=jobs.find(item=>item.id===selectedJobId);detail.replaceChildren();
   if(!summary){detail.append(emptyState('Build a feature.','Describe it above. Changes and checks will appear here.'));return;}
   const fresh=!!cached&&String(cached.updatedAt)>=String(summary.updatedAt);
   const job=fresh?cached:summary;
   if(!fresh)void ensureJobDetail(job.id);
-  const header=element('div','job-header'),heading=element('div');heading.append(element('h2','',job.prompt||'Your feature'),jobStatus(job));header.append(heading);detail.append(header);
+  const header=element('div','job-header'),heading=element('div');heading.append(element('h2','',conciseBuildTitle(job)),jobStatus(job));header.append(heading);detail.append(header);
   if(job.summary)detail.append(element('p','job-summary',job.summary));
   else detail.append(element('p','job-summary',ACTIVE_JOBS.has(job.status)?'The build is running. Actual changes and check results will appear here as they are available.':'No build summary was returned.'));
   if(job.error)detail.append(element('p','inline-error',typeof job.error==='string'?job.error:job.error.message||'This build could not finish.'));
@@ -750,6 +752,7 @@ function renderJobs(){
   if(job.status==='applied'){actions.append(button('Reload interface ↻','secondary-button',()=>location.reload()),button('Roll back changes','quiet-button',()=>void jobAction(job,'rollback')));if(job.files?.some(file=>file.path.startsWith('electron/'))){detail.append(element('p','review-note',desktopUpdateNotice()));if(nativeSourceRuntime===true&&typeof nativeShell?.restart==='function')actions.append(button('Restart desktop ↻','secondary-button',restartNativeDesktop));}}
   if(['queued','generating','validating'].includes(job.status)){const cancel=button('Cancel build','quiet-button',()=>void jobAction(job,'cancel'));cancel.disabled=featureBusy;actions.append(cancel);}
   if(actions.childNodes.length)detail.append(actions);appendInstalledFeatureReady(detail,job);
+  if(typeof job.prompt==='string'&&job.prompt.trim()){const request=element('details','change-file job-original-request');request.dataset.jobId=job.id;request.open=openRequests.has(job.id);const text=element('p','job-summary',job.prompt);text.style.padding='12px';request.append(element('summary','','Original request'),text);detail.append(request);}
   if(!fresh)detail.append(element('p','form-hint','Loading the actual file changes and check results…'));
   if(job.files?.length){detail.append(element('h3','checks-heading','Changes'));for(const file of job.files){const section=element('details','change-file');section.dataset.path=file.path;section.open=openFiles.has(file.path);const summary=element('summary');summary.append(element('span','',file.path),element('span','change-count',`+${file.added||0} −${file.removed||0}`));section.append(summary,element('pre','file-diff',typeof file.diff==='string'?file.diff:JSON.stringify(file.diff,null,2)));detail.append(section);}}
   const checks=job.verification?.checks||[];if(checks.length){detail.append(element('h3','checks-heading','Checks'));for(const check of checks){const row=element('div','verification-check'+(check.passed?'':' failed'));row.append(element('strong','',(check.passed?'✓ ':'× ')+check.name));if(check.output)row.append(element('pre','',check.output));detail.append(row);}}
