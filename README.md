@@ -10,7 +10,7 @@ A quiet, voice-first workspace for getting things done—and adding the tools yo
 
 No group account is needed. The existing development PC has a working Codex sign-in. On another PC, install **Node.js 24.15 or newer**, then use an existing Codex CLI sign-in or connect a provider in Settings. API keys belong in the app's password field, never in a chat or a Git commit.
 
-The full workspace is at **http://127.0.0.1:4174/assistant.html**. It runs on this computer; it is not a hosted service. Closing a page or hiding the corner leaves the local server running. Double-click the same launcher next time. The main local service was upgraded to 0.9 after a consistent private SQLite backup. [QA.md](QA.md) records live checks separately from automated tests and remaining hardware checks.
+The full workspace is at **http://127.0.0.1:4174/assistant.html**. It runs on this computer; it is not a hosted service. Closing a page or hiding the corner leaves the local server running. Double-click the same launcher next time. The main local service was upgraded to 0.9.1 after a consistent private SQLite backup. [QA.md](QA.md) records live checks separately from automated tests and remaining hardware checks.
 
 Try a concrete request:
 
@@ -88,6 +88,8 @@ Windows API keys are encrypted with **DPAPI for the current Windows user**, boun
 4. Passing routine frontend changes may activate automatically when that option is enabled. Protected controls, backend/launcher changes, and file deletions require review of the concrete diff and an **Activate feature** action.
 5. Activation checks that the source has not changed since the candidate was prepared. **Roll back changes** restores the retained version when the affected files have not subsequently changed.
 
+Ask “What failed in that build?” to inspect its actual checks through chat or voice. Companion can read a selected build's original request, changed paths, and bounded diagnostics. Ask it to fix the failure to start a focused correction; asking for status alone does not request another build. An applied entry records build history, while current source and runtime availability still need separate verification.
+
 New registered panels can appear in the running workspace. **Reload interface** picks up other browser-source changes. The normal launcher now runs a managed host and server worker. Reviewed worker-side server changes trigger a worker restart after the activation response is sent; the page reconnects, refreshes its session and workspace, and confirms a different worker PID. If an updated worker fails startup and its retained source can be restored, the host rolls that feature back and the UI reports the restoration. Settings also offers **Restart Companion** for a managed worker.
 
 **Host code needs a full relaunch.** Changing `server/companion-host.mjs` or a dependency already loaded by that parent process is not applied by restarting only its worker. Stop the owning host and launch it again. For a foreground host, use **Ctrl+C**, then `npm start`. A standalone development server reports a manual restart instruction. Closing the browser or reloading the page does not restart either process.
@@ -125,7 +127,9 @@ npm test
 npm run check
 ```
 
-The 0.9 update passed 300 Node tests and 39 JavaScript syntax checks. Real GPT, MCP, an actual panel and a saved workflow used one isolated synthetic capability through the same executor. Exact edited-workflow retries did not execute newly appended steps. Check last run retains the original run ID after a lost response, including after reload, and requires an explicit click. Global Stop also reaches direct tool and workflow requests. See QA.md for the distinction between fixture, live, and generated-feature evidence.
+The 0.9.1 update passed 320 Node tests and 39 JavaScript syntax checks. Real GPT inspected a retained failed build, read its complete original request through paged inspection, and generated a Project board candidate that passed its nine builder checks plus four independent fixture checks. It remains awaiting protected-code activation in the isolated test app. Source planning now fits complete reference files within measured fixed context limits, with one bounded re-selection. Build headings stay concise while the full request remains expandable. See QA.md for live outcomes and remaining generated-feature checks.
+
+The 0.9 checkpoint passed 300 Node tests and 39 JavaScript syntax checks. Real GPT, MCP, an actual panel and a saved workflow used one isolated synthetic capability through the same executor. Exact edited-workflow retries did not execute newly appended steps. Check last run retains the original run ID after a lost response, including after reload, and requires an explicit click. Global Stop also reaches direct tool and workflow requests. See QA.md for the distinction between fixture, live, and generated-feature evidence.
 
 The 0.8 checkpoint passed 255 Node tests and 34 JavaScript syntax checks. Real GPT conversation continuity and preference saving, Memory archive/restore, managed restart persistence, the white browser/native canvas, and the expanded trusted builder baseline were checked separately. Automatic speech detection still needs a human microphone check; its capture and integration tests use fake media.
 

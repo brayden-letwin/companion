@@ -24,6 +24,8 @@ Companion's current direction is a minimal general productivity assistant in the
 - [x] Redacted provider metadata; Windows DPAPI-protected keys outside source; no keys in browser storage.
 - [x] Separate local transcription, bounded toggle-to-talk, opt-in pause-to-send, cancellation, and offline read-aloud.
 - [x] Feature requests create persisted coding jobs with actual status events, source candidates, hashes, diffs, and check output.
+- [x] Voice/chat can inspect selected build diagnostics and page through the complete stored request before requesting a focused correction.
+- [x] Source planning measures complete-file context costs and permits one re-selection within fixed byte/message limits before generation.
 - [x] Fixed regression checks, bounded source context, module/feature checks, and protected-change review.
 - [x] Automatic activation for passing ordinary changes when enabled; explicit activation for protected changes and deletions.
 - [x] Source-conflict protection, retained backups, rollback, and interrupted-promotion recovery states.
@@ -67,6 +69,7 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 - [ ] Add acceptance checks for generated interactions, not just syntax and module loading.
 - [ ] Make missing-capability requests produce useful, scoped plans, with progress that reflects actual work.
 - [ ] Add project organization and better task scheduling; extend the retained conversation/context foundation where real use needs it.
+- [ ] Add paginated task reads and explicit completeness metadata for large workspaces; `list_tasks` currently returns the latest 100 matching tasks, so a generated overview must not imply that this proves a complete larger workspace total.
 - [ ] Improve workflow editing and failure recovery while keeping each action's outcome visible.
 - [ ] Add export, backup, restore, and migration for productivity data and build history.
 - [ ] Keep the main interface simple as new tools are added; test whether people can find and use them by voice.
