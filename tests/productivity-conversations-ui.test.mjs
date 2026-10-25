@@ -7,8 +7,10 @@ import { createVoiceSession } from '../src/voice-session.mjs';
 
 const root = new URL('../', import.meta.url);
 const html = readFileSync(new URL('assistant.html', root), 'utf8');
+const projectFilesSource=readFileSync(new URL('src/project-files.mjs',root),'utf8').replace('export function createProjectFilesUI','function createProjectFilesUI');
 const source = readFileSync(new URL('src/assistant.mjs', root), 'utf8')
   .replace(/^import \{ createVoiceSession \} from '\.\/voice-session\.mjs';\r?\n/, '')
+  .replace(/^import \{ createProjectFilesUI \} from '\.\/project-files\.mjs';\r?\n/, '')
   .replaceAll('import.meta.url', JSON.stringify('http://127.0.0.1:4174/src/assistant.mjs'));
 const A = '11111111-1111-4111-8111-111111111111';
 const B = '22222222-2222-4222-8222-222222222222';
@@ -25,6 +27,7 @@ class Element {
   replaceChildren(...children) { this.text = ''; this.children = [...children]; }
   setAttribute(key, value) { this.attributes[key] = value; }
   addEventListener(type, callback) { (this.listeners[type] ??= []).push(callback); }
+  removeEventListener(type,callback){this.listeners[type]=(this.listeners[type]||[]).filter(item=>item!==callback);}
   async dispatch(type, event = {}) { const pending = []; for (const callback of this.listeners[type] || []) pending.push(callback(event)); await Promise.all(pending); }
   showModal() { this.open = true; }
   close() { this.open = false; }
@@ -44,12 +47,14 @@ function createLocks() {
   return { request: async (name, options, callback) => { if (held.has(name)) return callback(null); held.add(name); try { return await callback({ name }); } finally { held.delete(name); } } };
 }
 
-async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], workspaceWorkflows = [], workspaceTasks = [], storedWorkflowRuns = [], catalog = [], contextWindows = [], savedWork = [], storedWorkIds = [], runtimeBaseline = null, runtimeClock = null } = {}) {
+async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], workspaceWorkflows = [], workspaceTasks = [], storedWorkflowRuns = [], catalog = [], contextWindows = [], savedWork = [], storedWorkIds = [], runtimeBaseline = null, runtimeClock = null, projects = [], storedProject = null } = {}) {
   const nodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(match => [match[1], new Element()]));
   nodes.get('provider-type').value = 'openai';
   const records = new Map(saved.map(item => [item.id, structuredClone(item)]));
   const workRecords = new Map(savedWork.map(item => [item.id, structuredClone(item)]));
+  const projectRecords = new Map(projects.map(item => [item.projectId, structuredClone(item)]));
   const storage = new Map(selected ? [['companion.workspace.ui.v1.conversationId', JSON.stringify(selected)]] : []);
+  if (storedProject) storage.set('companion.workspace.ui.v1.selectedProject', JSON.stringify(storedProject));
   if (storedWorkIds.length) storage.set('companion.workspace.ui.v1.pendingWorkIds', JSON.stringify(storedWorkIds));
   if (storedWorkflowRuns.length) storage.set('companion.workspace.ui.v1.pendingWorkflowRuns', JSON.stringify(storedWorkflowRuns));
   const requests = [], intervals = [], timers = new Set();
@@ -81,7 +86,10 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
     if (route === 'providers') return response({ providers: [provider], activeProviderId: provider.id });
     if (route === 'status') return response({ transcriptionReady: true });
     if (route === 'workspace') return response(workspace);
-    if (route === 'work' && options.method === 'POST') { const body = JSON.parse(options.body); if (!workRecords.has(body.id)) { workRecords.set(body.id, { id: body.id, conversationId: body.id, requestId: 'work_' + body.id, title: body.prompt.slice(0, 70), prompt: body.prompt, providerId: body.providerId, provider: { id: body.providerId, label: 'GPT', type: 'codex', model: '' }, status: 'queued', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), progress: { message: 'Queued', events: [] } }); records.set(body.id, blank(body.id, body.prompt.slice(0, 70))); } return response({ job: workRecords.get(body.id) }); }
+    if (route === 'projects') return response({ projects: [...projectRecords.values()] });
+    if (/^projects\/[^/?]+\?/.test(route)) { const url = new URL('http://fixture/' + route), project = projectRecords.get(url.pathname.split('/')[2]); if (!project || project.available === false || project.revoked || project.grantEpoch !== Number(url.searchParams.get('grantEpoch'))) return response({ error: { code: 'project_grant_changed', message: 'The original folder access is no longer available.' } }, 409); return response({ project }); }
+    if (/^projects\/[^/]+\/files\?/.test(route)) { const url = new URL('http://fixture/' + route); return response({ projectId: url.pathname.split('/')[2], grantEpoch: Number(url.searchParams.get('grantEpoch')), path: url.searchParams.get('path') || '', entries: [], offset: 0, hasMore: false, nextOffset: null, directoryHash: 'synthetic-empty-directory', complete: true }); }
+    if (route === 'work' && options.method === 'POST') { const body = JSON.parse(options.body); if (!workRecords.has(body.id)) { workRecords.set(body.id, { id: body.id, conversationId: body.id, requestId: 'work_' + body.id, title: body.prompt.slice(0, 70), prompt: body.prompt, providerId: body.providerId, ...(body.project ? { project: structuredClone(body.project) } : {}), provider: { id: body.providerId, label: 'GPT', type: 'codex', model: '' }, status: 'queued', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), progress: { message: 'Queued', events: [] } }); records.set(body.id, blank(body.id, body.prompt.slice(0, 70))); } return response({ job: workRecords.get(body.id) }); }
     if (route.startsWith('work?')) { const params = new URLSearchParams(route.slice(5)), offset = Number(params.get('offset') || 0), limit = Number(params.get('limit') || 20), all = [...workRecords.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)); return response({ jobs: all.slice(offset, offset + limit).map(job => ({ ...job, prompt: undefined, promptPreview: job.prompt.slice(0, 100), outcome: undefined })), total: all.length, hasMore: offset + limit < all.length, nextOffset: offset + limit < all.length ? offset + limit : null }); }
     if (route.startsWith('work/')) { const [pathname, query = ''] = route.split('?'), [, id, operation] = pathname.split('/'), job = workRecords.get(id); if (!job) return response({ error: { code: 'work_missing', message: 'Work missing' } }, 404); if (operation === 'cancel') { job.status = 'cancelled'; job.updatedAt = new Date().toISOString(); } const result = structuredClone(job); if (result.outcome) { const params = new URLSearchParams(query), textOffset = Number(params.get('textOffset') || 0), actionOffset = Number(params.get('actionOffset') || 0), text = result.outcome.text || '', actions = result.outcome.actions || []; result.outcome = { ...result.outcome, text: text.slice(textOffset, textOffset + 4000), textOffset, nextTextOffset: textOffset + 4000 < text.length ? textOffset + 4000 : null, textHasMore: textOffset + 4000 < text.length, totalTextCharacters: text.length, actions: actions.slice(actionOffset, actionOffset + 12), actionOffset, nextActionOffset: actionOffset + 12 < actions.length ? actionOffset + 12 : null, actionsHasMore: actionOffset + 12 < actions.length, totalActions: actions.length }; } return response({ job: result }); }
     if (route === 'features') return response({ jobs: [] });
@@ -101,7 +109,7 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
       const body = JSON.parse(options.body), record = records.get(body.conversationId);
       assert.equal(body.expectedRevision, record.revision);
       const context = contextPins.get(body.contextId), windowContext = context ? { contextId: context.id, windowId: context.window.id, title: context.window.title, appName: context.window.appName, readAt: new Date().toISOString(), sourceTruncated: false, formatterTruncated: false, truncated: false, empty: false } : null;
-      const reply = { id: body.id, text: 'A saved response.', actions: [], featureJob: null, providerId: body.providerId, ...(windowContext ? { windowContext } : {}) };
+      const reply = { id: body.id, text: 'A saved response.', actions: [], featureJob: null, providerId: body.providerId, ...(windowContext ? { windowContext } : {}), ...(body.project ? { projectContext: { ...body.project, label: projectRecords.get(body.project.projectId)?.label || 'Selected folder' } } : {}) };
       record.turns.push({ id: body.id, message: body.message, providerId: body.providerId, status: 'completed', startedAt: '2026-10-24T12:00:01Z', finishedAt: '2026-10-24T12:00:02Z', reply }); record.revision += 2;
       return response({ ...reply, conversationId: record.id, conversationRevision: record.revision, workspace });
     }
@@ -109,11 +117,12 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
   }
   const window = { MediaRecorder: Recorder, AudioContext, addEventListener() {} };
   const ClockDate = runtimeClock ? class extends Date { static now() { return runtimeClock.value; } } : Date;
-  const context = vm.createContext({ Date: ClockDate, createVoiceSession, window, document, navigator: { locks, permissions: { query: async () => ({ state: 'granted' }) }, mediaDevices: { getUserMedia: () => { permission = deferred(); return permission.promise; } } }, MediaRecorder: Recorder, fetch: fetchMock, Headers, AbortController, Blob, URL, URLSearchParams, DOMException, crypto: webcrypto, structuredClone, performance, console, localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) }, location: { search: '', reload() {}, assign() {} }, Event: class {}, setTimeout: (callback, milliseconds) => { const timer = setTimeout(callback, milliseconds); timer.unref(); timers.add(timer); return timer; }, clearTimeout, setInterval: callback => { intervals.push(callback); return intervals.length; }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} });
-  vm.runInContext(source + '\nglobalThis.ui={ready:()=>checkingService,selectConversation,refreshConversations,refreshConversation,loadEarlierConversation,runCommand,cancelTurn,startRecording,setVoiceVisible,renderSavedConversation,rememberDesktopAction,captureConversationContext,setChatOpen,showDialog,openDesktopReview,addMessage,processVoiceSegment,refreshToolCatalog,applyToolCatalog,applyExtensionManifest,openFeatureByName,openWorkflow,renderWorkflowSteps,validateWorkflowSteps,runWorkflow,renderActionReceipts,appendInstalledFeatureReady,refreshJobs,refreshWorkspace,selectWindowContext,clearWindowContext,captureWindowContext,renderWindowContext,applyRuntime,reconnectAfterRestart,restartCompanionService,runtimeRestartConfirmed,jobAction,submitWork,refreshWork,refreshWorkDetail,selectWork,checkWorkHandoff,cancelWork,openWorkConversation,showView,loadWorkOutcome,applyProviders,setExtensionLoader:loader=>loadExtensionModule=loader,get:()=>({id:conversationId,detail:conversationDetail,localChatTurn,turnBusy,recording,voiceCaptureContext,activeRequest,selectedWindowContext,windowContextGeneration,voiceState:voiceSessionState,chatOpen,currentView,ownsVoice:voiceOwnsCapture,initial:conversationInitialized,listPending:!!conversationListPending,detailPending:!!conversationDetailRequest,desktop:desktopActions,workflowDraft,toolCatalog,extensions:[...extensions.values()],workspace,workJobs,selectedWorkId,workDetails:[...workDetails.values()],workSubmitting,pendingWorkIds:[...pendingWorkIds],runtimeInfo,runtimeRetry,runtimeNotice,reconnecting:!!runtimeReconnectPromise})};', context);
+  const context = vm.createContext({ Date: ClockDate, createVoiceSession, window, document, navigator: { locks, permissions: { query: async () => ({ state: 'granted' }) }, mediaDevices: { getUserMedia: () => { permission = deferred(); return permission.promise; } } }, MediaRecorder: Recorder, fetch: fetchMock, Headers, AbortController, TextEncoder, Blob, URL, URLSearchParams, DOMException, crypto: webcrypto, structuredClone, performance, console, localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) }, location: { search: '', reload() {}, assign() {} }, Event: class {}, setTimeout: (callback, milliseconds) => { const timer = setTimeout(callback, milliseconds); timer.unref(); timers.add(timer); return timer; }, clearTimeout, setInterval: callback => { intervals.push(callback); return intervals.length; }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} });
+  context.createProjectFilesUI=vm.runInContext('(function(){'+projectFilesSource+'\nreturn createProjectFilesUI;})()',context);
+  vm.runInContext(source + '\nglobalThis.ui={ready:()=>checkingService,selectConversation,refreshConversations,refreshConversation,loadEarlierConversation,runCommand,cancelTurn,startRecording,setVoiceVisible,renderSavedConversation,rememberDesktopAction,captureConversationContext,setChatOpen,showDialog,openDesktopReview,addMessage,processVoiceSegment,refreshToolCatalog,applyToolCatalog,applyExtensionManifest,openFeatureByName,openWorkflow,renderWorkflowSteps,validateWorkflowSteps,runWorkflow,renderActionReceipts,appendInstalledFeatureReady,refreshJobs,refreshWorkspace,selectWindowContext,clearWindowContext,captureWindowContext,renderWindowContext,applyRuntime,reconnectAfterRestart,restartCompanionService,runtimeRestartConfirmed,jobAction,submitWork,refreshWork,refreshWorkDetail,selectWork,checkWorkHandoff,cancelWork,openWorkConversation,showView,loadWorkOutcome,applyProviders,selectProject,refreshProjectAccess,captureProjectContext,currentProjectContext,setExtensionLoader:loader=>loadExtensionModule=loader,get:()=>({id:conversationId,detail:conversationDetail,localChatTurn,turnBusy,recording,voiceCaptureContext,activeRequest,selectedWindowContext,windowContextGeneration,selectedProject,projectSelectionGeneration,voiceState:voiceSessionState,chatOpen,currentView,ownsVoice:voiceOwnsCapture,initial:conversationInitialized,listPending:!!conversationListPending,detailPending:!!conversationDetailRequest,desktop:desktopActions,workflowDraft,toolCatalog,extensions:[...extensions.values()],workspace,workJobs,selectedWorkId,workDetails:[...workDetails.values()],workSubmitting,pendingWorkIds:[...pendingWorkIds],runtimeInfo,runtimeRetry,runtimeNotice,reconnecting:!!runtimeReconnectPromise})};', context);
   await context.ui.ready();
   if (waitForConversations) await until(() => !context.ui.get().listPending && !context.ui.get().detailPending, 'initial conversation load');
-  return { ui: context.ui, nodes, records, workRecords, storage, requests, document, intervals, setIntercept: value => { custom = value; }, get waitingForMicrophone() { return !!permission; }, grantMicrophone: () => { const pending = permission; permission = null; pending.resolve({ getTracks: () => [{ stop: () => stoppedTracks++ }] }); }, get stoppedTracks() { return stoppedTracks; }, close: () => { context.ui.cancelTurn(false); for (const timer of timers) clearTimeout(timer); } };
+  return { ui: context.ui, nodes, records, workRecords, projectRecords, storage, requests, document, intervals, setIntercept: value => { custom = value; }, get waitingForMicrophone() { return !!permission; }, grantMicrophone: () => { const pending = permission; permission = null; pending.resolve({ getTracks: () => [{ stop: () => stoppedTracks++ }] }); }, get stoppedTracks() { return stoppedTracks; }, close: () => { context.ui.cancelTurn(false); for (const timer of timers) clearTimeout(timer); } };
 }
 
 test('explicit New survives a late initial history response and first send creates exactly one saved conversation', async () => {
@@ -997,5 +1006,110 @@ test('restart preflight freezes a fresh identity rather than confirming a host t
     app.setIntercept(url => { if (url.endsWith('/runtime/restart')) { posted = true; return response({ ...alreadyChanged, restartScope: 'host', restartRequested: true }); } if (url.endsWith('/runtime')) { if (posted) observed++; return response(ready ? latest : alreadyChanged); } return null; });
     const restart = app.ui.restartCompanionService(); await until(() => observed > 0); assert.equal(app.ui.get().reconnecting, true); assert.equal(app.ui.get().runtimeRetry.baseline.hostInstanceId, D); assert.equal(app.ui.get().runtimeRetry.baseline.workerPid, 200); assert.notEqual(app.ui.get().runtimeNotice.phase, 'ready');
     ready = true; assert.equal((await restart).confirmed, true); assert.equal(app.ui.get().runtimeInfo.hostInstanceId, F); assert.equal(app.requests.filter(request => request.url.endsWith('/runtime/restart')).length, 1);
+  } finally { app.close(); }
+});
+
+
+const PROJECT_A = { projectId: '88888888-8888-4888-8888-888888888888', grantEpoch: 1, label: 'Original project', localPath: 'C:/Synthetic/Original', available: true, mode: 'read_write' };
+const PROJECT_B = { projectId: '99999999-9999-4999-8999-999999999999', grantEpoch: 4, label: 'Other project', localPath: 'C:/Synthetic/Other', available: true, mode: 'read_write' };
+const projectBindingOnly = project => ({ projectId: project.projectId, grantEpoch: project.grantEpoch });
+const isProjectFileRequest = request => /\/projects\/[^/?]+\/(?:file|files|history|edit|edits|revoke)(?:[/?]|$)/.test(request.url);
+
+test('project integration starts blank with no file IO and explicit selection retains only an opaque browser binding', async () => {
+  const app = await createUI({ projects: [PROJECT_A, PROJECT_B] });
+  try {
+    assert.equal(app.ui.get().selectedProject, null); assert.equal(app.nodes.get('selected-project-context').hidden, true); assert.equal(app.requests.some(request => request.url.includes('/projects')), false); assert.equal(app.ui.get().currentView, 'today'); assert.equal(app.ui.get().chatOpen, false);
+    app.ui.addMessage('assistant', 'Choose another project folder'); assert.equal(app.ui.get().selectedProject, null);
+    assert.equal(await app.ui.selectProject(PROJECT_A), true); assert.equal(app.ui.get().selectedProject.status, 'ready'); assert.equal(app.nodes.get('selected-project-context').hidden, false); assert.match(app.nodes.get('project-context-label').textContent, /Original project/);
+    assert.equal(app.requests.some(isProjectFileRequest), false); assert.deepEqual(JSON.parse(app.storage.get('companion.workspace.ui.v1.selectedProject')), projectBindingOnly(PROJECT_A)); assert.ok([...app.storage.values()].every(value => !value.includes(PROJECT_A.label) && !value.includes(PROJECT_A.localPath)));
+    await app.ui.runCommand('Explain the selected project'); const body = JSON.parse(app.requests.find(request => request.url.endsWith('/chat')).body); assert.deepEqual(body.project, projectBindingOnly(PROJECT_A)); assert.equal(JSON.stringify(body).includes(PROJECT_A.localPath), false); assert.equal(app.requests.some(isProjectFileRequest), false);
+  } finally { app.close(); }
+});
+
+test('voice freezes the project before microphone permission and stale words cannot retarget a newly selected folder', async () => {
+  const app = await createUI({ projects: [PROJECT_A, PROJECT_B] });
+  try {
+    await app.ui.selectProject(PROJECT_A); const opening = app.ui.startRecording(); await until(() => app.waitingForMicrophone); const frozen = copy(app.ui.get().voiceCaptureContext); assert.deepEqual(frozen.projectContext.project, projectBindingOnly(PROJECT_A));
+    await app.ui.selectProject(PROJECT_B); app.grantMicrophone(); await opening; assert.equal(app.ui.get().recording, null); assert.equal(app.stoppedTracks, 1); assert.equal(app.ui.currentProjectContext(frozen.projectContext), false);
+    await app.ui.runCommand('Write these old voice words into a file', { voice: true, providerId: frozen.providerId, conversationContext: frozen.conversationContext, windowContext: frozen.windowContext, projectContext: frozen.projectContext, approvalContext: null });
+    assert.equal(app.requests.some(request => request.url.endsWith('/chat')), false); assert.match(app.nodes.get('question-error').textContent, /project folder changed/); assert.equal(app.ui.get().selectedProject.projectId, PROJECT_B.projectId);
+    await app.ui.runCommand('A new explicit question'); const latest = JSON.parse(app.requests.find(request => request.url.endsWith('/chat')).body); assert.deepEqual(latest.project, projectBindingOnly(PROJECT_B));
+  } finally { app.close(); }
+});
+
+test('switching project folders cancels the old foreground turn and ignores its late reply without changing the new binding', async () => {
+  const app = await createUI({ projects: [PROJECT_A, PROJECT_B], saved: [blank(A)], selected: A });
+  try {
+    await app.ui.selectProject(PROJECT_A); const pending = deferred(); let body;
+    app.setIntercept((url, options) => { if (!url.endsWith('/chat')) return null; body = JSON.parse(options.body); return pending.promise; });
+    const turn = app.ui.runCommand('Read the original folder'); await until(() => !!app.ui.get().activeRequest); const request = app.ui.get().activeRequest; assert.deepEqual(body.project, projectBindingOnly(PROJECT_A));
+    await app.ui.selectProject(PROJECT_B); assert.equal(request.controller.signal.aborted, true); assert.equal(app.ui.get().activeRequest, null); assert.equal(app.ui.get().turnBusy, false); assert.equal(app.ui.get().selectedProject.projectId, PROJECT_B.projectId);
+    pending.resolve(response({ id: body.id, text: 'A late original-folder result', actions: [], projectContext: { ...projectBindingOnly(PROJECT_A), label: PROJECT_A.label } })); await turn;
+    assert.equal(app.ui.get().selectedProject.projectId, PROJECT_B.projectId); assert.doesNotMatch(app.nodes.get('messages').textContent, /A late original-folder result/); assert.equal(app.requests.filter(request => request.url.endsWith('/chat')).length, 1); const cancelled = app.requests.find(request => request.url.endsWith('/cancel')); assert.equal(JSON.parse(cancelled.body).id, body.id);
+  } finally { app.close(); }
+});
+
+test('handoff freezes its original project and accepted Work survives foreground folder switching and Leave', async () => {
+  const app = await createUI({ projects: [PROJECT_A, PROJECT_B] });
+  try {
+    await app.ui.selectProject(PROJECT_A); const ack = deferred(); let body;
+    app.setIntercept((url, options) => { if (!url.endsWith('/work') || options.method !== 'POST') return null; body = JSON.parse(options.body); const job = workFixture(body.id, { status: 'running', prompt: body.prompt, project: { ...body.project, label: PROJECT_A.label } }); app.workRecords.set(job.id, job); app.records.set(job.id, blank(job.id)); return ack.promise; });
+    app.nodes.get('work-prompt').value = 'Continue requested files work independently'; const handoff = app.ui.submitWork(); await until(() => !!body); assert.deepEqual(body.project, projectBindingOnly(PROJECT_A));
+    await app.ui.selectProject(PROJECT_B); ack.resolve(response({ job: app.workRecords.get(body.id) })); await handoff; await app.ui.selectProject(null);
+    assert.equal(app.ui.get().selectedProject, null); assert.deepEqual(app.workRecords.get(body.id).project, { ...projectBindingOnly(PROJECT_A), label: PROJECT_A.label }); assert.equal(app.requests.some(request => request.url.endsWith('/work/' + body.id + '/cancel') || request.url.endsWith('/revoke')), false);
+    await app.ui.refreshWork(); app.ui.selectWork(body.id); await app.ui.refreshWorkDetail(body.id); assert.match(app.nodes.get('work-detail').textContent, /Project folder · Original project/); assert.equal(app.workRecords.get(body.id).status, 'running');
+  } finally { app.close(); }
+});
+
+test('a delegated Work receipt stays bound to the foreground request project after the human chooses another folder', async () => {
+  const app = await createUI({ projects: [PROJECT_A, PROJECT_B], saved: [blank(A)], selected: A });
+  try {
+    await app.ui.selectProject(PROJECT_A);
+    app.setIntercept((url, options, { records }) => { if (!url.endsWith('/chat')) return null; const body = JSON.parse(options.body); const job = workFixture(B, { status: 'running', project: { ...body.project, label: PROJECT_A.label } }); app.workRecords.set(B, job); app.records.set(B, blank(B)); const reply = { id: body.id, text: 'Handed off independently.', providerId: body.providerId, projectContext: { ...body.project, label: PROJECT_A.label }, actions: [{ id: 'project-delegate', tool: 'manage_work', arguments: { action: 'start' }, status: 'completed', result: { workJob: job } }] }; const record = records.get(A); record.turns.push({ id: body.id, message: body.message, status: 'completed', reply }); record.revision += 2; return response(reply); });
+    await app.ui.runCommand('Work on this project in the background'); await app.ui.selectProject(PROJECT_B); assert.equal(app.ui.get().selectedProject.projectId, PROJECT_B.projectId); assert.deepEqual(app.workRecords.get(B).project, { ...projectBindingOnly(PROJECT_A), label: PROJECT_A.label }); assert.equal(app.requests.some(request => request.url.endsWith('/work/' + B + '/cancel')), false); assert.match(app.nodes.get('messages').textContent, /Project folder · Original project/);
+  } finally { app.close(); }
+});
+
+test('restored stale project access fails closed without upgrading the epoch, choosing another folder or reading files', async () => {
+  const app = await createUI({ projects: [{ ...PROJECT_A, grantEpoch: 2 }, PROJECT_B], storedProject: projectBindingOnly(PROJECT_A) });
+  try {
+    assert.equal(app.ui.get().selectedProject.projectId, PROJECT_A.projectId); assert.equal(app.ui.get().selectedProject.grantEpoch, 1); assert.equal(app.ui.get().selectedProject.status, 'unavailable'); assert.equal(app.nodes.get('send-question').disabled, true); assert.equal(app.requests.some(isProjectFileRequest), false);
+    await app.ui.runCommand('Edit a file using this stale grant'); await app.ui.startRecording(); assert.equal(app.requests.some(request => request.url.endsWith('/chat')), false); assert.equal(app.waitingForMicrophone, false);
+    await app.ui.selectProject(null); await app.ui.runCommand('Continue without a folder'); const body = JSON.parse(app.requests.find(request => request.url.endsWith('/chat')).body); assert.equal('project' in body, false);
+  } finally { app.close(); }
+});
+
+test('access refresh cancels a now-invalid foreground route while a stale refresh cannot invalidate a newer folder', async () => {
+  const app = await createUI({ projects: [PROJECT_A, PROJECT_B] });
+  try {
+    await app.ui.selectProject(PROJECT_A); const oldContext = copy(app.ui.captureProjectContext()), refresh = deferred(); app.setIntercept(url => url.startsWith('/api/assistant/projects/' + PROJECT_A.projectId + '?') ? refresh.promise : null);
+    const checking = app.ui.refreshProjectAccess(); await app.ui.selectProject(PROJECT_B); refresh.resolve(response({ error: { code: 'project_grant_changed', message: 'Old access changed' } }, 409)); await checking; assert.equal(app.ui.get().selectedProject.projectId, PROJECT_B.projectId); assert.equal(app.ui.get().selectedProject.status, 'ready'); assert.equal(app.ui.currentProjectContext(oldContext), false);
+    app.setIntercept(null); const pending = deferred(); let requestBody; app.setIntercept((url, options) => { if (!url.endsWith('/chat')) return null; requestBody = JSON.parse(options.body); return pending.promise; }); const running = app.ui.runCommand('Read the current project'); await until(() => !!app.ui.get().activeRequest); const request = app.ui.get().activeRequest; app.projectRecords.get(PROJECT_B.projectId).grantEpoch++;
+    await app.ui.refreshProjectAccess(); assert.equal(app.ui.get().selectedProject.status, 'unavailable'); assert.equal(request.controller.signal.aborted, true); assert.equal(app.ui.get().turnBusy, false); pending.resolve(response({ id: requestBody.id, text: 'Late stale-grant result', actions: [], projectContext: { ...requestBody.project, label: PROJECT_B.label } })); await running; assert.doesNotMatch(app.nodes.get('messages').textContent, /Late stale-grant result/); assert.equal(app.requests.filter(request => request.url.endsWith('/chat')).length, 1);
+  } finally { app.close(); }
+});
+
+test('project tool failures mark the selected grant unavailable and never retry or drop its binding', async () => {
+  const app = await createUI({ projects: [PROJECT_A] });
+  try {
+    await app.ui.selectProject(PROJECT_A); app.setIntercept(url => url.endsWith('/chat') ? response({ error: { code: 'project_binding_changed', message: 'The original project root changed.' } }, 409) : null);
+    app.nodes.get('question').value = 'Keep my exact file-edit request'; await app.ui.runCommand(app.nodes.get('question').value); assert.equal(app.ui.get().selectedProject.status, 'unavailable'); assert.equal(app.nodes.get('question').value, 'Keep my exact file-edit request'); await app.ui.runCommand('Try another edit'); assert.equal(app.requests.filter(request => request.url.endsWith('/chat')).length, 1); assert.deepEqual(JSON.parse(app.requests.find(request => request.url.endsWith('/chat')).body).project, projectBindingOnly(PROJECT_A));
+  } finally { app.close(); }
+});
+
+test('saved project receipts retain original provenance and open their recorded folder rather than the current one', async () => {
+  const edit = { id: C, ...projectBindingOnly(PROJECT_A), path: 'notes.md', status: 'applied', receiptPending: true, undoAvailable: true }, record = { ...blank(A), revision: 2, turns: [{ id: 'project-saved-turn', message: 'Requested original folder edit', status: 'completed', reply: { text: 'Inspect the actual recorded edit.', projectContext: { ...projectBindingOnly(PROJECT_A), label: PROJECT_A.label }, actions: [{ id: 'original-edit', tool: 'run_capability', status: 'completed', result: { projectFileEdit: edit } }, { id: 'read-original', tool: 'run_capability', status: 'completed', result: { projectFileRead: { ...projectBindingOnly(PROJECT_A), path: 'notes.md', hasMore: true } } }] } }] };
+  const app = await createUI({ projects: [PROJECT_A, PROJECT_B], saved: [record], selected: A });
+  try {
+    await app.ui.selectProject(PROJECT_B); assert.match(app.nodes.get('messages').textContent, /Project folder · Original project/); assert.match(app.nodes.get('messages').textContent, /File changed · receipt needs checking/); assert.match(app.nodes.get('messages').textContent, /File read · notes.md · partial page · saved read/); assert.doesNotMatch(app.nodes.get('messages').textContent, /File saved · notes.md/); assert.equal(app.requests.some(isProjectFileRequest), false);
+    const open = descendants(app.nodes.get('messages')).find(item => item.tagName === 'button' && item.textContent === 'Open this project ↗'); await open.dispatch('click'); await until(() => app.ui.get().currentView === 'files'); assert.equal(app.ui.get().selectedProject.projectId, PROJECT_A.projectId); assert.equal(app.ui.get().selectedProject.status, 'ready');
+  } finally { app.close(); }
+});
+
+test('a late original-project receipt click cannot navigate to Files for a newer selection', async () => {
+  const record = { ...blank(A), revision: 2, turns: [{ id: 'saved-file', message: 'An earlier edit', status: 'completed', reply: { text: 'Original edit receipt', actions: [{ id: 'edit', tool: 'run_capability', status: 'completed', result: { projectFileEdit: { id: C, ...projectBindingOnly(PROJECT_A), path: 'original.md', status: 'applied', undoAvailable: false } } }] } }] }, app = await createUI({ projects: [PROJECT_A, PROJECT_B], saved: [record], selected: A });
+  try {
+    const waiting = deferred(); app.setIntercept(url => url.startsWith('/api/assistant/projects/' + PROJECT_A.projectId + '?') ? waiting.promise : null); const open = descendants(app.nodes.get('messages')).find(item => item.tagName === 'button' && item.textContent === 'Open this project ↗'); await open.dispatch('click'); await until(() => app.ui.get().selectedProject?.projectId === PROJECT_A.projectId);
+    await app.ui.selectProject(PROJECT_B); waiting.resolve(response({ project: PROJECT_A })); await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve)); assert.equal(app.ui.get().selectedProject.projectId, PROJECT_B.projectId); assert.equal(app.ui.get().currentView, 'today');
   } finally { app.close(); }
 });

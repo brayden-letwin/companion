@@ -1,0 +1,142 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {createHash,randomUUID} from 'node:crypto';
+import {mkdtemp,mkdir,writeFile,readFile,readdir,stat,rm,access,rename} from 'node:fs/promises';
+import path from 'node:path';
+import {tmpdir} from 'node:os';
+import {createProjectFileService} from '../server/project-files-service.mjs';
+import {createProjectFilesStore} from '../server/project-files-store.mjs';
+import {DatabaseSync} from 'node:sqlite';
+
+const hash=value=>createHash('sha256').update(value).digest('hex');
+const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value;
+const digest=(args,binding)=>hash(JSON.stringify(canonical({binding,arguments:args})));
+const deferred=()=>{let resolve;const promise=new Promise(done=>resolve=done);return{promise,resolve};};
+const error=(code='project_file_conflict',statusCode=409,extra={})=>Object.assign(new Error('Synthetic native failure; no personal data.'),{code,statusCode,...extra});
+function content(bytes){const text=bytes.toString('utf8'),without=text.replaceAll('\r\n',''),styles=[text.includes('\r\n')&&'crlf',without.includes('\r')&&'cr',without.includes('\n')&&'lf'].filter(Boolean);return{content:text,hash:hash(bytes),byteLength:bytes.length,characterLength:text.length,readAt:new Date().toISOString(),lineEndings:styles.length>1?'mixed':styles[0]||'none',bom:text.startsWith('\ufeff')};}
+async function maybe(file){try{return await readFile(file);}catch(error){if(error.code==='ENOENT')return null;throw error;}}
+function fakeNative(folder){
+  const calls=[];let selected=folder;
+  const adapter={calls,closed:0,chooseHook:null,readHook:null,commitHook:null,afterCommitFailure:false,
+    select(value){selected=value;},async chooseFolder(options){return adapter.chooseHook?adapter.chooseHook(options):selected?{path:selected}:{cancelled:true};},
+    async run(action,fields,options={}){
+      calls.push({action,fields:structuredClone(fields)});
+      if(action==='inspectRoot'){const info=await stat(fields.path);return{canonicalPath:fields.path,identity:String(info.dev)+':'+String(info.ino),label:path.basename(fields.path)};}
+      const target=path.join(fields.root,...fields.path.split('/'));
+      if(action==='read'){if(adapter.readHook)await adapter.readHook(fields,options);return content(await readFile(target));}
+      if(action==='list'){const entries=[];for(const item of await readdir(target,{withFileTypes:true})){if(item.name.startsWith('.'))continue;const value=await stat(path.join(target,item.name));entries.push({name:item.name,path:(fields.path?fields.path+'/':'')+item.name,kind:item.isDirectory()?'directory':'file',byteLength:value.size});}return{entries:entries.slice(0,1000),scanned:Math.min(entries.length,1000),scanLimit:1000,truncated:entries.length>1000};}
+      const journalPath=path.join(fields.editDirectory,'journal.json');
+      if(action==='inspect'){const journal=JSON.parse(await readFile(journalPath,'utf8'));return{...content(await readFile(path.join(fields.editDirectory,fields.part+'.bin'))),fileExists:journal[fields.part+'Hash']!==null};}
+      if(action==='recover'){
+        const bytes=await maybe(journalPath);if(!bytes)return{id:fields.operationId,path:fields.path,status:'interrupted',beforeHash:null,afterHash:null,bytes:0,undoAvailable:false};
+        const journal=JSON.parse(bytes);if(journal.stage==='applied')return journal.result;
+        if(fields.terminalOnly)return{...journal.result,status:'recovery_required',undoAvailable:false,outcomeUnknown:true};
+        const current=await maybe(target),observed=current===null?null:hash(current);return{...journal.result,status:observed===journal.afterHash?'applied':observed===journal.beforeHash?'interrupted':'recovery_required',undoAvailable:observed===journal.afterHash,outcomeUnknown:![journal.afterHash,journal.beforeHash].includes(observed)};
+      }
+      const before=await maybe(target),beforeHash=before===null?null:hash(before);if(beforeHash!==fields.expectedHash)throw error();
+      let after;
+      if(action==='write')after=Buffer.from(fields.content);
+      else if(action==='replace'){const text=before.toString('utf8');let count=0;for(let offset=text.indexOf(fields.oldText);offset>=0;offset=text.indexOf(fields.oldText,offset+1))count++;if(count!==1)throw error('project_replace_conflict');after=Buffer.from(text.replace(fields.oldText,()=>fields.newText));}
+      else if(action==='undo'){const original=JSON.parse(await readFile(path.join(fields.originalEditDirectory,'journal.json'),'utf8'));after=original.beforeHash===null?null:await readFile(path.join(fields.originalEditDirectory,'before.bin'));}
+      else throw error('unsupported_fixture_action',400);
+      if(after&&after.length>250000)throw error('project_file_limit',413);
+      await mkdir(fields.editDirectory,{recursive:true});await writeFile(path.join(fields.editDirectory,'before.bin'),before||Buffer.alloc(0));await writeFile(path.join(fields.editDirectory,'after.bin'),after||Buffer.alloc(0));
+      const result={id:fields.operationId,path:fields.path,status:'applied',beforeHash,afterHash:after===null?null:hash(after),bytes:after?.length||0,undoAvailable:true,...(before===null?{created:true}:{}),...(after===null?{deleted:true}:{})},journal={stage:'committing',beforeHash,afterHash:result.afterHash,result};await writeFile(journalPath,JSON.stringify(journal));
+      if(adapter.commitHook)await adapter.commitHook(fields,options);
+      if(after===null)await rm(target);else await writeFile(target,after);
+      await writeFile(journalPath,JSON.stringify({...journal,stage:'applied'}));
+      if(adapter.afterCommitFailure){adapter.afterCommitFailure=false;throw error('project_native_interrupted',503,{outcomeUnknown:true});}return result;
+    },async close(){adapter.closed++;},
+  };return adapter;
+}
+async function fixture(t){
+  const temporary=await mkdtemp(path.join(tmpdir(),'companion-project-service-')),root=path.join(temporary,'source'),dataDirectory=path.join(temporary,'private'),folder=path.join(temporary,'chosen-project');for(const target of [root,dataDirectory,folder])await mkdir(target);
+  const native=fakeNative(folder),services=[];let service=await createProjectFileService({root,dataDirectory,native});services.push(service);
+  t.after(async()=>{for(const item of services)await item.close();assert.ok(path.resolve(temporary).startsWith(path.resolve(tmpdir())+path.sep+'companion-project-service-'));await rm(temporary,{recursive:true,force:true,maxRetries:3,retryDelay:25});});
+  return{root,dataDirectory,folder,temporary,native,get service(){return service;},async reopen(){await service.close();service=await createProjectFileService({root,dataDirectory,native});services.push(service);return service;},async select(){const result=await service.choose();return{projectId:result.project.projectId,grantEpoch:result.project.grantEpoch};}};
+}
+
+test('only a completed human chooser creates persistent workspace consent, with private roots and immutable root identity',async t=>{
+  const f=await fixture(t);assert.deepEqual(await f.service.projects(),{projects:[]});f.native.select(null);assert.deepEqual(await f.service.choose(),{project:null,cancelled:true});assert.deepEqual(await f.service.projects(),{projects:[]});
+  f.native.select(f.folder);const binding=await f.select(),first=await f.service.projects(),local=await f.service.projects({includeLocalPaths:true});assert.equal(first.projects[0].mode,'read_write');assert.ok(!JSON.stringify(first).includes(f.folder));assert.equal(local.projects[0].localPath,f.folder);assert.deepEqual(await f.service.validateBinding(binding),first.projects[0]);
+  await f.reopen();assert.equal((await f.service.projects()).projects[0].projectId,binding.projectId);assert.equal((await f.service.execute({action:'projects'})).projects[0].available,true);
+  for(const forbidden of [f.root,f.dataDirectory,f.temporary]){f.native.select(forbidden);await assert.rejects(f.service.choose(),{code:'protected_project_root'});}assert.equal((await f.service.projects()).projects.length,1);
+});
+
+test('read and directory pages retain exact Unicode/BOM/newlines and reject stale hashes before returning another page',async t=>{
+  const f=await fixture(t),binding=await f.select(),file='notes & examples + 研究 # 100%.txt',text='\ufeff'+'\u0001'.repeat(15000)+'😀\r\nFinal criterion\r\n';await writeFile(path.join(f.folder,file),text);
+  let offset=0,joined='',firstHash;for(;;){const page=await f.service.execute({action:'read',...binding,path:file,offset,...(firstHash?{expectedHash:firstHash}:{})},{binding});firstHash??=page.hash;assert.ok(Buffer.byteLength(JSON.stringify(page))<=49152);assert.equal(page.bom,true);assert.equal(page.lineEndings,'crlf');joined+=page.content;if(!page.hasMore)break;assert.ok(page.nextOffset>offset);offset=page.nextOffset;}assert.equal(joined,text);
+  await assert.rejects(f.service.execute({action:'read',...binding,path:file,offset:1},{binding}),{code:'invalid_project_query'});await writeFile(path.join(f.folder,file),'changed');await assert.rejects(f.service.execute({action:'read',...binding,path:file,offset:1,expectedHash:firstHash},{binding}),{code:'project_file_conflict'});
+  for(let index=0;index<85;index++)await writeFile(path.join(f.folder,`item-${String(index).padStart(3,'0')}.txt`),'item');let cursor=0,listed=[],directoryHash;for(;;){const page=await f.service.execute({action:'list',...binding,path:'',offset:cursor,...(directoryHash?{expectedDirectoryHash:directoryHash}:{})},{binding});directoryHash??=page.directoryHash;assert.equal(page.complete,true);assert.equal(page.total,86);assert.ok(page.entries.length<=40);listed.push(...page.entries.map(item=>item.path));if(!page.hasMore)break;cursor=page.nextOffset;}assert.equal(new Set(listed).size,86);await writeFile(path.join(f.folder,'later.txt'),'later');await assert.rejects(f.service.execute({action:'list',...binding,offset:40,expectedDirectoryHash:directoryHash},{binding}),{code:'project_directory_conflict'});
+});
+
+test('matching top-level bindings are mandatory and unsafe paths/oversized tool data never reach the native file reader',async t=>{
+  const f=await fixture(t),binding=await f.select(),before=f.native.calls.length;
+  await assert.rejects(f.service.execute({action:'read',...binding,path:'notes.txt'},{binding:{...binding,grantEpoch:binding.grantEpoch+1}}),{code:'project_binding_mismatch'});
+  for(const target of ['../outside.txt','C:/outside.txt','src\\outside.txt','notes.txt:stream','.env','.git/config','keys/id_rsa','secrets/key.txt','device/con.txt'])await assert.rejects(f.service.execute({action:'read',...binding,path:target},{binding}),{code:'invalid_project_path'});
+  await assert.rejects(f.service.execute({action:'write',...binding,path:'notes.txt',expectedHash:null,content:'x'.repeat(24001)},{binding,operationId:randomUUID()}),{code:'invalid_project_arguments'});
+  await assert.rejects(f.service.execute({action:'write',...binding,path:'notes.txt',expectedHash:null,content:'\u0001'.repeat(20000)},{binding,operationId:randomUUID()}),{code:'invalid_project_arguments'});
+  await assert.rejects(f.service.execute({action:'read',...binding,path:'notes.txt',root:f.temporary},{binding}),{code:'invalid_project_arguments'});assert.equal(f.native.calls.length,before);
+});
+
+test('write/replace/undo receipts persist exact effects and replay before revoked-grant checks without a second write',async t=>{
+  const f=await fixture(t),binding=await f.select(),file='draft.txt',original='\ufeffFirst\r\nUnique criterion\r\n';await writeFile(path.join(f.folder,file),original);
+  const operationId=randomUUID(),args={action:'replace',...binding,path:file,expectedHash:hash(original),oldText:'Unique criterion',newText:'New literal $& criterion'},result=await f.service.execute(args,{binding,operationId});assert.equal(result.projectFileEdit.status,'applied');assert.equal(await readFile(path.join(f.folder,file),'utf8'),'\ufeffFirst\r\nNew literal $& criterion\r\n');
+  const beforePage=await f.service.getEdit(operationId,{binding,part:'before'});assert.equal(beforePage.content,original);assert.equal(beforePage.bom,true);assert.equal(beforePage.fileExists,true);const calls=f.native.calls.length;
+  assert.equal((await f.service.execute(args,{binding,operationId})).replayed,true);assert.equal(f.native.calls.length,calls);
+  const undo=await f.service.execute({action:'undo',...binding,changeId:operationId},{binding,operationId:randomUUID()});assert.equal(undo.projectFileEdit.status,'applied');assert.equal(await readFile(path.join(f.folder,file),'utf8'),original);
+  await f.service.revoke(binding);const revokedCalls=f.native.calls.length;assert.equal((await f.service.execute(args,{binding,operationId})).replayed,true);assert.equal(f.native.calls.length,revokedCalls);await f.reopen();const restartedCalls=f.native.calls.length;assert.equal((await f.service.execute(args,{binding,operationId})).replayed,true);assert.equal(f.native.calls.length,restartedCalls);await assert.rejects(f.service.execute({...args,newText:'Different content'},{binding,operationId}),{code:'project_operation_conflict'});
+});
+
+test('later external edits prevent Undo and concurrent exact-hash writes cannot both overwrite the same version',async t=>{
+  const f=await fixture(t),binding=await f.select(),file='draft.txt';await writeFile(path.join(f.folder,file),'before');const args={action:'write',...binding,path:file,content:'after',expectedHash:hash('before')},results=await Promise.allSettled([f.service.execute(args,{binding,operationId:randomUUID()}),f.service.execute({...args,content:'other'},{binding,operationId:randomUUID()})]);assert.equal(results.filter(item=>item.status==='fulfilled').length,1);const applied=results.find(item=>item.status==='fulfilled').value.projectFileEdit;
+  await writeFile(path.join(f.folder,file),'later human change');await assert.rejects(f.service.execute({action:'undo',...binding,changeId:applied.id},{binding,operationId:randomUUID()}),{code:'project_file_conflict'});assert.equal(await readFile(path.join(f.folder,file),'utf8'),'later human change');
+  const newId=randomUUID(),created=await f.service.execute({action:'write',...binding,path:'empty.txt',expectedHash:null,content:''},{binding,operationId:newId});assert.equal(created.projectFileEdit.created,true);assert.equal((await f.service.getEdit(newId,{binding,part:'before'})).fileExists,false);await f.service.execute({action:'undo',...binding,changeId:newId},{binding,operationId:randomUUID()});await assert.rejects(access(path.join(f.folder,'empty.txt')),{code:'ENOENT'});
+});
+
+test('literal replacement can edit a larger bounded file and overlapping matches fail without using a supplied hash as observed evidence',async t=>{
+  const f=await fixture(t),binding=await f.select(),before='x'.repeat(150000)+'UNIQUE_LITERAL\r\n';await writeFile(path.join(f.folder,'large.txt'),before);
+  const result=await f.service.execute({action:'replace',...binding,path:'large.txt',expectedHash:hash(before),oldText:'UNIQUE_LITERAL',newText:'$& stays literal'},{binding,operationId:randomUUID()});assert.equal(result.projectFileEdit.afterHash,hash('x'.repeat(150000)+'$& stays literal\r\n'));assert.equal(result.projectFileEdit.bytes,Buffer.byteLength(await readFile(path.join(f.folder,'large.txt'))));
+  await writeFile(path.join(f.folder,'overlap.txt'),'aaaa');const operationId=randomUUID(),args={action:'replace',...binding,path:'overlap.txt',expectedHash:hash('aaaa'),oldText:'aaa',newText:'b'};await assert.rejects(f.service.execute(args,{binding,operationId}),error=>error.code==='project_replace_conflict'&&error.projectFileEdit.beforeHash===null&&error.projectFileEdit.afterHash===null);assert.equal(await readFile(path.join(f.folder,'overlap.txt'),'utf8'),'aaaa');const calls=f.native.calls.length;await assert.rejects(f.service.execute(args,{binding,operationId}),error=>error.replayed===true);assert.equal(f.native.calls.length,calls);
+});
+
+test('revocation and late chooser/read callbacks cannot grant or return newly unauthorized content, while a committing effect settles truthfully',async t=>{
+  const f=await fixture(t),gate=deferred(),controller=new AbortController();f.native.chooseHook=()=>gate.promise;const selecting=f.service.choose({signal:controller.signal});controller.abort();gate.resolve({path:f.folder});await assert.rejects(selecting,{name:'AbortError'});assert.deepEqual(await f.service.projects(),{projects:[]});f.native.chooseHook=null;
+  const binding=await f.select(),readStarted=deferred(),readGate=deferred();await writeFile(path.join(f.folder,'notes.txt'),'before');f.native.readHook=()=>{readStarted.resolve();return readGate.promise;};const reading=f.service.execute({action:'read',...binding,path:'notes.txt'},{binding});await readStarted.promise;const notifications=[];f.service.onRevoke(value=>notifications.push(value));await f.service.revoke(binding);readGate.resolve();await assert.rejects(reading,{name:'AbortError'});await f.service.revoke(binding);assert.equal(notifications.length,1);
+  f.native.readHook=null;const next=await f.select();assert.ok(next.grantEpoch>binding.grantEpoch);assert.equal(next.projectId,binding.projectId);const started=deferred(),commitGate=deferred();f.native.commitHook=()=>{started.resolve();return commitGate.promise;};const mutation=f.service.execute({action:'write',...next,path:'notes.txt',expectedHash:hash('before'),content:'accepted committing effect'},{binding:next,operationId:randomUUID()});await started.promise;await f.service.revoke(next);commitGate.resolve();const actual=await mutation;assert.equal(actual.projectFileEdit.status,'applied');assert.equal(await readFile(path.join(f.folder,'notes.txt'),'utf8'),'accepted committing effect');await assert.rejects(f.service.execute({action:'read',...next,path:'notes.txt'},{binding:next}),{code:'project_grant_changed'});
+});
+
+test('startup reconciles durable terminal journals without repeating writes and retains unknown partial evidence',async t=>{
+  const f=await fixture(t),binding=await f.select(),privateDirectory=path.join(f.dataDirectory,'project-files');await f.service.close();const store=await createProjectFilesStore({dataDirectory:privateDirectory}),grant=store.getGrant(binding.projectId),args={action:'write',...binding,path:'result.txt',expectedHash:null,content:'committed before service bookkeeping'},operationId=randomUUID();store.beginEdit({id:operationId,digest:digest(args,binding),...binding,path:args.path,action:'write'});await f.native.run('write',{root:grant.canonicalPath,rootIdentity:grant.identity,path:args.path,protectedRoots:[f.root,f.dataDirectory],operationId,editDirectory:path.join(privateDirectory,'edits',operationId),expectedHash:null,content:args.content});
+  const uncertain=randomUUID(),unknownArgs={action:'write',...binding,path:'uncertain.txt',expectedHash:null,content:'intended'};store.beginEdit({id:uncertain,digest:digest(unknownArgs,binding),...binding,path:unknownArgs.path,action:'write'});const editDirectory=path.join(privateDirectory,'edits',uncertain);await mkdir(editDirectory);const result={id:uncertain,path:unknownArgs.path,status:'applied',beforeHash:null,afterHash:hash('intended'),bytes:8,undoAvailable:true};await writeFile(path.join(editDirectory,'journal.json'),JSON.stringify({stage:'committing',beforeHash:null,afterHash:result.afterHash,result}));await writeFile(path.join(editDirectory,'before.bin'),'');await writeFile(path.join(editDirectory,'after.bin'),'intended');await writeFile(path.join(f.folder,'uncertain.txt'),'unrecognized partial/external bytes');store.close();const writes=f.native.calls.filter(call=>call.action==='write').length;
+  await f.reopen();assert.equal((await f.service.getEdit(operationId,{binding})).projectFileEdit.status,'applied');assert.equal((await f.service.execute(args,{binding,operationId})).replayed,true);const unknown=await f.service.getEdit(uncertain,{binding});assert.equal(unknown.projectFileEdit.status,'recovery_required');assert.equal(unknown.projectFileEdit.outcomeUnknown,true);assert.equal((await f.service.execute(unknownArgs,{binding,operationId:uncertain})).replayed,true);assert.equal(f.native.calls.filter(call=>call.action==='write').length,writes);assert.equal(await readFile(path.join(f.folder,'uncertain.txt'),'utf8'),'unrecognized partial/external bytes');
+});
+
+test('a receipt-write failure after an actual effect leaves the native terminal journal authoritative instead of recording false failure',async t=>{
+  const f=await fixture(t),binding=await f.select(),operationId=randomUUID(),args={action:'write',...binding,path:'durable.txt',expectedHash:null,content:'actual file effect'},db=new DatabaseSync(path.join(f.dataDirectory,'project-files','project-files.sqlite'));
+  db.exec("CREATE TRIGGER synthetic_terminal_failure BEFORE UPDATE ON project_edits BEGIN SELECT RAISE(ABORT,'synthetic receipt failure'); END;");
+  await assert.rejects(f.service.execute(args,{binding,operationId}),error=>error.code==='project_receipt_unavailable'&&error.projectFileEdit.status==='applied'&&error.projectFileEdit.afterHash===hash(args.content)&&error.projectFileEdit.receiptPending===true);assert.equal(await readFile(path.join(f.folder,args.path),'utf8'),args.content);assert.equal((await f.service.getEdit(operationId,{binding})).projectFileEdit.status,'pending');const calls=f.native.calls.filter(call=>call.action==='write').length;
+  db.exec('DROP TRIGGER synthetic_terminal_failure');db.close();await f.reopen();assert.equal((await f.service.getEdit(operationId,{binding})).projectFileEdit.status,'applied');assert.equal((await f.service.execute(args,{binding,operationId})).replayed,true);assert.equal(f.native.calls.filter(call=>call.action==='write').length,calls);
+});
+
+test('revoked, changed-epoch and unavailable grants permit only private terminal-journal recovery, never a fresh target read',async t=>{
+  for(const mode of ['revoked','changed_epoch','unavailable']){
+    const f=await fixture(t),binding=await f.select(),privateDirectory=path.join(f.dataDirectory,'project-files');await f.service.close();const store=await createProjectFilesStore({dataDirectory:privateDirectory}),grant=store.getGrant(binding.projectId),operationId=randomUUID(),args={action:'write',...binding,path:'terminal.txt',expectedHash:null,content:'actual previous effect'};store.beginEdit({id:operationId,digest:digest(args,binding),...binding,path:args.path,action:'write'});await f.native.run('write',{root:grant.canonicalPath,rootIdentity:grant.identity,path:args.path,protectedRoots:[f.root,f.dataDirectory],operationId,editDirectory:path.join(privateDirectory,'edits',operationId),expectedHash:null,content:args.content});
+    const uncertain=randomUUID();store.beginEdit({id:uncertain,digest:hash('uncertain '+mode),...binding,path:'unknown.txt',action:'write'});const editDirectory=path.join(privateDirectory,'edits',uncertain);await mkdir(editDirectory);await writeFile(path.join(editDirectory,'journal.json'),JSON.stringify({stage:'committing',beforeHash:null,afterHash:hash('after'),result:{id:uncertain,path:'unknown.txt',status:'applied',beforeHash:null,afterHash:hash('after'),bytes:5,undoAvailable:true}}));
+    if(mode==='revoked'||mode==='changed_epoch')store.revoke(binding);if(mode==='changed_epoch')store.grant({canonicalPath:grant.canonicalPath,identity:grant.identity,label:grant.label});store.close();if(mode==='unavailable')await rename(f.folder,path.join(f.temporary,'moved-project'));
+    const before=f.native.calls.length;await f.reopen();const recoveryCalls=f.native.calls.slice(before).filter(call=>call.action==='recover');assert.equal(recoveryCalls.length,2);assert.ok(recoveryCalls.every(call=>call.fields.terminalOnly===true));if(mode!=='unavailable')assert.ok(!f.native.calls.slice(before).some(call=>call.action==='inspectRoot'));
+    assert.equal((await f.service.getEdit(operationId,{binding})).projectFileEdit.status,'applied');assert.equal((await f.service.getEdit(uncertain,{binding})).projectFileEdit.status,'recovery_required');const calls=f.native.calls.length;assert.equal((await f.service.execute(args,{binding,operationId})).replayed,true);assert.equal(f.native.calls.length,calls);
+  }
+});
+
+test('only the latest confirmed 100 backup versions roll off while durable operation receipts still prevent repeat effects',async t=>{
+  const f=await fixture(t),binding=await f.select();let expectedHash=null,first;for(let index=0;index<101;index++){const operationId=randomUUID(),args={action:'write',...binding,path:'retained.txt',expectedHash,content:String(index)},result=await f.service.execute(args,{binding,operationId});first??={operationId,args};expectedHash=result.projectFileEdit.afterHash;}
+  const oldest=(await f.service.getEdit(first.operationId,{binding})).projectFileEdit;assert.equal(oldest.undoAvailable,false);assert.equal(oldest.backupsRetained,false);await assert.rejects(access(path.join(f.dataDirectory,'project-files','edits',first.operationId)),{code:'ENOENT'});const calls=f.native.calls.length;const replay=await f.service.execute(first.args,{binding,operationId:first.operationId});assert.equal(replay.replayed,true);assert.equal(replay.projectFileEdit.undoAvailable,false);assert.equal(f.native.calls.length,calls);const history=await f.service.execute({action:'history',...binding,limit:40},{binding});assert.equal(history.total,101);assert.equal(history.edits.length,40);assert.ok(history.hasMore);
+});
+
+test('constructor failures close the native adapter and SQLite handles without discarding corrupt or unsafe recovery evidence',async t=>{
+  const f=await fixture(t),binding=await f.select();await f.service.close();const privateDirectory=path.join(f.dataDirectory,'project-files'),database=path.join(privateDirectory,'project-files.sqlite'),original=await readFile(database),corrupt=Buffer.from('SYNTHETIC_CORRUPT_PROJECT_DATABASE');await writeFile(database,corrupt);let closed=f.native.closed;
+  await assert.rejects(createProjectFileService({root:f.root,dataDirectory:f.dataDirectory,native:f.native}));assert.equal(f.native.closed,closed+1);assert.deepEqual(await readFile(database),corrupt);await writeFile(database,original);
+  const store=await createProjectFilesStore({dataDirectory:privateDirectory}),editId=randomUUID();store.beginEdit({id:editId,digest:hash('pruned fixture'),...binding,path:'notes.txt',action:'write'});store.finishEdit(editId,{state:'applied',result:{id:editId,...binding,path:'notes.txt',status:'applied',beforeHash:null,afterHash:hash('after'),bytes:5,undoAvailable:true}});store.markPruned(editId);store.close();const evidence=path.join(privateDirectory,'edits',editId);await writeFile(evidence,'Unexpected retained evidence must not be recursively discarded.');closed=f.native.closed;
+  await assert.rejects(createProjectFileService({root:f.root,dataDirectory:f.dataDirectory,native:f.native}),{code:'project_backup_cleanup_required'});assert.equal(f.native.closed,closed+1);assert.match(await readFile(evidence,'utf8'),/must not be recursively discarded/);await rm(evidence);await f.reopen();assert.equal((await f.service.projects()).projects[0].projectId,binding.projectId);
+});

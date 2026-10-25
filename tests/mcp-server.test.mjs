@@ -42,6 +42,33 @@ test('MCP work handoff and paged inspection retain stable identities without rer
   const count=sent.length;for(const[name,args]of[['companion_start_work',{...body,contextId:randomUUID()}],['companion_get_work',{id:id+'?forged=1'}],['companion_get_work',{id,textLimit:4001}],['companion_list_work',{limit:21}],['companion_cancel_work',{id,scope:'forged'}]])assert.equal((await f.request('tools/call',tool(name,args))).error.code,-32602);assert.equal(sent.length,count);
 });
 
+test('MCP chat, independent work and direct tools preserve explicit project bindings and actual edit receipts',async t=>{
+  const project={projectId:randomUUID(),grantEpoch:7},operationId=randomUUID(),sent=[];
+  const edit={id:operationId,...project,path:'notes.txt',status:'applied',beforeHash:'a'.repeat(64),afterHash:'b'.repeat(64),bytes:16,undoAvailable:true};
+  const f=await fixture(t,async(url,request)=>{const body=JSON.parse(request.body);sent.push({url,method:request.method,body});return response(url.endsWith('/tools/run')?{result:{projectFileEdit:edit,replayed:true}}:url.endsWith('/work')?{job:{id:body.id,status:'queued',project}}:{id:body.id,text:'Saved synthetic reply.',projectContext:project,actions:[]});});await f.initialize();
+  const chat={id:'project-bound-turn',message:'Summarize the chosen project.',project};
+  const reply=await f.request('tools/call',tool('companion_chat',chat));assert.equal(reply.result.isError,false);assert.deepEqual(sent.at(-1),{url:ORIGIN+'/api/assistant/chat',method:'POST',body:chat});assert.deepEqual(reply.result.structuredContent.projectContext,project);
+  const work={id:randomUUID(),prompt:'Independently inspect this chosen project.',providerId:'synthetic-provider',project};
+  const handedOff=await f.request('tools/call',tool('companion_start_work',work));assert.equal(handedOff.result.structuredContent.job.status,'queued');assert.deepEqual(sent.at(-1),{url:ORIGIN+'/api/assistant/work',method:'POST',body:work});
+  const direct={tool:'run_capability',arguments:{name:'cap_project_files',arguments:{action:'write',...project,path:'notes.txt',content:'Synthetic change',expectedHash:'a'.repeat(64)}},operationId,project};
+  const changed=await f.request('tools/call',tool('companion_run_tool',direct));assert.equal(changed.result.isError,false);assert.deepEqual(sent.at(-1),{url:ORIGIN+'/api/assistant/tools/run',method:'POST',body:direct});assert.deepEqual(changed.result.structuredContent.result.projectFileEdit,edit);
+  await f.request('tools/call',tool('companion_run_tool',direct));assert.deepEqual(sent.at(-1).body,direct);assert.equal(sent.filter(item=>item.url.endsWith('/tools/run')).length,2);
+  // A later unbound request must not inherit a preceding request's folder.
+  await f.request('tools/call',tool('companion_chat',{id:'unbound-next-turn',message:'What time is it?'}));assert.equal(Object.hasOwn(sent.at(-1).body,'project'),false);
+  const listed=await f.request('tools/list');assert.equal(listed.result.tools.length,23);
+  for(const name of ['companion_chat','companion_start_work','companion_run_tool']){const definition=listed.result.tools.find(item=>item.name===name),shape=definition.inputSchema.properties.project;assert.deepEqual(shape.required,['projectId','grantEpoch']);assert.equal(shape.additionalProperties,false);assert.equal(shape.properties.grantEpoch.minimum,1);assert.equal(shape.properties.grantEpoch.maximum,Number.MAX_SAFE_INTEGER);assert.equal(definition.inputSchema.required.includes('project'),false);}
+  assert.equal(listed.result.tools.some(item=>/choose.*(?:folder|project)|revoke.*(?:folder|project)/i.test(item.name)),false);
+});
+
+test('MCP rejects malformed or path-bearing project bindings before session bootstrap or any endpoint call',async t=>{
+  const f=await fixture(t);await f.initialize();const projectId=randomUUID();
+  const calls=[['companion_chat',{id:'project-validation',message:'Read the selected folder.'}],['companion_start_work',{id:randomUUID(),prompt:'Inspect the selected folder.',providerId:'synthetic-provider'}],['companion_run_tool',{tool:'list_capabilities',arguments:{}}]];
+  const invalid=[null,[],{}, {projectId}, {grantEpoch:1}, {projectId:'not-a-uuid',grantEpoch:1}, {projectId:projectId+'?path=outside',grantEpoch:1}, {projectId,grantEpoch:0}, {projectId,grantEpoch:-1}, {projectId,grantEpoch:1.5}, {projectId,grantEpoch:'1'}, {projectId,grantEpoch:Number.MAX_SAFE_INTEGER+1}, {projectId,grantEpoch:1,path:'C:/unapproved'}, {projectId,grantEpoch:1,label:'unsupported metadata'}, {projectId,grantEpoch:1,approved:true}];
+  for(const[name,base]of calls)for(const project of invalid){const reply=await f.request('tools/call',tool(name,{...base,project}));assert.equal(reply.error?.code,-32602,JSON.stringify({name,project,reply}));}
+  for(const[name,base]of calls)assert.equal((await f.request('tools/call',tool(name,{...base,projectId,grantEpoch:1}))).error.code,-32602);
+  assert.equal(f.calls.length,0);
+});
+
 test('targeted source MCP reads encode exact paths and preserve source without granting arbitrary file access',async t=>{
   const path='docs/notes & examples + 研究 # 100%.md',hash='a'.repeat(64),content='const apiKey = "synthetic-example";\r\nconst text = "😀";\n',sent=[];
   const f=await fixture(t,async(url,request)=>{sent.push({url,method:request.method});return response({path,hash,content,offset:0,nextOffset:null,hasMore:false,characterLength:content.length,byteLength:Buffer.byteLength(content),sourceTrust:'untrusted_source'});});await f.initialize();
