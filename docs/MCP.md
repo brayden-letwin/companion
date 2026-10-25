@@ -4,6 +4,8 @@ Companion provides an MCP stdio server for Claude Code and other clients that su
 
 Connected clients can maintain existing routines through `companion_list_tools` and `companion_run_tool`. `list_workflows` returns bounded metadata or exact definition pages; `save_workflow` edits an actual saved ID with revision/hash checks and can enable or disable it without running it. [Saved routines](WORKFLOWS.md) documents the fields, original retry receipts and the change from older unpaged definition lists.
 
+The same catalog exposes calendar `dueDate` and precise `dueAt` task fields, named-zone resolution through `get_time`, and relative task deadline filters. Retain the returned `asOf`, `timezone` and workspace revision across filtered pages. [Task deadlines](TASK_DEADLINES.md) documents explicit clock-change choices and original task-save receipts.
+
 1. Start Companion using **Start Companion.cmd**. Its local service normally uses `http://127.0.0.1:4174`.
 2. Copy the `companion` entry from [mcp.example.json](../mcp.example.json) into your client's MCP configuration. Replace the script path with the absolute path to this checkout. If Node is not on that client's PATH, replace `command` with the absolute path to your Node executable. Companion requires Node 24.15 or newer.
 3. Restart or reconnect the client, inspect the exposed tools, and enable the operations you want it to use. Ask it to read `companion_workspace` as a first check.
