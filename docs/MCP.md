@@ -31,7 +31,7 @@ This is a protocol process, so it does not display an interactive prompt. Its st
 | `companion_list_conversations` / `companion_create_conversation` | Read saved summaries, or create `{id:UUID,title?}` with an optional title of at most 80 characters. |
 | `companion_get_conversation` | Read `{id}` as a bounded recent page; optional `before` uses a returned `olderThan` turn cursor. |
 | `companion_build_feature` | Queue `{prompt, providerId?, autoApply?}` as a real coding job. |
-| `companion_list_builds` / `companion_get_build` | Read actual build status, diffs, and checks. The latter takes `{id}`. |
+| `companion_list_builds` / `companion_get_build` | Read actual build status, diffs, checks and attempt summaries. The latter takes `{id}`; optional `attempt: 1` or `2` reads that retained candidate report without executing work. |
 | `companion_apply_build` | Explicitly activate a verified build using `{id}`. |
 | `companion_rollback_build` / `companion_cancel_build` | Restore retained source or stop a running build using `{id}`. |
 | `companion_source` | Read permitted source paths and hashes; `{includeContent:true}` also returns source text. |
@@ -92,6 +92,8 @@ Submit complete replacement contents, not a shell command or a textual diff:
 Use the exact SHA-256 hash for an existing file, or `null` for a new path. File content may be `null` to request deletion. Optional `tests` contains short check descriptions; it does not execute arbitrary commands. `summary`, `files`, and `baseHashes` are required. This external-patch tool does not accept a model prompt or provider ID. Source paths, patch size, hashes, verification, and conflict checks are enforced by the builder.
 
 A queued job is not an installed feature. Read its concrete changes and verification results. Protected control/kernel files and deletions require review, even when `autoApply` is true. After reviewing them, an explicit `companion_apply_build` call activates an eligible verified candidate. [EXTENSIONS.md](EXTENSIONS.md) describes verification and its limits. Rollback also refuses conflicting source edits.
+
+AI-generated builds can make one correction after actual failed checks, preserving the original request, source/provider pins and acceptance contracts. External patches remain single-pass. Use the existing get-build tool to inspect earlier attempts; a failed earlier report is separate from the latest candidate. Full reports remain subject to the bridge's existing 4 MiB response limit. For larger reports, `companion_run_tool` with `inspect_feature_build` and its optional `attempt` provides bounded diagnostics without silently clipping source or changing the job. See [Build correction](BUILD_CORRECTION.md).
 
 ## Reloading reviewed server changes
 
