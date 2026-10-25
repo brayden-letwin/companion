@@ -9,36 +9,50 @@ param(
 $ErrorActionPreference = 'Stop'
 $DataDirectory = [IO.Path]::GetFullPath($DataDirectory)
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$serverPath = Join-Path $sourceRoot 'server\companion-host.mjs'
+$serverPath = Join-Path $sourceRoot 'server\runtime-supervisor.mjs'
 if (-not (Test-Path -LiteralPath $serverPath -PathType Leaf)) { throw "Shared-room source not found: $serverPath" }
 $origin = "http://127.0.0.1:$Port"
-$ready = $false
-try {
-    $health = Invoke-RestMethod -Uri "$origin/api/health" -TimeoutSec 2 -MaximumRedirection 0
-    if ($health.service -ne 'companion-shared') { throw 'Another application is using the shared-room port.' }
-    $ready = $true
-} catch {
-    if ($_.Exception.Message -eq 'Another application is using the shared-room port.') { throw }
+$hostLockPath = Join-Path $DataDirectory 'runtime-host.lock'
+$supervisorLockPaths = @((Join-Path $DataDirectory 'runtime-supervisor.lock'), (Join-Path $sourceRoot ".companion-supervisor-$Port.lock"))
+function Test-CompanionHealth {
+    try { $response = Invoke-WebRequest -UseBasicParsing -Uri "$origin/api/health" -TimeoutSec 2 -MaximumRedirection 0 }
+    catch { return $false }
+    try { $health = $response.Content | ConvertFrom-Json }
+    catch { throw 'The selected port returned an unidentified service. No duplicate was started.' }
+    if ($health.service -ne 'companion-shared') { throw 'Another application is using the selected port.' }
+    $metadataPath = Join-Path $DataDirectory 'runtime-host.json'
+    if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) { throw 'This port belongs to an unidentified Companion workspace. No duplicate was started.' }
+    $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+    if ($metadata.sourceRoot -ne $sourceRoot -or $metadata.port -ne $Port) { throw 'This port belongs to a different Companion checkout or workspace. No duplicate was started.' }
+    if ($metadata.status -ne 'ready') { return $false }
+    if ([string]$response.Headers['X-Companion-Instance'] -ne [string]$metadata.instance) { throw 'The responding service does not match the saved runtime identity. No duplicate was started.' }
+    return $true
 }
+$ownerMayBeRunning = $false
+foreach ($ownerLockPath in @($supervisorLockPaths + $hostLockPath)) {
+    $ownerRecovery = Test-Path -LiteralPath ($ownerLockPath + '.recovery')
+    if (-not (Test-Path -LiteralPath $ownerLockPath -PathType Leaf)) {
+        if ($ownerRecovery) { throw "Companion has an unconfirmed shutdown. Inspect the retained runtime at $DataDirectory; no ownership was reclaimed." }
+        continue
+    }
+    try {
+        $ownerLock = Get-Content -LiteralPath $ownerLockPath -Raw | ConvertFrom-Json
+        if (-not $ownerLock.pid -or $ownerLock.port -ne $Port -or $ownerLock.sourceRoot -ne $sourceRoot) { throw 'The saved owner does not match this launcher.' }
+        try { Get-Process -Id $ownerLock.pid -ErrorAction Stop | Out-Null; $ownerMayBeRunning = $true }
+        catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw }; if ($ownerRecovery) { throw 'The previous owner disappeared without confirmed shutdown. Retained runtime needs review.' } }
+    } catch { throw "Companion ownership needs review: $ownerLockPath. No second service was started." }
+}
+$ready = Test-CompanionHealth
 
 if (-not $ready) {
-    $hostLockPath = Join-Path $DataDirectory 'runtime-host.lock'
-    if (Test-Path -LiteralPath $hostLockPath -PathType Leaf) {
-        $hostMayBeRunning = $true
-        try {
-            $hostLock = Get-Content -LiteralPath $hostLockPath -Raw | ConvertFrom-Json
-            if (-not $hostLock.pid -or $hostLock.port -ne $Port -or $hostLock.sourceRoot -ne $sourceRoot) { throw 'The saved runtime identity does not match this launcher.' }
-            try { Get-Process -Id $hostLock.pid -ErrorAction Stop | Out-Null }
-            catch { if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { $hostMayBeRunning = $false } }
-        } catch { throw "Companion runtime metadata needs review: $hostLockPath. No second server was started." }
-        if ($hostMayBeRunning) {
+    if ($ownerMayBeRunning) {
             Write-Output 'Companion is restarting. Waiting for your workspace...'
-            for ($attempt = 0; $attempt -lt 100; $attempt++) {
-                try { $health = Invoke-RestMethod -Uri "$origin/api/health" -TimeoutSec 1 -MaximumRedirection 0; $ready = $health.service -eq 'companion-shared'; if ($ready) { break } } catch { }
+            for ($attempt = 0; $attempt -lt 160; $attempt++) {
+                $ready = Test-CompanionHealth
+                if ($ready) { break }
                 Start-Sleep -Milliseconds 250
             }
             if (-not $ready) { throw "Companion is already managed but is not responding. See $DataDirectory\server-error.log. No second server was started." }
-        }
     }
 }
 
@@ -82,11 +96,8 @@ if (-not $ready) {
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         $serverProcess.Refresh()
         if ($serverProcess.HasExited) { throw "Companion stopped during startup. See $DataDirectory\server-error.log" }
-        try {
-            $health = Invoke-RestMethod -Uri "$origin/api/health" -TimeoutSec 1 -MaximumRedirection 0
-            $ready = $health.service -eq 'companion-shared'
-            if ($ready) { break }
-        } catch { }
+        $ready = Test-CompanionHealth
+        if ($ready) { break }
         Start-Sleep -Milliseconds 250
     }
 }
