@@ -23,6 +23,8 @@ let voiceDialogOverride=false;
 let voiceSession=null,voiceSessionState={enabled:false,optedIn:false,visible:true,status:'off'},voiceCaptureContext=null,voiceFirstContext=null,activeVoiceSegment=null,voiceOwnershipRequest=null,voiceOwnsCapture=false;
 let chatOpen=false,memoryBusy=false;
 let currentView = 'today', showCompleted = false, workspacePending = false, jobsPending = false;
+let taskSearch='',taskProject='all',taskSort='created',taskVisibleLimit=50,taskProjectOptionsKey='';
+const expandedTaskDetails=new Set();
 let operationBusy = false, featureBusy = false, providerBusy = false, editingProviderId = null, editingTarget = null;
 let pendingWorkspaceRequest = null;
 let generation = 0, activeRequest = null, recording = null, microphoneOpening = false, turnBusy = false;
@@ -592,12 +594,36 @@ function renderWorkspace(){
 }
 function renderFocus(){const focus=workspace?.focus;$('focus-card').hidden=!focus;if(!focus)return;$('focus-label').textContent=focus.label||'Time to focus';const minutes=Math.max(0,Math.ceil((new Date(focus.endsAt)-Date.now())/60000));$('focus-remaining').textContent=minutes?`${minutes} min remaining`:'Focus time complete';}
 $('stop-focus').addEventListener('click',async()=>{try{await workspaceOperation('stopFocus');}catch(error){toast(error.message);}});
-function renderTasks(){const list=$('task-list');list.replaceChildren();const tasks=(workspace?.tasks||[]).filter(task=>showCompleted||task.status!=='done');
-  if(!tasks.length)list.append(emptyState('No open tasks.','Add a task above or ask Companion to create one.'));
-  for(const task of tasks){const row=element('article','task-row'+(task.status==='done'?' done':''));const check=button(task.status==='done'?'✓':'','task-check',async()=>{check.disabled=true;try{await workspaceOperation(task.status==='done'?'updateTask':'completeTask',{taskId:task.id,...(task.status==='done'?{status:'todo'}:{})});}catch(error){toast(error.message);check.disabled=false;}});check.setAttribute('aria-label',(task.status==='done'?'Reopen task: ':'Complete task: ')+task.title);check.setAttribute('aria-pressed',String(task.status==='done'));
-    const main=element('div','task-main');main.append(element('p','task-title',task.title));if(task.details)main.append(element('p','task-details',task.details));const meta=element('div','task-meta');if(task.priority==='high')meta.append(element('span','priority-high','High priority'));if(task.project)meta.append(element('span','',task.project));if(task.dueAt)meta.append(element('span','','Due '+dateLabel(task.dueAt)));if(meta.childNodes.length)main.append(meta);row.append(check,main,button('Edit','quiet-button',()=>openEditor('task',task)));list.append(row);}
+function taskProjectName(task){return typeof task.project==='string'&&task.project.trim()?task.project:null;}
+function renderTaskProjectOptions(tasks){
+  const available=new Set(tasks.map(taskProjectName).filter(name=>name!==null)),names=[...available].sort((left,right)=>left.localeCompare(right));
+  const selected=taskProject.startsWith('project:')?taskProject.slice(8):null;if(selected!==null&&!available.has(selected))names.push(selected);
+  const key=JSON.stringify([names,selected!==null&&!available.has(selected)?selected:null]);if(key!==taskProjectOptionsKey){taskProjectOptionsKey=key;const all=element('option','','All projects'),none=element('option','','No project');all.value='all';none.value='none';const options=[all,none];for(const name of names){const literal=['All projects','No project'].includes(name)?name+' (project)':name,missing=!available.has(name),option=element('option','',literal+(missing?' · no tasks':''));option.value='project:'+name;options.push(option);}$('tasks-project').replaceChildren(...options);}$('tasks-project').value=taskProject;
 }
-$('toggle-completed').addEventListener('click',()=>{showCompleted=!showCompleted;$('toggle-completed').textContent=showCompleted?'Hide completed':'Show completed';renderTasks();});
+function matchingTasks(){
+  const terms=taskSearch.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const tasks=(workspace?.tasks||[]).map((task,index)=>({task,index})).filter(({task})=>{
+    if(!showCompleted&&task.status==='done')return false;
+    const project=taskProjectName(task);if(taskProject==='none'&&project!==null)return false;if(taskProject.startsWith('project:')&&project!==taskProject.slice(8))return false;
+    const content=[task.title,task.details,task.project].map(value=>typeof value==='string'?value:'').join('\n').toLocaleLowerCase();return terms.every(term=>content.includes(term));
+  });
+  const created=task=>{const time=Date.parse(task.createdAt);return Number.isFinite(time)?time:0;},due=task=>{const time=Date.parse(task.dueAt);return Number.isFinite(time)?time:Infinity;};
+  tasks.sort((left,right)=>{if(taskSort==='priority'){const priority=Number(right.task.priority==='high')-Number(left.task.priority==='high');if(priority)return priority;}if(taskSort==='due'){const a=due(left.task),b=due(right.task);if(a!==b)return a<b?-1:1;}return created(left.task)-created(right.task)||left.index-right.index;});return tasks.map(item=>item.task);
+}
+function renderTasks(){
+  const list=$('task-list');for(const disclosure of list.querySelectorAll('.task-details-disclosure')){if(disclosure.open)expandedTaskDetails.add(disclosure.dataset.taskId);else expandedTaskDetails.delete(disclosure.dataset.taskId);}list.replaceChildren();renderTaskProjectOptions(workspace?.tasks||[]);$('tasks-sort').value=taskSort;
+  const tasks=matchingTasks(),shown=tasks.slice(0,taskVisibleLimit),remaining=tasks.length-shown.length;
+  $('tasks-results-count').textContent='Showing '+shown.length+' of '+tasks.length+' matching task'+(tasks.length===1?'':'s')+'.';$('tasks-show-more').hidden=remaining<=0;$('tasks-show-more').textContent='Show '+Math.min(50,remaining)+' more';
+  if(!tasks.length){const filtered=!!taskSearch.trim()||taskProject!=='all';list.append(emptyState(filtered?'No matching tasks.':showCompleted?'No tasks yet.':'No open tasks.',filtered?'Try another search or project.':'Add a task above or ask Companion to create one.'));}
+  for(const task of shown){const row=element('article','task-row'+(task.status==='done'?' done':''));row.dataset.taskId=task.id;const check=button(task.status==='done'?'✓':'','task-check',async()=>{check.disabled=true;try{await workspaceOperation(task.status==='done'?'updateTask':'completeTask',{taskId:task.id,...(task.status==='done'?{status:'todo'}:{})});}catch(error){toast(error.message);check.disabled=false;}});check.setAttribute('aria-label',(task.status==='done'?'Reopen task: ':'Complete task: ')+task.title);check.setAttribute('aria-pressed',String(task.status==='done'));
+    const main=element('div','task-main');main.append(element('p','task-title',task.title));if(task.details){if(task.details.length<=240)main.append(element('p','task-details',task.details));else{main.append(element('p','task-details',task.details.slice(0,239).trimEnd()+'…'));const disclosure=element('details','task-details-disclosure'),summary=element('summary','','Read all details');disclosure.dataset.taskId=task.id;disclosure.setAttribute('aria-label','Details for task: '+task.title);summary.setAttribute('aria-label','Read all details for task: '+task.title);disclosure.open=expandedTaskDetails.has(task.id);disclosure.append(summary,element('p','task-details task-details-full',task.details));disclosure.addEventListener('toggle',()=>{if(disclosure.open)expandedTaskDetails.add(task.id);else expandedTaskDetails.delete(task.id);});main.append(disclosure);}}const meta=element('div','task-meta');if(task.priority==='high')meta.append(element('span','priority-high','High priority'));if(task.project)meta.append(element('span','',task.project));if(task.dueAt)meta.append(element('span','','Due '+dateLabel(task.dueAt)));if(meta.childNodes.length)main.append(meta);row.append(check,main,button('Edit','quiet-button',()=>openEditor('task',task)));list.append(row);}
+}
+function resetTaskPage(){taskVisibleLimit=50;renderTasks();}
+$('tasks-search').addEventListener('input',()=>{taskSearch=$('tasks-search').value;resetTaskPage();});
+$('tasks-project').addEventListener('change',()=>{taskProject=$('tasks-project').value;resetTaskPage();});
+$('tasks-sort').addEventListener('change',()=>{taskSort=['created','priority','due'].includes($('tasks-sort').value)?$('tasks-sort').value:'created';resetTaskPage();});
+$('tasks-show-more').addEventListener('click',()=>{taskVisibleLimit+=50;renderTasks();});
+$('toggle-completed').addEventListener('click',()=>{showCompleted=!showCompleted;$('toggle-completed').textContent=showCompleted?'Hide completed':'Show completed';resetTaskPage();});
 $('task-form').addEventListener('submit',async event=>{event.preventDefault();const title=$('new-task').value.trim();if(!title)return;$('task-error').textContent='';const submit=event.submitter;submit.disabled=true;try{await workspaceOperation('addTask',{title});if($('new-task').value.trim()===title)$('new-task').value='';}catch(error){$('task-error').textContent=error.message;}finally{submit.disabled=false;}});
 function renderNotes(){const list=$('notes-list');list.replaceChildren();const query=$('notes-search').value.trim().toLowerCase();const notes=(workspace?.notes||[]).filter(note=>!note.archived&&(!query||[note.title,note.text,...(note.tags||[])].join(' ').toLowerCase().includes(query)));
   if(!notes.length)list.append(emptyState(query?'No matching notes.':'No notes to show.',query?'Try another word.':'Save a note above or ask Companion to save one.'));
