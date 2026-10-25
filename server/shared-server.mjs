@@ -21,6 +21,11 @@ const SHARED_PAPER = Object.freeze({ id: 'fixed-points-v1', title: PAPER, versio
 const ASSETS = new Map([
   ['/', ['assistant.html', 'text/html; charset=utf-8']],
   ['/assistant.html', ['assistant.html', 'text/html; charset=utf-8']],
+  ['/index.html', ['index.html', 'text/html; charset=utf-8']],
+  ['/src/app.mjs', ['src/app.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/styles.css', ['src/styles.css', 'text/css; charset=utf-8']],
+  ['/src/reader.css', ['src/reader.css', 'text/css; charset=utf-8']],
+  ['/src/features/manifest.json', ['src/features/manifest.json', 'application/json; charset=utf-8']],
   ['/src/assistant.mjs', ['src/assistant.mjs', 'text/javascript; charset=utf-8']],
   ['/src/assistant.css', ['src/assistant.css', 'text/css; charset=utf-8']],
   ['/src/core/assistant.mjs', ['src/core/assistant.mjs', 'text/javascript; charset=utf-8']],
@@ -78,7 +83,7 @@ export async function createSharedServer({ dbPath, port = 4174, root = REPO_ROOT
   let passwordJobs = 0;
   const authWindows = new Map();
   let closed = false;
-  const assistant = createAssistantApi({ ...assistantOptions, ...(assistantProvider ? { provider: assistantProvider } : {}), now, getPort: () => server.address()?.port || port });
+  const assistant = createAssistantApi({ ...assistantOptions, ...(assistantProvider ? { provider: assistantProvider } : {}), now, root, dataDirectory: dbPath === ':memory:' ? null : path.dirname(path.resolve(dbPath)), getPort: () => server.address()?.port || port });
 
   function transact(callback) {
     db.exec('BEGIN IMMEDIATE');
@@ -170,6 +175,7 @@ export async function createSharedServer({ dbPath, port = 4174, root = REPO_ROOT
   }
   async function assets(req, res, route) {
     let asset = ASSETS.get(route);
+    if (!asset && /^\/src\/features\/[a-zA-Z\d_-]+\.(?:mjs|css|json)$/.test(route)) asset = [route.slice(1), route.endsWith('.mjs') ? 'text/javascript; charset=utf-8' : route.endsWith('.css') ? 'text/css; charset=utf-8' : 'application/json; charset=utf-8'];
     // PDF.js needs only these published binary resources, not its source tree,
     // package metadata, maps, or arbitrary files in node_modules.
     if (!asset && /^\/node_modules\/pdfjs-dist\/cmaps\/[A-Za-z0-9_-]+\.bcmap$/.test(route)) asset = [route.slice(1), 'application/octet-stream'];
@@ -200,7 +206,7 @@ export async function createSharedServer({ dbPath, port = 4174, root = REPO_ROOT
         await assets(req, res, route); return;
       }
       if (req.method === 'GET') {
-        if (route === '/api/health') { json(res, 200, { service: 'companion-shared', version: '0.5.0', setupRequired: !roomRow() }); return; }
+        if (route === '/api/health') { json(res, 200, { service: 'companion-shared', version: '0.6.0', setupRequired: !roomRow() }); return; }
         if (route === '/api/session') {
           const session = requestSession(req);
           json(res, 200, { setupRequired: !roomRow(), user: session?.user || null, ...(session ? { csrfToken: session.csrf } : {}) }); return;
@@ -314,7 +320,7 @@ export async function createSharedServer({ dbPath, port = 4174, root = REPO_ROOT
     },
     async close() {
       if (closed) return; closed = true;
-      assistant.close();
+      await assistant.close();
       if (server.listening) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       db.close();
     },

@@ -1,6 +1,7 @@
 import { randomBytes, createHash } from 'node:crypto';
 import localProviderModule from '../electron/local-provider.cjs';
 import providerModule from '../electron/provider.cjs';
+import { createProductivityApi } from './productivity-api.mjs';
 
 const { createLocalProvider, DEFAULT_LOCAL_MODEL } = localProviderModule;
 const { validateAsk, validateAudio, requestId } = providerModule;
@@ -46,9 +47,10 @@ async function readJson(req) {
 }
 
 /** Personal, memory-only local inference. It never authenticates a group member. */
-export function createAssistantApi({ provider = createLocalProvider({ model: process.env.COMPANION_LOCAL_MODEL || DEFAULT_LOCAL_MODEL }), now = Date.now, getPort, sessionLimit = 64, sessionRateLimit = 30, requestRateLimit = 30, requestTimeoutMs = 125000 } = {}) {
+export function createAssistantApi({ provider = createLocalProvider({ model: process.env.COMPANION_LOCAL_MODEL || DEFAULT_LOCAL_MODEL }), now = Date.now, getPort, root, dataDirectory, createProductivityRuntime, sessionLimit = 64, sessionRateLimit = 30, requestRateLimit = 30, requestTimeoutMs = 125000 } = {}) {
   if (!provider || ['getStatus', 'ask', 'transcribe', 'cancel', 'cancelScope'].some(method => typeof provider[method] !== 'function')) throw new Error('Invalid local assistant provider.');
   const sessions = new Map(), creationWindows = new Map(), inFlight = new Set(), active = new Map();
+  const productivity = createProductivityApi({ root, dataDirectory, createRuntime: createProductivityRuntime });
   let statusCache = null, statusPending = null, closed = false;
   const cookieName = () => `companion_assistant_session_v1_${getPort()}`;
 
@@ -165,15 +167,18 @@ export function createAssistantApi({ provider = createLocalProvider({ model: pro
           }
           json(res, 200, statusCache.value); return true;
         }
+        if (req.method === 'GET' && await productivity.handle(req, res, route, session)) return true;
         if (req.method !== 'POST') throw fail(405, 'method_not_allowed', 'Use the supported assistant GET or POST endpoint.');
         if (req.headers.origin !== origin) throw fail(403, 'invalid_origin', 'Submit requests from this assistant page.');
         if (typeof req.headers['x-csrf-token'] !== 'string' || req.headers['x-csrf-token'] !== session.csrfToken) throw fail(403, 'invalid_csrf', 'Refresh the assistant page before submitting.');
+        if (await productivity.handle(req, res, route, session)) return true;
         if (route === '/api/assistant/ask' || route === '/api/assistant/transcribe') {
           await work(req, res, session, route.endsWith('/ask') ? 'ask' : 'transcribe'); return true;
         }
         if (route === '/api/assistant/cancel') {
           rate(session.windows, 'cancel', 60, 60000, 'Too many stop requests. Try again in a minute.');
           const body = await readJson(req); fields(body, ['id']); const id = validate(() => requestId(body.id));
+          productivity.cancel(session.scope, id);
           const record = active.get(`${session.scope}:${id}`);
           if (record) { stop(record); json(record.res, 499, { error: { code: 'request_cancelled', message: 'Request stopped.' } }); }
           json(res, 200, { id, cancelled: true }); return true;
@@ -186,11 +191,12 @@ export function createAssistantApi({ provider = createLocalProvider({ model: pro
       }
       return true;
     },
-    close() {
+    async close() {
       closed = true;
       for (const record of inFlight) { stop(record); json(record.res, 503, { error: { code: 'assistant_closed', message: 'The assistant is shutting down.' } }); }
       for (const session of sessions.values()) provider.cancelScope(session.scope);
       sessions.clear(); creationWindows.clear();
+      await productivity.close();
     },
   };
 }
