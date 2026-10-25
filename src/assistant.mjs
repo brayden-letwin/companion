@@ -1,3 +1,4 @@
+import { createWorkflowEditor } from './workflow-editor.mjs';
 import { createWorkflowHistoryUI } from './workflow-history.mjs';
 import { createWorkspaceBackupsUI } from './workspace-backups.mjs';
 import { normalizeDeadline } from './core/productivity-deadlines.mjs';
@@ -47,13 +48,13 @@ let operationBusy = false, featureBusy = false, providerBusy = false, editingPro
 let pendingWorkspaceRequest = null;
 let generation = 0, activeRequest = null, recording = null, microphoneOpening = false, turnBusy = false;
 let speechGeneration = 0, speechResolve = null, voicePipeline = false, destroyed = false, messages = [], latestAnswer = null, toastTimer = null;
-let workflowEditorGeneration=0,workflowOriginalSteps=[];
-const workflowEnableBusy=new Set(),workflowPendingSaves=new Map();
-let workflowEditingId = null, workflowEditingRevision = null, workflowDraft = [], featureRenderKey = '', extensionRefreshKey = '', extensionGeneration = 0;
+let workflowEditor=null;
+const workflowEnableBusy=new Set();
+let featureRenderKey = '', extensionRefreshKey = '', extensionGeneration = 0;
 const extensions = new Map();
 let extensionProblems=[],toolCatalog=[],toolCatalogReady=false,toolCatalogError='',toolCatalogPending=null,capabilityStatus=null;
 const knownFeatureNames=new Set();
-const workflowFieldDrafts=new WeakMap();
+
 const runningWorkflows = new Set(), workflowResults = new Map();
 const jobDetails = new Map(), jobDetailPending = new Set();
 const jobDetailRetryAt = new Map();
@@ -301,6 +302,7 @@ function syncProviderCheckSelection(){const provider=activeProvider(),key=JSON.s
 function captureProviderCheckContext(){syncProviderCheckSelection();const provider=activeProvider();return {providerId:currentView==='settings'?provider?.id||null:null,revision:currentView==='settings'?provider?.revision||null:null,generation:providerCheckSelectionGeneration};}
 function currentProviderCheckContext(context){syncProviderCheckSelection();const provider=activeProvider();return !!context&&currentView==='settings'&&context.providerId===provider?.id&&context.revision===provider?.revision&&context.generation===providerCheckSelectionGeneration;}
 async function testSelectedProvider(context){if(!context?.providerId||!currentProviderCheckContext(context))throw new Error('Open Settings with the intended AI selected, then say “test connection”.');const result=await providerChecksUI.startCheck(context.providerId,context.revision);if(!result)throw new Error('The connection test response was not confirmed. Use Check test before trying again.');return result;}
+function initWorkflowEditor(){workflowEditor=createWorkflowEditor({document,getWorkspace:()=>workspace,getCatalog:()=>({tools:toolCatalog,ready:toolCatalogReady,error:toolCatalogError,capabilityStatus}),refreshCatalog:refreshToolCatalog,saveOperation:(fields,options)=>workspaceOperation('saveWorkflow',fields,options),getPendingOperationId:()=>pendingWorkspaceRequest?.operationId,showDialog,notify:toast,randomUUID:()=>crypto.randomUUID()});}
 async function workflowHistoryApi(path,options={}){if(options.method&&options.method!=='GET')throw new Error('Run history only reads saved records.');return continuationApi(path,options);}
 function initWorkflowHistory(){workflowHistoryUI=createWorkflowHistoryUI({container:$('workflow-history-container'),api:workflowHistoryApi,renderReceipts:(container,actions)=>renderActionReceipts(container,actions,{historical:true}),notify:toast});$('workflow-history-open').addEventListener('click',()=>showWorkflowHistory());}
 function showWorkflowHistory(id=null){workflowHistoryUI.setWorkflow(id);void workflowHistoryUI.refresh();$('workflow-history-container').scrollIntoView({block:'nearest'});}
@@ -839,37 +841,8 @@ $('edit-form').addEventListener('submit',async event=>{
     if(!currentEditor(session,target))return;if(JSON.stringify(editorFormData())!==encoded)throw new Error('Your draft changed while checking the deadline. Review it, then save again.');if(workspace.revision!==target.revision)throw new Error('Your workspace changed. Review your draft, then save again.');const fields=target.kind==='task'?{taskId:target.id,title:draft.title,details:draft.text,priority:draft.priority,project:draft.project,...deadline}:{noteId:target.id,title:draft.title,text:draft.text};editorPendingSaves.set(operationId,{generation:session,target,encoded});const result=await workspaceOperation(target.kind==='task'?'updateTask':'updateNote',fields,{operationId});const sameDraft=currentEditor(session,target)&&JSON.stringify(editorFormData())===encoded;const reconciled=reconcileEditorSave(operationId,result);if(!currentEditor(session,target))return;if(!reconciled)throw new Error('The original saved version is unavailable. Your draft is kept; inspect the task before another save.');if(editorDeadline?.concurrent)return;if(sameDraft)$('edit-dialog').close();else $('edit-error').textContent='The saved version is confirmed. Your newer draft is still here.';
   }catch(error){if(pendingWorkspaceRequest?.operationId!==operationId)editorPendingSaves.delete(operationId);if(currentEditor(session,target)){$('edit-error').textContent=error.message;editingTarget.revision=workspace?.revision;}}finally{if(session===editorGeneration){editorSubmission=null;$('edit-save').disabled=false;}}
 });
-function workflowMeta(step){return toolCatalog.find(item=>item.name===step.tool);}
-function workflowAvailability(step){
-  const meta=workflowMeta(step);if(!toolCatalogReady)return {available:false,reason:toolCatalogError||'Checking available actions…',meta};
-  if(!meta)return {available:false,reason:capabilityStatus?.ready===false?'Installed actions are unavailable. Your saved step is preserved.':'This saved action is not installed. Your step is preserved.',meta};
-  if(meta.workflowAllowed!==true)return {available:false,reason:'This action is not available in workflows.',meta};
-  if(step.capability&&(meta.capabilityId!==step.capability.id||meta.version!==step.capability.version||meta.hash!==step.capability.hash))return {available:false,changed:true,reason:'This tool changed. Review the values, then choose Use updated action.',meta};
-  return {available:true,meta};
-}
-function schemaType(schema){return Array.isArray(schema?.type)?schema.type.find(type=>type!=='null'):schema?.type;}
-function validateWorkflowValue(value,schema={},label='Value',depth=0){
-  if(depth>8)throw new Error(label+' has too many nested details.');
-  if(value===null&&Array.isArray(schema.type)&&schema.type.includes('null'))return;
-  if(Array.isArray(schema.enum)&&!schema.enum.some(item=>JSON.stringify(item)===JSON.stringify(value)))throw new Error('Choose a listed value for '+label+'.');
-  const type=schemaType(schema);
-  if(type==='string'){if(typeof value!=='string')throw new Error(label+' must be text.');if(value.length<(schema.minLength??0)||value.length>(schema.maxLength??24000))throw new Error('Check the length of '+label+'.');}
-  else if(type==='number'||type==='integer'){if(typeof value!=='number'||!Number.isFinite(value)||(type==='integer'&&!Number.isInteger(value)))throw new Error(label+' must be '+(type==='integer'?'a whole number.':'a number.'));if(schema.minimum!==undefined&&value<schema.minimum||schema.maximum!==undefined&&value>schema.maximum||schema.exclusiveMinimum!==undefined&&value<=schema.exclusiveMinimum||schema.exclusiveMaximum!==undefined&&value>=schema.exclusiveMaximum)throw new Error(label+' is outside its allowed range.');}
-  else if(type==='boolean'){if(typeof value!=='boolean')throw new Error('Choose Yes or No for '+label+'.');}
-  else if(type==='array'){if(!Array.isArray(value))throw new Error(label+' must be a list.');if(value.length<(schema.minItems??0)||value.length>(schema.maxItems??1000))throw new Error('Check the number of items in '+label+'.');for(const item of value)validateWorkflowValue(item,schema.items||{},label+' item',depth+1);}
-  else if(type==='object'||schema.properties){if(!value||typeof value!=='object'||Array.isArray(value))throw new Error(label+' must contain details in braces.');const properties=schema.properties||{};for(const key of schema.required||[])if(value[key]===undefined||(typeof value[key]==='string'&&!value[key].trim()))throw new Error('Add '+humanLabel(key)+' for '+label+'.');for(const[key,item]of Object.entries(value)){if(!Object.hasOwn(properties,key)&&schema.additionalProperties===false)throw new Error(label+' contains an unsupported field: '+humanLabel(key)+'.');if(Object.hasOwn(properties,key))validateWorkflowValue(item,properties[key],humanLabel(key),depth+1);else if(schema.additionalProperties&&typeof schema.additionalProperties==='object')validateWorkflowValue(item,schema.additionalProperties,humanLabel(key),depth+1);}}
-  if(JSON.stringify(value)?.length>80000)throw new Error(label+' is too large.');
-}
-function workflowRawFields(step){let fields=workflowFieldDrafts.get(step);if(!fields){fields=new Map();workflowFieldDrafts.set(step,fields);}return fields;}
-function validateWorkflowSteps(steps){
-  if(!steps.length)throw new Error('Add at least one step.');
-  for(const[index,step]of steps.entries()){
-    if(!step.tool)throw new Error('Choose an action for step '+(index+1)+'.');
-    const state=workflowAvailability(step);if(!state.available)throw new Error('Step '+(index+1)+': '+state.reason);
-    for(const draft of workflowRawFields(step).values())if(draft.error)throw new Error('Step '+(index+1)+': '+draft.error);
-    validateWorkflowValue(step.arguments||{},state.meta.parameters,'step '+(index+1));
-  }
-}
+function workflowAvailability(step){return workflowEditor.availability(step);}
+function validateWorkflowSteps(steps){return workflowEditor.validateSteps(steps);}
 function savedWorkflowRunIds(){const saved=readStored('pendingWorkflowRuns',[]),map=new Map();if(Array.isArray(saved))for(const item of saved.slice(0,100))if(item&&CONVERSATION_ID.test(item.workflowId)&&CONVERSATION_ID.test(item.operationId))map.set(item.workflowId,item.operationId);return map;}
 function syncPendingWorkflowRuns(){for(const[id,operationId]of savedWorkflowRunIds())if(!pendingWorkflowRuns.has(id))pendingWorkflowRuns.set(id,operationId);}
 function rememberWorkflowRun(id,operationId){pendingWorkflowRuns.set(id,operationId);const saved=savedWorkflowRunIds();saved.set(id,operationId);store('pendingWorkflowRuns',[...saved].map(([workflowId,operationId])=>({workflowId,operationId})));}
@@ -906,46 +879,10 @@ async function runWorkflow(flow){
   }catch(error){$('workflow-error').textContent=operationId?'The last run could not be confirmed. Check last run reads the same saved request without starting another. '+error.message:error.message;}
   finally{runningWorkflows.delete(target.id);renderWorkflows();}
 }
-function openWorkflow(flow=null){workflowEditorGeneration++;workflowEditingId=flow?.id||null;workflowEditingRevision=workspace?.revision;$('workflow-name').value=flow?.name||'';$('workflow-description').value=flow?.description||'';$('workflow-enabled').checked=flow?.enabled!==false;workflowDraft=clone(flow?.steps||[{tool:'',arguments:{}}]);workflowOriginalSteps=clone(flow?.steps||[]);$('workflow-form-error').textContent='';$('workflow-save').disabled=false;renderWorkflowSteps();showDialog('workflow-dialog');void refreshToolCatalog({quiet:true});}
-function selectedWorkflowStep(tool,args={}){const meta=toolCatalog.find(item=>item.name===tool);return{tool,arguments:clone(args),...(meta?.kind==='capability'?{capability:{id:meta.capabilityId,version:meta.version,hash:meta.hash}}:{})};}
-function reconcileWorkflowSave(operationId,result){
-  const binding=workflowPendingSaves.get(operationId);if(!binding)return false;workflowPendingSaves.delete(operationId);if(binding.generation!==workflowEditorGeneration||binding.workflowId!==workflowEditingId)return false;const expectedId=binding.workflowId||operationId,saved=result.workflow?.id===expectedId?result.workflow:result.workspace?.workflows.find(flow=>flow.id===expectedId);if(!saved||!CONVERSATION_ID.test(saved.id))return false;workflowEditingId=saved.id;if(Array.isArray(saved.steps))workflowOriginalSteps=clone(saved.steps);workflowEditingRevision=workspace.revision;return true;
-}
-function workflowFormData(){return{name:$('workflow-name').value.trim(),description:$('workflow-description').value.trim(),enabled:$('workflow-enabled').checked,steps:clone(workflowDraft)};}
-function replaceWorkflowArgument(step,name,value){const args={...(step.arguments||{})};if(value===undefined)delete args[name];else args[name]=value;step.arguments=args;}
-function renderWorkflowField(step,index,name,schema,required){
-  const label=element('label','workflow-field field-label'),title=schema.title||humanLabel(name);label.append(element('span','',title+(required?'':' · optional')));
-  const type=schemaType(schema),value=step.arguments?.[name],draft=workflowRawFields(step).get(name);let field;
-  if(Array.isArray(schema.enum)&&schema.enum.every(item=>item===null||['string','number','boolean'].includes(typeof item))){field=element('select');const empty=element('option','',required?'Choose a value':'Not set');empty.value='';field.append(empty);schema.enum.forEach((item,position)=>{const option=element('option','',String(item));option.value=String(position);field.append(option);});const position=schema.enum.findIndex(item=>JSON.stringify(item)===JSON.stringify(value));field.value=position<0?'':String(position);field.addEventListener('change',()=>replaceWorkflowArgument(step,name,field.value===''?undefined:clone(schema.enum[Number(field.value)])));}
-  else if(type==='boolean'){field=element('select');for(const[choice,text]of[['',required?'Choose Yes or No':'Not set'],['true','Yes'],['false','No']]){const option=element('option','',text);option.value=choice;field.append(option);}field.value=typeof value==='boolean'?String(value):'';field.addEventListener('change',()=>replaceWorkflowArgument(step,name,field.value===''?undefined:field.value==='true'));}
-  else if(type==='array'||type==='object'||schema.properties||!['string','number','integer'].includes(type)){
-    field=element('textarea');field.rows=4;field.maxLength=24000;field.value=draft?.text??(value===undefined?'':JSON.stringify(value,null,2));field.placeholder=type==='array'?'[ ]':'{ }';const error=element('small','workflow-field-error',draft?.error||'');
-    field.addEventListener('input',()=>{let message='';try{if(!field.value.trim()){replaceWorkflowArgument(step,name,undefined);}else{const parsed=JSON.parse(field.value);validateWorkflowValue(parsed,schema,title);replaceWorkflowArgument(step,name,parsed);}}catch(problem){message=problem instanceof SyntaxError?'Use a valid list or details with quoted field names.':problem.message;}workflowRawFields(step).set(name,{text:field.value,error:message});error.textContent=message;});label.append(field,element('small','workflow-field-hint',type==='array'?'Enter a list in square brackets.':'Enter details in braces, with quoted field names.'),error);
-  }else{
-    field=element(type==='string'&&(schema.maxLength??0)>500?'textarea':'input');if(type==='number'||type==='integer'){field.type='number';field.step=type==='integer'?'1':'any';if(schema.minimum!==undefined)field.min=String(schema.minimum);if(schema.maximum!==undefined)field.max=String(schema.maximum);field.value=draft?.text??(value===undefined?'':String(value));}
-    else{field.maxLength=schema.maxLength??24000;field.value=value??'';if(field.tagName.toLowerCase()==='textarea')field.rows=3;}
-    field.addEventListener('input',()=>{if(type==='number'||type==='integer'){const number=field.value.trim()===''?undefined:Number(field.value),error=number!==undefined&&!Number.isFinite(number)?'Enter a valid number.':'';workflowRawFields(step).set(name,{text:field.value,error});if(!error)replaceWorkflowArgument(step,name,number);}else replaceWorkflowArgument(step,name,field.value===''&&!required?undefined:field.value);});
-  }
-  field.setAttribute('aria-label',title+' for step '+(index+1));field.dataset.argument=name;if(![...label.childNodes].includes(field))label.append(field);if(schema.description)label.append(element('small','workflow-field-hint',schema.description));return label;
-}
-function renderWorkflowSteps(){
-  const list=$('workflow-steps');list.replaceChildren();$('workflow-catalog-status').textContent=toolCatalogError||(!toolCatalogReady?'Checking available actions…':capabilityStatus?.ready===false?capabilityStatus.message||'Installed actions are unavailable.':'Choose an action, then fill in its values.');
-  const eligible=toolCatalog.filter(item=>item.workflowAllowed===true);
-  workflowDraft.forEach((step,index)=>{const state=workflowAvailability(step),row=element('div','workflow-step'),header=element('div','workflow-step-header'),select=element('select');select.setAttribute('aria-label','Action for step '+(index+1));const empty=element('option','','Choose an action');empty.value='';select.append(empty);
-    for(const meta of eligible){const option=element('option','',meta.title||humanLabel(meta.name));option.value=meta.name;select.append(option);}if(step.tool&&!eligible.some(item=>item.name===step.tool)){const option=element('option','',toolLabel(step.tool)+' · unavailable');option.value=step.tool;select.append(option);}select.value=step.tool||'';select.addEventListener('change',()=>{workflowDraft[index]=selectedWorkflowStep(select.value);renderWorkflowSteps();});header.append(element('span','',String(index+1).padStart(2,'0')),select,button('Remove','quiet-button',()=>{workflowDraft.splice(index,1);renderWorkflowSteps();}));row.append(header);
-    if(step.tool&&!state.available){row.append(element('p','workflow-unavailable',state.reason));if(state.changed){row.append(button('Use updated action','secondary-button',()=>{workflowDraft[index]=selectedWorkflowStep(step.tool,step.arguments||{});renderWorkflowSteps();}));}}
-    if(state.meta?.parameters){const schema=state.meta.parameters,optional=element('details','workflow-optional');optional.append(element('summary','','More options'));let optionalCount=0;for(const[name,property]of Object.entries(schema.properties||{})){const required=(schema.required||[]).includes(name),field=renderWorkflowField(step,index,name,property,required);if(required)row.append(field);else{optionalCount++;optional.append(field);if(Object.hasOwn(step.arguments||{},name))optional.open=true;}}if(optionalCount)row.append(optional);}
-    else if(step.tool){const details=element('details','workflow-saved-values');details.append(element('summary','','Saved values'),element('pre','',JSON.stringify(step.arguments||{},null,2)));row.append(details);}
-    list.append(row);
-  });
-}
-$('new-workflow').addEventListener('click',()=>openWorkflow());$('add-workflow-step').addEventListener('click',()=>{if(workflowDraft.length>=12){toast('Keep this workflow to 12 steps.');return;}workflowDraft.push({tool:'',arguments:{}});renderWorkflowSteps();});
-$('workflow-form').addEventListener('submit',async event=>{
-  event.preventDefault();const session=workflowEditorGeneration,target={id:workflowEditingId,revision:workflowEditingRevision},draft=workflowFormData(),operationId=crypto.randomUUID(),encoded=JSON.stringify(draft),stepsChanged=!target.id||JSON.stringify(draft.steps)!==JSON.stringify(workflowOriginalSteps);$('workflow-form-error').textContent='';$('workflow-save').disabled=true;
-  try{await refreshToolCatalog();if(session!==workflowEditorGeneration)return;if(JSON.stringify(workflowFormData())!==encoded)throw new Error('Your draft changed while checking actions. Review it, then save again.');if(target.revision!==workspace.revision)throw new Error('Your workspace changed. Review your draft, then save again.');for(const[index,step]of workflowDraft.entries())for(const raw of workflowRawFields(step).values())if(raw.error)throw new Error('Step '+(index+1)+': '+raw.error);if(stepsChanged)validateWorkflowSteps(workflowDraft);
-    workflowPendingSaves.set(operationId,{generation:session,workflowId:target.id});const {steps,...metadata}=draft,result=await workspaceOperation('saveWorkflow',{...(target.id?{workflowId:target.id}:{}),...metadata,...(stepsChanged?{steps}: {})},{operationId});reconcileWorkflowSave(operationId,result);if(session!==workflowEditorGeneration)return;if(JSON.stringify(workflowFormData())===encoded)$('workflow-dialog').close();else $('workflow-form-error').textContent='The saved version is confirmed. Your newer draft is still here.';
-  }catch(error){if(pendingWorkspaceRequest?.operationId!==operationId)workflowPendingSaves.delete(operationId);if(session===workflowEditorGeneration){$('workflow-form-error').textContent=error.message;workflowEditingRevision=workspace?.revision;}}finally{if(session===workflowEditorGeneration)$('workflow-save').disabled=false;}
-});
+function openWorkflow(flow=null){return workflowEditor.open(flow);}
+function renderWorkflowSteps(){return workflowEditor.render();}
+function reconcileWorkflowSave(operationId,result){return workflowEditor.reconcileSave(operationId,result);}
+function getWorkflowDraft(){return workflowEditor.getDraft();}
 function renderProviders(){
   const picker=$('provider-select');picker.replaceChildren();
   if(!providers.length){const option=element('option','','No AI connected');option.value='';picker.append(option);}
@@ -1362,7 +1299,7 @@ $('read-aloud').addEventListener('change',()=>{$('settings-read-aloud').checked=
 document.addEventListener('visibilitychange',()=>{if(document.hidden){setVoiceVisible(false);if(voicePipeline||recording||microphoneOpening)cancelTurn(false,{preserveVoice:true});else{disableHandsFree();stopSpeech();}$('provider-key').value='';}else{void setVoiceVisible(true);void checkService();void refreshConversations({initialize:true,quiet:true});}});
 window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;projectFilesUI?.close();buildContinuationUI?.close();buildAttemptsUI?.close();providerChecksUI?.close();workspaceBackupsUI?.close();workflowHistoryUI?.close();for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
 window.addEventListener('pageshow',event=>{if(!event.persisted)return;destroyed=false;setBusy(false);setState('idle');updateVoiceHelp();void setVoiceVisible(true);void checkService();void loadExtensions();});
-initProjectFiles();initBuildContinuationUI();initBuildAttemptsUI();initProviderChecksUI();initWorkspaceBackups();initWorkflowHistory();initNativeShell();initVoiceSession();renderWindowContext();renderProjectContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
+initWorkflowEditor();initProjectFiles();initBuildContinuationUI();initBuildAttemptsUI();initProviderChecksUI();initWorkspaceBackups();initWorkflowHistory();initNativeShell();initVoiceSession();renderWindowContext();renderProjectContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
 void checkService();void loadExtensions();
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;renderFocus();if(currentView==='tasks')refreshTaskClock();if(currentView==='build')void buildContinuationUI?.refresh();if(jobs.some(job=>ACTIVE_JOBS.has(job.status))||currentView==='build')void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});},2000);
 setInterval(()=>{if(!document.hidden&&!destroyed&&!operationBusy&&!runtimeReconnectPromise)void refreshWorkspace().catch(error=>{$('connection-label').textContent=error.message;});},5000);
