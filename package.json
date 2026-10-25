@@ -1,15 +1,17 @@
 {
   "name": "companion-math",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
-  "description": "A small desktop companion for understanding mathematics.",
+  "description": "A personal productivity assistant with connected AI models and a source-editing feature builder.",
   "main": "electron/main.cjs",
   "scripts": {
-    "start": "electron .",
+    "start": "node server/companion-host.mjs",
+    "desktop": "electron .",
     "preview": "node scripts/preview.mjs",
-    "shared": "node server/room-server.mjs",
+    "shared": "node server/companion-host.mjs",
     "test": "node --test tests/*.test.mjs tests/*.test.cjs",
-    "check": "node --check src/app.mjs && node --check src/group.mjs && node --check src/room.mjs && node --check src/assistant.mjs && node --check src/core/assistant.mjs && node --check server/room-server.mjs && node --check server/shared-server.mjs && node --check server/assistant-api.mjs && node --check electron/main.cjs && node --check electron/preload.cjs",
+    "check": "node scripts/check.mjs",
+    "mcp": "node server/mcp-server.mjs",
     "package": "node scripts/package.mjs"
   },
   "dependencies": { "pdfjs-dist": "6.4.299" },

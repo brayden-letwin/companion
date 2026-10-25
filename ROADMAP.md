@@ -1,98 +1,83 @@
-# Companion development roadmap
+# Companion roadmap
 
-Companion is now a runnable early Windows prototype. [README.md](README.md) describes setup and current behavior. [DESIGN.md](DESIGN.md) preserves the original vision, including features that remain aspirational.
+Companion's current direction is a minimal general productivity assistant in the spirit of Jarvis: talk to it, get real work done, and let it build missing capabilities. The earlier math reader and group discussion work remain available as optional views.
 
-The original estimate was **8–10 focused engineering hours**, conditional on API access, microphone permission, internet access, and a suitable paper. This was a planning target, not a delivery guarantee or evidence that all original requirements are complete. The implementation uses plain JavaScript ES modules and an included PDF reader to keep the first scope practical.
+[README.md](README.md) explains the running app. [docs/PRODUCT_DIRECTION.md](docs/PRODUCT_DIRECTION.md) preserves the full requirement history and distinguishes implementation from evidence. An implemented item below is not a declaration that every live provider, human voice, operating condition, or original goal has been validated.
 
-## Implemented in the prototype
+## Implemented foundation
 
-Checked items mean the feature has an implementation. They do not establish that all hardware, live-provider, accessibility, and distribution checks have passed.
+- [x] One main Windows launcher opens Today without a group account.
+- [x] Minimal dark workspace with persistent tasks, notes, workflows, activity, and visible focus state.
+- [x] Direct task/note editing, completion/reopening, note archiving, and search.
+- [x] Real allowlisted tools read and change the saved workspace; responses carry actual receipts.
+- [x] Explicit reusable workflows execute supported actions in order and report completed steps or failure.
+- [x] Revision checks preserve drafts; uncertain workspace sends can confirm the same operation receipt.
+- [x] Codex integration uses the existing CLI sign-in and configured model.
+- [x] GPT API, Claude API, compatible API, and local Ollama adapters with model/provider selection.
+- [x] Redacted provider metadata; Windows DPAPI-protected keys outside source; no keys in browser storage.
+- [x] Separate local transcription, bounded toggle-to-talk, opt-in pause-to-send, cancellation, and offline read-aloud.
+- [x] Feature requests create persisted coding jobs with actual status events, source candidates, hashes, diffs, and check output.
+- [x] Fixed regression checks, bounded source context, module/feature checks, and protected-change review.
+- [x] Automatic activation for passing ordinary changes when enabled; explicit activation for protected changes and deletions.
+- [x] Source-conflict protection, retained backups, rollback, and interrupted-promotion recovery states.
+- [x] Runtime feature registration adds browser panels through the host action API.
+- [x] External AI clients have a source/patch/build interface through the local API and MCP facade; connecting and testing each client is separate work.
 
-- [x] Electron reader and always-on-top corner control: 360 × 82 collapsed, 360 × 520 expanded.
-- [x] Open both windows on launch; closing the reader hides it, while closing the corner quits.
-- [x] Local PDFs up to 10 MB and 20 pages, with selectable text and page navigation.
-- [x] Hover/selection context inside the included reader, retained when moving to the corner.
-- [x] Passage pinning when a question starts; cancellation and rejection of stale responses.
-- [x] A labeled, prepared walkthrough for the original sample when AI is not configured.
-- [x] Reviewable familiarity levels for four concepts, saved locally with a reset control.
-- [x] Optional API-backed questions with a configurable reasoning model and no model-operated PC tools.
-- [x] Local Qwen3.5 inference via Ollama, separate offline Whisper speech, and local/cloud connection labels.
-- [x] Local mode with no cloud fallback, installed-model validation, and a launcher for isolated services.
-- [x] A separate BF16 LoRA training workflow with original teaching examples and held-out before/after questions. Deployment requires review; configuring a model alias is not training.
-- [x] Toggle-to-talk, transcription on submission, a 60-second recording limit, and optional device read-aloud.
-- [x] Visible cancellation plus global recording and stop shortcuts, with unavailable-shortcut reporting.
-- [x] Passage enlargement with paper/page metadata and a six-concept local glossary.
-- [x] Single-variable numerical plots through a restricted parser, bounded inputs/sampling, and no `eval`.
-- [x] Source-linked localStorage notes, exact duplicate prevention, removal, and Markdown export.
-- [x] API credentials in the main process, validated renderer requests, and limited permissions/navigation.
-- [x] Local browser preview and automated math, tutor-state, and mocked-provider tests.
-- [x] Windows unpacked packaging that excludes private `.env` files and refuses to overwrite an existing build.
-- [x] A local Group discussion design demo with passage-linked questions, simulated contributors, contribution revisions, mathematical review, and resolution/reopening.
-- [x] A separate local shared room with administrator setup, member accounts, expiring one-use invitations, and session-derived authorship.
-- [x] SQLite persistence for accounts, sessions, invitations, discussions, and operation receipts, with atomic updates and restart checks.
-- [x] Updates between sessions, room-revision conflicts that preserve drafts, and duplicate-send protection.
-- [x] Real author/reviewer constraints, revision-specific reviews, source snapshots, linked resolutions, and reasoned reopening.
+The app can edit its own application source. It does not instantly acquire arbitrary capabilities merely because a request was accepted. New backend tools require validated source changes, protected review, and a server restart before they can run.
 
-## Personal assistant workspace (0.5)
+## Verification in progress
 
-- [x] A separate browser workspace with a connected reading map, source cards, a voice control, and visible request state.
-- [x] Local model and transcription endpoints with independent personal sessions, exact-origin/CSRF checks, bounded input, and scoped cancellation.
-- [x] An authored sample concept map with exact source passages; selected PDF passages appear without invented concept links.
-- [x] Typed or transcribed requests for explanations, local plots, source navigation, and personal note saving/search.
-- [x] Explicit familiarity preferences, frozen question context, and AI-draft labels with captured source text.
-- [x] Opt-in hands-free turn ending and offline device read-aloud. Microphone hardware, noise conditions, and automatic turn ending still need human testing.
-- [x] One main launcher starts the installed local services and opens the assistant; the shared room remains separate.
+- [x] Existing Codex / ChatGPT CLI sign-in detected; a real completion succeeded on the development PC.
+- [x] Automated store/tool, model-router/provider, feature-builder, and preserved reader/group suites pass their targeted checks.
+- [x] Frontend state checks cover exact retry receipts, failed-tool labels, full detail loading from lightweight build lists, and frozen voice provider selection/cancellation.
+- [x] Record live Codex task/note actions and restart persistence, a two-step saved workflow, and a real generated feature’s build/activation/UI/rollback in an isolated copy.
+- [x] Verify managed worker PID changes and live UI reconnection with workspace data preserved.
+- [ ] Validate Claude with a real user-owned Anthropic API account.
+- [ ] Validate OpenAI API and a custom compatible endpoint with real account access.
+- [ ] Test the MCP facade from real external Codex and Claude clients; verify their action receipts and source-change lifecycle.
+- [ ] Check human microphone capture, permission denial, device changes, pauses, noisy rooms, and read-aloud interruption.
+- [ ] Exercise longer sessions, multiple tabs, keyboard-only use, Windows scaling, and narrow screens.
+- [ ] Recheck a cold launch and repeated launch after current server/source changes; document server-restart behavior clearly.
 
-These functions act inside Companion. Source-map connections are prepared reading aids, not a learned knowledge graph. Local model checks found mathematical errors; the current build does not establish proof reliability.
+Provider protocol tests use mocks unless a dated QA entry says otherwise. A saved API key is configuration, not proof that a live account or model can complete requests.
 
-## Group reading pilot
+## Next: complete the general assistant loop
 
-[DISCUSSION_FLOW.md](DISCUSSION_FLOW.md) describes the workflow and its remaining design proposals. The `/group.html` demo remains a single-device simulation. The new shared room at `127.0.0.1:4174/room.html` has real local member accounts, server storage, updates between sessions, source snapshots, and attributed history. It supports up to 50 members around one original sample paper, using Node 24.15 or newer.
+- [x] Manage server-worker restarts, bounded recovery, and browser reconnection through the normal launcher.
+- [ ] Make full host-code relaunch/migration as clear and recoverable as the worker restart path.
+- [ ] Expose newly registered tool capabilities consistently to chat, workflows, extensions, and external AI clients.
+- [ ] Add acceptance checks for generated interactions, not just syntax and module loading.
+- [ ] Make missing-capability requests produce useful, scoped plans, with progress that reflects actual work.
+- [ ] Add project organization, better task scheduling, and durable conversation/context where real use needs them.
+- [ ] Improve workflow editing and failure recovery while keeping each action's outcome visible.
+- [ ] Add export, backup, restore, and migration for productivity data and build history.
+- [ ] Keep the main interface simple as new tools are added; test whether people can find and use them by voice.
 
-The server binds only to loopback, so its invitation links work in browsers on the same PC. A hosted service is still needed for colleagues on other computers. Personal familiarity and notes remain separate. No university service or endorsement is implied.
+## Broader original goals remain open
 
-- [ ] Choose the first actual paper and confirm permission to share its source text.
-- [ ] Add paper import, source-version management, and anchor correction when a source changes.
-- [ ] Choose hosting, a domain, HTTPS, backups, and the group's membership policy.
-- [ ] Add account recovery and decide whether to integrate university sign-in.
-- [ ] Check browser behavior with multiple human members, wider accessibility needs, and longer sessions.
-- [ ] Add private voice drafting and explicit sharing to the group workflow.
-- [ ] Evaluate whether shared AI drafts are useful before adding a model connection.
+- [ ] A small native corner or tray assistant for the general workspace, with reliable global voice controls and immediate takeover.
+- [ ] A deliberate voice bridge into an existing Codex development conversation, if the user still wants that exact route.
+- [ ] Multiple independent work streams under voice direction, with clear status and retained intent across them.
+- [ ] User-selected context from other windows or screen regions, without claiming to infer private thought from a pointer pause.
+- [ ] Intent-driven actions in external applications through explicit adapters, target checks, and verified outcomes.
+- [ ] Calendar, mail, files, browser, and other useful integrations with real account setup and action permissions.
+- [ ] Natural interruption and broader continuous voice modes after the current opt-in flow is tested with people.
+- [ ] A tested installation, updates, signing, recovery, and distribution path beyond this configured development PC.
 
-## Verification before relying on live use
+These are part of the product direction. Today's local workspace tools do not constitute general PC control, and a generic compatible API setting does not establish that every AI account or product is connected.
 
-Local inference has completed real passage questions, and local transcription has processed synthetic audio. OpenAI calls and native microphone capture remain unverified. Browser preview checks do not establish native voice behavior. See QA.md for concrete results and observed mathematical mistakes.
+## Optional math and group work
 
-- [ ] Configure a private API key and confirm project access to both models.
-- [ ] Submit a real spoken mathematical question; check transcript accuracy, the pinned passage, and the explanation.
-- [ ] Check microphone denial/device changes, short recordings, the time limit, API failures, and synthetic voices on the target PC.
-- [ ] Verify immediate cancellation during recording, transcription, reasoning, and read-aloud; confirm late results stay suppressed.
-- [ ] Evaluate at least three real math passages with a mathematically informed reviewer, including ambiguous notation and a false premise.
-- [ ] Check familiarity edits and “simpler” follow-ups without inferring ability from hesitation or pointer behavior.
-- [ ] Exercise equations, multiple columns, rotated pages, unreadable text, and page changes in real PDFs.
-- [ ] Confirm native reader/corner coordination, keyboard access, shortcuts, and Windows display scaling.
-- [ ] Confirm preferences and notes persist after a native restart; inspect a Markdown export and its source metadata.
-- [ ] Launch the unpacked build outside the development directory, without credentials and with a private `.env` beside the executable.
-- [ ] Record concrete QA results and unresolved failures before describing the build as ready for daily use.
+The original reader, source selection, explicit familiarity settings, plots, local notes, native corner, and local shared reading room remain separate. Their detailed instructions are in [docs/LEGACY_READER.md](docs/LEGACY_READER.md); [DISCUSSION_FLOW.md](DISCUSSION_FLOW.md) preserves the discussion design.
 
-## Next implementation improvements
+- [ ] Choose a real group paper and establish source-sharing permissions.
+- [ ] Add group paper uploads, source versions, reliable anchors, and source correction.
+- [ ] Choose hosting, HTTPS, membership policy, account recovery, and operational backups before remote group use.
+- [ ] Test collaboration with actual group members and wider accessibility needs.
+- [ ] Add private voice drafting and evaluate whether shared AI drafts help discussion.
+- [ ] Improve PDF math context, equation rendering, OCR, and long-paper retrieval if reading returns to the main scope.
+- [ ] Evaluate mathematical explanation quality with knowledgeable reviewers before relying on proof claims.
 
-- [ ] Improve PDF equation context and provide explicit corrections for incorrectly extracted passages.
-- [ ] Expand editable concept familiarity and explanation preferences beyond the four initial settings.
-- [ ] Add more robust note storage, recovery, and backup behavior.
-- [ ] Add validated source navigation and exact reference matching beyond showing the current paper/page.
-- [ ] Improve mathematical answer rendering and handling of unsupported action requests.
-- [ ] Add targeted integration checks for reader, recording, and cross-window behavior where manual QA reveals risk.
-- [ ] Review installer, signing, updates, and dependency maintenance before wider distribution.
+The existing local model made mathematical errors. The separate LoRA pilot saved real adapter weights but failed quality review and was not activated. Those results remain in [training/RESULTS.md](training/RESULTS.md).
 
-## Later product vision
-
-- [ ] External PDF viewer or user-selected screen-region context, with coordinate checks and explicit capture controls.
-- [ ] OCR, equation-aware parsing, long-paper retrieval, and LaTeX source import.
-- [ ] Optional quiet AI suggestions that do not speak or act merely because the pointer pauses.
-- [ ] Wake words, natural interruption, and broader recording modes after the opt-in hands-free flow is tested with human speakers.
-- [ ] Symbolic algebra with domain-aware checks and richer mathematical diagrams.
-- [ ] Tested notebook, LaTeX editor, and other math-application adapters.
-- [ ] Broader PC actions with target-window checks, clear intent, verified outcomes, and immediate user takeover.
-
-These are future capabilities. The current app follows text within its own reader and performs its own math actions; it does not watch arbitrary windows or control other programs.
+The original one-day estimate was a development target, not a delivery guarantee or evidence that the full assistant, computer-control, collaboration, and voice-development goals are complete.

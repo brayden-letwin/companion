@@ -1,30 +1,49 @@
 COMPANION — START HERE
 
-1. Double-click Start Companion.cmd in the Companion folder.
-   In the parent outputs folder, Open Companion.cmd opens the same app.
-   The launcher starts the installed local math and speech services.
+1. Double-click Start Companion.cmd in this folder.
+   It starts Companion and opens Today in your browser.
+   No reading-group account is needed.
 
-2. Choose a source in the reading map, or open a PDF.
+2. Type what you want to get done.
+   Try: Add a task to plan my week.
+        Save a note: the next meeting needs an agenda.
+        Start 25 minutes of focus time.
+   You can also edit Tasks and Notes directly.
 
-3. Click the microphone or type a request.
-   Try: Explain this. Plot x^2. Save note: my observation.
-   Use Stop to end the current request.
+3. Use the AI selector at the top.
+   This development PC has a working Codex / ChatGPT sign-in.
+   Settings can connect GPT API, Claude API, a compatible API, or local Ollama.
+   Enter API keys only in the app's password field, never in chat.
+
+VOICE
+Tap the mic to start; tap again to finish. Cancel stops the current request.
+Hands-free is optional and turns off when you switch tabs.
+Voice needs the local transcription service. Typing still works without it.
+
+MISSING A TOOL?
+Open Build a feature and describe what you need.
+The app creates actual source changes, runs checks, and shows the diff.
+Ordinary verified features may activate automatically. Protected changes need
+review and Activate feature. Build history also offers rollback.
+A queued or failed build is not an installed feature.
+Reviewed server-worker updates restart and reconnect under the normal launcher.
+Changing the host program itself needs its owning host stopped and relaunched;
+a browser refresh cannot apply host code. Settings can restart a managed worker.
 
 NEXT TIME
-Double-click the same launcher. No group account is needed for the assistant.
-Your personal notes and familiarity preferences stay in this browser.
+Double-click the same launcher. Your tasks, notes, workflows, and build history
+are saved on this computer, outside the source repository.
+The default address is http://127.0.0.1:4174/assistant.html.
 
-This PC is already configured. No installation or terminal commands are needed.
-A fresh checkout needs Node.js 24.15 or newer. Live questions and voice also need
-the local AI setup in README.md. No cloud API key is needed.
+A fresh checkout needs Node.js 24.15 or newer and an AI connection for chat.
+Codex uses its existing CLI sign-in; API providers need your own key and access.
+Claude and other API-key accounts have not been live-tested on this PC yet.
+Settings → Connect AI tools shows MCP configuration to copy into another client;
+it does not change that client’s settings automatically.
 
-CURRENT PILOT
-The app runs on this PC. It includes an original sample paper and can open a PDF.
-Voice commands act inside Companion: source navigation, math explanations,
-plots and notes. The microphone starts only when you enable it.
+EARLIER READING TOOLS
+Reading room and Group room remain secondary links. Their existing discussion
+accounts and history stay separate. Access from other PCs needs hosting.
 
-SHARED READING
-Choose Shared room for the separate group discussion area. Its existing accounts,
-invitations and discussions stay available. Remote group access needs hosting.
-
-See README.md for setup, development and verification details.
+See README.md for connections, setup, data, and feature-building details.
+See docs/PRODUCT_DIRECTION.md for the full goal and unfinished capabilities.

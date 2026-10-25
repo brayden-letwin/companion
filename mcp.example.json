@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "companion": {
+      "command": "node",
+      "args": ["C:/path/to/companion/server/mcp-server.mjs"],
+      "env": {
+        "COMPANION_URL": "http://127.0.0.1:4174"
+      }
+    }
+  }
+}

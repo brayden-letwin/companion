@@ -1,5 +1,38 @@
 # Prototype verification — 24 October 2026
 
+## General productivity workspace and source-building assistant (0.6.0)
+
+These checks used disposable workspace data and an isolated source copy where noted. They did not create a human reading-group account, record a human microphone, or enter a user API key.
+
+### Live Codex actions and persistence
+
+- The installed Codex CLI detected its existing ChatGPT sign-in. A real completion succeeded in about three seconds; this is a single observation, not a latency guarantee.
+- A real Codex chat request created the high-priority task “Review Companion productivity flow” and the exact “QA scratch” note. Actual tool receipts and server state matched the requested changes.
+- The QA workspace survived moving the server from port 4190 to 4192 with the same private data directory. The task and note remained saved after restart.
+- The UI saved “QA morning reset” with a create-task step and a save-note step. Running it reported both actual completed steps; task and note counts each advanced from one to two. The persisted state held revision 5, two tasks, two notes, and one workflow.
+
+### Real generated feature, UI behavior, and rollback
+
+- The first live Codex feature attempt selected relevant source in about 14 seconds, then hit the former 180-second generation timeout. It did not activate a feature. Build generation was given a separate 600-second budget before retrying.
+- The retry, job `01d0c1ec-cf9b-4691-8cfe-8d4403f2fa2f`, generated actual time-zone module/registration/test source in an isolated application copy. All five recorded checks passed, and the routine feature auto-activated. This was generated source, not a prefilled example panel or a mocked model response.
+- On the isolated UI at port 4193, the registered Timezones module mounted and its live clock advanced. Setting UTC to `2026-03-08T10:00` through normal picker input events displayed Seattle `03:00 · UTC−07` and London `10:00 · UTC+00`, including the Seattle daylight-saving transition. The browser automation's raw value fill alone did not trigger input; a normal arrow-key input event did, and the rendered result was checked.
+- The same builder job was rolled back through its real rollback operation. Its status became `rolled_back`, the previous manifest was restored, and a browser reload removed the Timezones navigation entry and module. The QA feature was checked in that disposable copy, not silently installed into the user's primary source checkout.
+
+### Managed runtime and frontend state
+
+- Managed HTTP restart on QA port 4192 replaced worker 40776 with 26688 while host 35376 remained. The workspace kept revision 5, two tasks, two notes, and one workflow.
+- The live Settings restart then replaced worker 26688 with 14860. The page displayed “Companion restarted and reconnected,” and the provider selector, microphone, and send controls re-enabled. A refresh-button disabled-state oversight found during that check was repaired. A second live browser restart with the final UI confirmed that Refresh connections also re-enabled.
+- Targeted VM checks against the actual frontend, using fake DOM/network/media objects, passed for exact receipt retry after a lost save response, failed-tool labels, selected full build-detail loading, provider capture before microphone permission, late track cleanup, PID-change-only restart confirmation, standalone restart instructions, supervisor rollback wording, preserved unsent drafts, and clipboard writes only after an explicit MCP Copy click. These checks did not use a microphone or account credentials.
+- Settings offers copyable MCP configuration rather than claiming a client is already connected. Its configuration uses actual server-provided Node/script paths and validates the optional loopback `COMPANION_URL`; workspace-action counts are not presented as the count of MCP wrapper tools. Real external-client setup is still separate verification.
+
+### Automated run and remaining checks
+
+The final combined run passed **166 of 166 Node tests**, and all **30 JavaScript syntax checks** passed. The preceding run exposed a stale health-version assertion after the move to 0.6; it was updated before this final run. The runtime child-process IPC error race was also fixed before final verification. Automated store/tool, model-router, builder, MCP, runtime, and preserved-core results remain distinct from live account/UI evidence.
+
+The normal launcher was then used with `-NoOpen` to start the managed host on the main local port 4174 after backing up its existing private data. Codex and local speech both reported ready. This confirms configured-PC launch/readiness; it does not establish human microphone capture or live Claude credentials.
+
+The live main workspace was visually checked at 1280 × 720 and in the narrow side panel; the composer and navigation remained available. A local overview screenshot was saved outside this public source tree. The user chose to continue with GPT and defer Claude credentials; no Claude key/account has been provided for live validation. OpenAI API and custom-provider accounts, human microphone behavior, offline voice playback, longer sessions, arbitrary PC control, and a voice bridge into this existing Codex conversation remain unverified or unimplemented as described in the product direction.
+
 ## Personal assistant workspace (0.5.0)
 
 - All 85 Node tests pass, with no skips. Seven new command/source-map tests cover conservative action parsing, source snapshots, exact-source history, local note search, and the distinction between authored sample links and unlinked imported passages. Nine new HTTP tests cover independent personal sessions, group isolation, Origin/CSRF checks, input limits, cancellation, disconnects, timeouts, concurrency, and static-file restrictions.
