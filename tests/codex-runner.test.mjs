@@ -66,6 +66,8 @@ test('Codex admits at most two completions and releases both slots after cancell
   const started = new Promise(resolve => { notify = resolve; }); const spawnImpl = fakeSpawn(child => { children.push(child); if (children.length === 2) notify(); }); const firstController = new AbortController(), secondController = new AbortController();
   const first = runCodexCompletion({ prompt: 'First.', dataDirectory, spawnImpl, signal: firstController.signal }); const second = runCodexCompletion({ prompt: 'Second.', dataDirectory, spawnImpl, signal: secondController.signal });
   await started; await assert.rejects(runCodexCompletion({ prompt: 'Third.', dataDirectory, spawnImpl }), { code: 'provider_busy' });
-  firstController.abort(); secondController.abort(); await assert.rejects(first, { name: 'AbortError' }); await assert.rejects(second, { name: 'AbortError' });
+  // Register both rejection observers before aborting either concurrent request.
+  const rejections=[assert.rejects(first,{name:'AbortError'}),assert.rejects(second,{name:'AbortError'})];
+  firstController.abort(); secondController.abort(); await Promise.all(rejections);
   assert.equal((await runCodexCompletion({ prompt: 'Next.', dataDirectory, spawnImpl: fakeSpawn(child => finish(child)) })).text, 'Synthetic answer.');
 });

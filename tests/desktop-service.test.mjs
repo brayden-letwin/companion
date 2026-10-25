@@ -19,6 +19,7 @@ async function fixture(t, options = {}) {
     if (request.action === 'openUrl') return { accepted: true };
     if (request.action === 'focusWindow') return { focused: true };
     if (request.action === 'readWindow') return { elements: [ELEMENT] };
+    if (request.action === 'readContext') return { window: WINDOW, rootRuntimeId: '42.123', protectedContext: false, text: request.includeText ? 'Synthetic selected document.' : '', truncated: false };
     if (request.action === 'performAction') return { performed: true };
     throw new Error('Unexpected synthetic bridge request.');
   });
@@ -122,4 +123,117 @@ test('fixed PowerShell bridge receives all data through stdin, scrubs secrets an
   };
   const run = await createDesktopBridgeRunner({ spawnImpl }); const result = await run({ action: 'health', data: '`PowerShell metacharacters`; $value' }); assert.equal(result.available, true); assert.equal(calls[0].options.shell, false); assert.equal(calls[0].options.windowsHide, true); assert.ok(calls[0].args.includes('-File')); assert.ok(!calls[0].args.includes('-Command')); assert.ok(!calls[0].args.some(arg => arg.includes('metacharacters'))); assert.equal(calls[0].options.env.OPENAI_API_KEY, undefined); assert.equal(calls[0].options.env.NODE_OPTIONS, undefined); assert.match(child.input, /metacharacters/);
   sendResult = false; const controller = new AbortController(); const pending = run({ action: 'health' }, { signal: controller.signal }); controller.abort(); await assert.rejects(pending, { name: 'AbortError' }); assert.equal(child.killed, true);
+});
+
+test('human-selected context pins only metadata and freshly reads the same window after legitimate title changes', async t => {
+  let current = { ...WINDOW }, content = 'First document text.', reads = 0;
+  const f = await fixture(t, { runner: async request => {
+    if (request.action === 'listWindows') return { windows: [WINDOW, { ...WINDOW, handle: '999', pid: 201, title: 'Unrelated foreground' }] };
+    assert.equal(request.action, 'readContext'); reads++;
+    return { window: current, rootRuntimeId: '42.123', protectedContext: false, text: request.includeText ? content : '', truncated: false };
+  } });
+  const window = (await f.service.execute('desktop_list_windows', { query: 'Synthetic' })).windows[0];
+  const selected = await f.service.createContext(window.id); assert.equal(selected.window.id, window.id); assert.equal(selected.window.title, WINDOW.title); assert.equal(selected.text, undefined); assert.equal(selected.rootRuntimeId, undefined); assert.equal(selected.window.handle, undefined); assert.equal(selected.window.startTime, undefined);
+  assert.equal(f.calls.at(-1).request.includeText, false);
+  const first = await f.service.readContext(selected.id); assert.equal(first.text, 'First document text.');
+  current = { ...WINDOW, title: 'Edited document title' }; content = 'Current document text. ' + 'x'.repeat(5000);
+  const second = await f.service.readContext(selected.id); assert.equal(second.contextId, selected.id); assert.equal(second.window.id, window.id); assert.equal(second.window.title, 'Edited document title'); assert.equal(second.text, content); assert.equal(second.truncated, false); assert.ok(!JSON.stringify(second).includes('Unrelated foreground')); assert.ok(!JSON.stringify(second).includes('42.123'));
+  assert.equal(reads, 3); assert.equal(f.calls.filter(call => ['focusWindow','performAction','readWindow'].includes(call.request.action)).length, 0);
+  assert.equal(f.service.definitions.some(item => /context/i.test(item.name)), false);
+  await assert.rejects(f.service.execute('desktop_create_context', { windowId: window.id }), { code: 'invalid_desktop_tool' });
+});
+
+test('context reads reject every observable native identity/root change and never retarget a stale pin', async t => {
+  for (const change of [{ handle: '777' }, { pid: 201 }, { startTime: '638000000000000001' }, { className: 'NewClass' }, { appName: 'AnotherApp' }, { rootRuntimeId: '42.999' }]) {
+    let changed = false;
+    const f = await fixture(t, { runner: async request => request.action === 'listWindows' ? { windows: [WINDOW] } : { window: { ...WINDOW, ...(changed ? change : {}) }, rootRuntimeId: changed && change.rootRuntimeId || '42.123', protectedContext: false, text: '', truncated: false } });
+    const window = (await f.service.execute('desktop_list_windows', {})).windows[0], pin = await f.service.createContext(window.id); changed = true;
+    await assert.rejects(f.service.readContext(pin.id), { code: 'window_context_stale', statusCode: 409 }); const count = f.calls.length;
+    await assert.rejects(f.service.readContext(pin.id), { code: 'window_context_stale' }); assert.equal(f.calls.length, count);
+  }
+});
+
+test('closed, protected and credential windows fail before any source content can become model context', async t => {
+  for (const native of [{ ...WINDOW, appName: 'electron' }, { ...WINDOW, appName: 'Companion' }, { ...WINDOW, title: 'Password settings' }]) {
+    const f = await fixture(t, { runner: async request => { assert.equal(request.action, 'listWindows'); return { windows: [native] }; } });
+    const window = (await f.service.execute('desktop_list_windows', {})).windows[0]; await assert.rejects(f.service.createContext(window.id), { code: 'window_context_protected', statusCode: 403 }); assert.equal(f.calls.length, 1);
+  }
+  for (const code of ['protected_target','stale_window']) {
+    let reject = false;
+    const f = await fixture(t, { runner: async request => { if (request.action === 'listWindows') return { windows: [WINDOW] }; if (reject) throw Object.assign(new Error('Synthetic protected or closed source.'), { code }); return { window: WINDOW, rootRuntimeId: '42.123', protectedContext: false, text: '', truncated: false }; } });
+    const window = (await f.service.execute('desktop_list_windows', {})).windows[0], pin = await f.service.createContext(window.id); reject = true;
+    await assert.rejects(f.service.readContext(pin.id), { code: code === 'protected_target' ? 'window_context_protected' : 'window_context_stale' });
+  }
+  let protectedNow = false;
+  const f = await fixture(t, { runner: async request => request.action === 'listWindows' ? { windows: [WINDOW] } : { window: WINDOW, rootRuntimeId: '42.123', protectedContext: protectedNow, text: protectedNow ? 'MUST_NOT_LEAVE' : '', truncated: false } });
+  const window = (await f.service.execute('desktop_list_windows', {})).windows[0], pin = await f.service.createContext(window.id); protectedNow = true;
+  await assert.rejects(f.service.readContext(pin.id), error => error.code === 'window_context_protected' && !JSON.stringify(error).includes('MUST_NOT_LEAVE'));
+});
+
+test('context is opaque, capped at twenty pins, fixed-expiry and independent of the short window-list cache', async t => {
+  let clock = 100000;
+  const f = await fixture(t, { now: () => clock }); const window = (await f.service.execute('desktop_list_windows', {})).windows[0];
+  await assert.rejects(f.service.createContext({ handle: WINDOW.handle, pid: WINDOW.pid }), { code: 'invalid_desktop_input' });
+  const pins = []; for (let index = 0; index < 20; index++) pins.push(await f.service.createContext(window.id));
+  await assert.rejects(f.service.createContext(window.id), { code: 'window_context_limit' }); assert.equal(f.service.releaseContext(pins[0].id).released, true); assert.equal(f.service.releaseContext(pins[0].id).released, true);
+  const replacement = await f.service.createContext(window.id); clock += 121000; assert.equal((await f.service.readContext(replacement.id)).text, 'Synthetic selected document.');
+  clock = 100000 + 8 * 60 * 60 * 1000; await assert.rejects(f.service.readContext(replacement.id), { code: 'window_context_stale' });
+});
+
+test('release and cancellation suppress late source reads and abort only their owned bridge request', async t => {
+  let begin, finish, bridgeSignal; const started = new Promise(resolve => { begin = resolve; });
+  const f = await fixture(t, { runner: async (request, { signal }) => {
+    if (request.action === 'listWindows') return { windows: [WINDOW] };
+    if (!request.includeText) return { window: WINDOW, rootRuntimeId: '42.123', protectedContext: false, text: '', truncated: false };
+    bridgeSignal = signal; begin(); return new Promise(resolve => { finish = resolve; });
+  } });
+  const window = (await f.service.execute('desktop_list_windows', {})).windows[0], pin = await f.service.createContext(window.id), read = f.service.readContext(pin.id); await started;
+  f.service.releaseContext(pin.id); await assert.rejects(read, { name: 'AbortError' }); assert.equal(bridgeSignal.aborted, true);
+  finish({ window: WINDOW, rootRuntimeId: '42.123', protectedContext: false, text: 'Late text must be ignored.', truncated: false });
+  await assert.rejects(f.service.readContext(pin.id), { code: 'window_context_stale' });
+  const controller = new AbortController(); controller.abort(); const count = f.calls.length; await assert.rejects(f.service.createContext(window.id, { signal: controller.signal }), { name: 'AbortError' }); assert.equal(f.calls.length, count);
+});
+
+test('context capture has an actual JSON byte bound and preserves explicit empty/truncated outcomes', async t => {
+  let content = '', truncated = false;
+  const f = await fixture(t, { runner: async request => request.action === 'listWindows' ? { windows: [WINDOW] } : { window: WINDOW, rootRuntimeId: '42.123', protectedContext: false, text: request.includeText ? content : '', truncated } });
+  const window = (await f.service.execute('desktop_list_windows', {})).windows[0], pin = await f.service.createContext(window.id);
+  const empty = await f.service.readContext(pin.id); assert.equal(empty.text, ''); assert.equal(empty.truncated, false);
+  content = '数'.repeat(12000); const bounded = await f.service.readContext(pin.id); assert.ok(Buffer.byteLength(JSON.stringify(bounded)) <= 32 * 1024); assert.ok(bounded.text.length < content.length); assert.equal(bounded.truncated, true);
+  content = 'The bridge reported a partial document.'; truncated = true; assert.equal((await f.service.readContext(pin.id)).truncated, true);
+});
+
+test('cancelling context creation cannot retain a late pin or consume its bounded capacity', async t => {
+  let hold = true, begin, finish, nativeSignal; const began = new Promise(resolve => { begin = resolve; });
+  const result = { window: WINDOW, rootRuntimeId: '42.123', protectedContext: false, text: '', truncated: false };
+  const f = await fixture(t, { runner: async (request, { signal }) => {
+    if (request.action === 'listWindows') return { windows: [WINDOW] };
+    if (hold) { nativeSignal = signal; begin(); return new Promise(resolve => { finish = resolve; }); }
+    return result;
+  } });
+  const window = (await f.service.execute('desktop_list_windows', {})).windows[0], controller = new AbortController(), pending = f.service.createContext(window.id, { signal: controller.signal }); await began;
+  controller.abort(); await assert.rejects(pending, { name: 'AbortError' }); assert.equal(nativeSignal.aborted, true); hold = false; finish(result);
+  for (let index = 0; index < 20; index++) assert.ok((await f.service.createContext(window.id)).id);
+  await assert.rejects(f.service.createContext(window.id), { code: 'window_context_limit' });
+});
+
+test('selected source pins and text never persist with desktop action history or survive service restart', async t => {
+  const dataDirectory = await mkdtemp(path.join(tmpdir(), 'companion-context-test-')); let service;
+  t.after(async () => { await service?.close(); const target = path.resolve(dataDirectory); assert.ok(target.startsWith(path.resolve(tmpdir()) + path.sep)); await rm(target, { recursive: true, force: true }); });
+  const f = await fixture(t, { dataDirectory }); const window = (await f.service.execute('desktop_list_windows', {})).windows[0], pin = await f.service.createContext(window.id); await f.service.readContext(pin.id); await f.service.close();
+  const persisted = await readFile(path.join(dataDirectory, 'desktop-actions.json'), 'utf8'); assert.ok(!persisted.includes(pin.id)); assert.ok(!persisted.includes('Synthetic selected document.'));
+  service = await createDesktopService({ dataDirectory, platform: 'win32', runner: () => assert.fail('Unknown context must not reach Windows.') }); await assert.rejects(service.readContext(pin.id), { code: 'window_context_stale' });
+});
+
+test('native context fallback requires leaf text providers and retains privacy scans before and after collection', async () => {
+  const source = await readFile(new URL('../scripts/desktop-bridge.ps1', import.meta.url), 'utf8');
+  const body = source.slice(source.indexOf('function Context-Body'), source.indexOf('    $result = $null'));
+  assert.match(body, /\$nameTextType = .*ControlType\]::Text.*ControlType\]::Pane.*ControlType\]::Document.*ControlType\]::Edit/u);
+  assert.match(body, /if \(-not \$value -and \$nameTextType -and \$null -eq \$walker\.GetFirstChild\(\$candidate\)\) \{ \$value = \[string\]\$current\.Name \}/u);
+  assert.equal((body.match(/\$value = \[string\]\$current\.Name/gu) || []).length, 1);
+  assert.match(body, /if \(-not \$tree\.truncated\)/u);
+  const action = source.slice(source.indexOf("        'readContext' {"), source.indexOf("        'performAction' {"));
+  assert.ok(action.indexOf('$tree = Context-Tree') < action.indexOf('$body = Context-Body'));
+  assert.ok(action.indexOf('$finalTree = Context-Tree') > action.indexOf('$body = Context-Body'));
+  assert.match(action, /Assert-Window \$knownWindow/u);
 });

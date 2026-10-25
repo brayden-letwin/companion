@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createProductivityStore } from '../server/productivity-store.mjs';
 import { createProductivityTools } from '../server/productivity-tools.mjs';
 import { capabilityHash } from '../server/capability-registry.mjs';
+import { formatWindowContext } from '../server/window-context.mjs';
 
 async function fixture(t, options = {}) {
   const dataDirectory = await mkdtemp(path.join(tmpdir(), 'companion-productivity-store-')), stores = [];
@@ -19,6 +20,26 @@ async function fixture(t, options = {}) {
 }
 const executionId=(prefix,request,call)=>{const h=createHash('sha256').update(`${request}:${call}`).digest('hex').slice(0,32);return`${prefix}:${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;};
 const fakeCapability=(version=1)=>({id:'fixture',title:'Fixture',module:'./fixture.mjs',modulePath:path.join(tmpdir(),'fixture.mjs'),moduleHash:'a'.repeat(64),version,hash:String(version).repeat(64),effectPolicy:'workspace',workflowAllowed:true,tool:{name:'cap_fixture',description:'Synthetic capability.',parameters:{type:'object',properties:{text:{type:'string',minLength:1,maxLength:100}},required:['text'],additionalProperties:false}}});
+
+test('conversation compaction preserves selected-window provenance while explicitly omitting oversized source text',async t=>{
+  const f=await fixture(t,{conversationLimits:{outcomeBytes:8192}}),conversationId=randomUUID();f.store.createConversation({id:conversationId});
+  const turn={conversationId,expectedRevision:0,id:'context-compaction',message:'Explain synthetic source',digest:'a'.repeat(64),providerId:''};f.store.beginConversationTurn(turn);
+  const source=formatWindowContext({contextId:randomUUID(),window:{id:'synthetic-window',title:'Synthetic source',appName:'Synthetic editor'},readAt:new Date().toISOString(),text:'S'.repeat(12000),truncated:true});
+  const actions=[{id:'context-read:context-compaction',tool:'window_context',status:'completed',result:source.readReceipt}];f.store.recordConversationActions({...turn,actions});
+  const checkpoint=f.store.getConversation(conversationId).turns[0].actions[0].result;assert.equal(checkpoint.windowContext.contextId,source.windowContext.contextId);assert.equal(checkpoint.sourceOmitted,true);assert.ok(!Object.hasOwn(checkpoint,'text'));assert.equal(checkpoint.windowContext.sourceTruncated,true);
+  const result=f.store.finishConversationTurn({...turn,status:'completed',reply:{id:turn.id,text:'A'.repeat(100000),actions,windowContext:{...source.windowContext,text:'must not enter provenance',pid:999,handle:'private-native-id'}}}).receipt.reply;
+  assert.ok(Buffer.byteLength(JSON.stringify(result))<=8192);assert.equal(result.windowContext.contextId,source.windowContext.contextId);assert.equal(result.windowContext.readAt,source.windowContext.readAt);assert.equal(result.windowContext.sourceOmitted,true);assert.equal(result.actions[0].result.windowContext.truncated,true);assert.ok(!JSON.stringify(result).includes('must not enter provenance'));assert.ok(!JSON.stringify(result).includes('private-native-id'));
+});
+
+test('restart retains the actual context read checkpoint and selection provenance without rereading the window',async t=>{
+  const f=await fixture(t),conversationId=randomUUID();f.store.createConversation({id:conversationId});const turn={conversationId,expectedRevision:0,id:'context-interrupted',message:'Explain synthetic source',digest:'b'.repeat(64),providerId:''};f.store.beginConversationTurn(turn);
+  const source=formatWindowContext({contextId:randomUUID(),window:{id:'synthetic-window',title:'Source at read time',appName:'Synthetic editor'},readAt:new Date().toISOString(),text:'Actual synthetic observation',truncated:false});
+  f.store.recordConversationActions({...turn,actions:[{id:'context-read:context-interrupted',tool:'window_context',status:'completed',result:source.readReceipt}]});f.store.close();const restarted=await f.open();const saved=restarted.getConversation(conversationId).turns[0];assert.equal(saved.status,'interrupted');assert.equal(saved.error.windowContext.contextId,source.windowContext.contextId);assert.equal(saved.error.windowContext.readAt,source.windowContext.readAt);assert.equal(saved.actions[0].result.text,'Actual synthetic observation');assert.equal(restarted.chatReceipt(turn.id,turn.digest).reply.windowContext.title,'Source at read time');
+});
+
+test('a source selected before an interrupted read survives restart without inventing completed read evidence',async t=>{
+  const f=await fixture(t),conversationId=randomUUID();f.store.createConversation({id:conversationId});const turn={conversationId,expectedRevision:0,id:'context-before-read',message:'Explain synthetic source',digest:'c'.repeat(64),providerId:''},selection={contextId:randomUUID(),windowId:'synthetic-window',title:'Selected source',appName:'Synthetic editor'};f.store.beginConversationTurn(turn);f.store.recordConversationActions({...turn,actions:[],windowContext:selection});f.store.close();const restarted=await f.open(),saved=restarted.getConversation(conversationId).turns[0];assert.equal(saved.status,'interrupted');assert.equal(saved.error.windowContext.contextId,selection.contextId);assert.deepEqual(saved.actions,[]);assert.ok(!Object.hasOwn(saved.error.windowContext,'readAt'));assert.ok(!Object.hasOwn(saved.error.windowContext,'readable'));
+});
 
 test('workflow terminal receipts pin the original definition across edits, disabling, intervening changes and restart',async t=>{
   const f=await fixture(t);let tools=createProductivityTools({store:f.store});const flow=f.apply('saveWorkflow',{name:'Original sequence',steps:[{tool:'create_task',arguments:{title:'Original task'}},{tool:'save_note',arguments:{text:'Original note'}}]}).workspace.workflows[0],context={requestId:'stable-workflow'};

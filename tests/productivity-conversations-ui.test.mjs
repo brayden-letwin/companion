@@ -44,7 +44,7 @@ function createLocks() {
   return { request: async (name, options, callback) => { if (held.has(name)) return callback(null); held.add(name); try { return await callback({ name }); } finally { held.delete(name); } } };
 }
 
-async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], workspaceWorkflows = [], workspaceTasks = [], storedWorkflowRuns = [], catalog = [] } = {}) {
+async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], workspaceWorkflows = [], workspaceTasks = [], storedWorkflowRuns = [], catalog = [], contextWindows = [] } = {}) {
   const nodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(match => [match[1], new Element()]));
   nodes.get('provider-type').value = 'openai';
   const records = new Map(saved.map(item => [item.id, structuredClone(item)]));
@@ -52,6 +52,7 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
   if (storedWorkflowRuns.length) storage.set('companion.workspace.ui.v1.pendingWorkflowRuns', JSON.stringify(storedWorkflowRuns));
   const requests = [], intervals = [], timers = new Set();
   const workspace = { revision: 0, tasks: structuredClone(workspaceTasks), notes: [], workflows: structuredClone(workspaceWorkflows), preferences: structuredClone(workspacePreferences), focus: null, activity: [] };
+  const contextPins = new Map(); let nextContextId = 0;
   let custom = intercept, permission = null, stoppedTracks = 0;
   const provider = { id: 'codex', type: 'codex', label: 'GPT', model: '', ready: true };
   const dialogs = [...html.matchAll(/<dialog\b[^>]*\bid="([^"]+)"/g)].map(match => nodes.get(match[1]));
@@ -84,6 +85,8 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
     if (route === 'desktop') return response({ available: true, capabilities: { installedApps: true, windows: true, read: true, open: true, reviewedInput: true }, pendingCount: 0 });
     if (route === 'desktop/actions') return response({ actions: [] });
     if (route === 'cancel') return response({ cancelled: true });
+    if (route === 'context') { const body = JSON.parse(options.body), window = contextWindows.find(item => item.id === body.windowId) || { id: body.windowId, title: 'Window ' + body.windowId, appName: 'Fixture', pid: 7 }; const context = { id: 'context-' + (++nextContextId), window, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 28800000).toISOString() }; contextPins.set(context.id, context); return response({ context }); }
+    if (/^context\/[^/]+\/clear$/.test(route)) { contextPins.delete(decodeURIComponent(route.split('/')[1])); return response({ released: true }); }
     if (route === 'conversations' && options.method === 'POST') {
       const body = JSON.parse(options.body); if (!records.has(body.id)) records.set(body.id, blank(body.id)); return response(records.get(body.id));
     }
@@ -92,7 +95,8 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
     if (route === 'chat') {
       const body = JSON.parse(options.body), record = records.get(body.conversationId);
       assert.equal(body.expectedRevision, record.revision);
-      const reply = { id: body.id, text: 'A saved response.', actions: [], featureJob: null, providerId: body.providerId };
+      const context = contextPins.get(body.contextId), windowContext = context ? { contextId: context.id, windowId: context.window.id, title: context.window.title, appName: context.window.appName, readAt: new Date().toISOString(), sourceTruncated: false, formatterTruncated: false, truncated: false, empty: false } : null;
+      const reply = { id: body.id, text: 'A saved response.', actions: [], featureJob: null, providerId: body.providerId, ...(windowContext ? { windowContext } : {}) };
       record.turns.push({ id: body.id, message: body.message, providerId: body.providerId, status: 'completed', startedAt: '2026-10-24T12:00:01Z', finishedAt: '2026-10-24T12:00:02Z', reply }); record.revision += 2;
       return response({ ...reply, conversationId: record.id, conversationRevision: record.revision, workspace });
     }
@@ -100,7 +104,7 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
   }
   const window = { MediaRecorder: Recorder, AudioContext, addEventListener() {} };
   const context = vm.createContext({ createVoiceSession, window, document, navigator: { locks, permissions: { query: async () => ({ state: 'granted' }) }, mediaDevices: { getUserMedia: () => { permission = deferred(); return permission.promise; } } }, MediaRecorder: Recorder, fetch: fetchMock, Headers, AbortController, Blob, URL, URLSearchParams, DOMException, crypto: webcrypto, structuredClone, performance, console, localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) }, location: { search: '', reload() {}, assign() {} }, Event: class {}, setTimeout: (callback, milliseconds) => { const timer = setTimeout(callback, milliseconds); timer.unref(); timers.add(timer); return timer; }, clearTimeout, setInterval: callback => { intervals.push(callback); return intervals.length; }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} });
-  vm.runInContext(source + '\nglobalThis.ui={ready:()=>checkingService,selectConversation,refreshConversations,refreshConversation,loadEarlierConversation,runCommand,cancelTurn,startRecording,setVoiceVisible,renderSavedConversation,rememberDesktopAction,captureConversationContext,setChatOpen,showDialog,openDesktopReview,addMessage,processVoiceSegment,refreshToolCatalog,applyToolCatalog,applyExtensionManifest,openFeatureByName,openWorkflow,renderWorkflowSteps,validateWorkflowSteps,runWorkflow,renderActionReceipts,appendInstalledFeatureReady,refreshJobs,refreshWorkspace,setExtensionLoader:loader=>loadExtensionModule=loader,get:()=>({id:conversationId,detail:conversationDetail,localChatTurn,turnBusy,recording,voiceState:voiceSessionState,chatOpen,currentView,ownsVoice:voiceOwnsCapture,initial:conversationInitialized,listPending:!!conversationListPending,detailPending:!!conversationDetailRequest,desktop:desktopActions,workflowDraft,toolCatalog,extensions:[...extensions.values()],workspace})};', context);
+  vm.runInContext(source + '\nglobalThis.ui={ready:()=>checkingService,selectConversation,refreshConversations,refreshConversation,loadEarlierConversation,runCommand,cancelTurn,startRecording,setVoiceVisible,renderSavedConversation,rememberDesktopAction,captureConversationContext,setChatOpen,showDialog,openDesktopReview,addMessage,processVoiceSegment,refreshToolCatalog,applyToolCatalog,applyExtensionManifest,openFeatureByName,openWorkflow,renderWorkflowSteps,validateWorkflowSteps,runWorkflow,renderActionReceipts,appendInstalledFeatureReady,refreshJobs,refreshWorkspace,selectWindowContext,clearWindowContext,captureWindowContext,renderWindowContext,applyRuntime,setExtensionLoader:loader=>loadExtensionModule=loader,get:()=>({id:conversationId,detail:conversationDetail,localChatTurn,turnBusy,recording,voiceCaptureContext,activeRequest,selectedWindowContext,windowContextGeneration,voiceState:voiceSessionState,chatOpen,currentView,ownsVoice:voiceOwnsCapture,initial:conversationInitialized,listPending:!!conversationListPending,detailPending:!!conversationDetailRequest,desktop:desktopActions,workflowDraft,toolCatalog,extensions:[...extensions.values()],workspace})};', context);
   await context.ui.ready();
   if (waitForConversations) await until(() => !context.ui.get().listPending && !context.ui.get().detailPending, 'initial conversation load');
   return { ui: context.ui, nodes, records, storage, requests, document, intervals, setIntercept: value => { custom = value; }, get waitingForMicrophone() { return !!permission; }, grantMicrophone: () => { const pending = permission; permission = null; pending.resolve({ getTracks: () => [{ stop: () => stoppedTracks++ }] }); }, get stoppedTracks() { return stoppedTracks; }, close: () => { context.ui.cancelTurn(false); for (const timer of timers) clearTimeout(timer); } };
@@ -604,5 +608,145 @@ test('long task details use a short preview and exact full-text disclosure that 
     assert.deepEqual(visibleTaskIds(app), [task.id]); current = descendants(app.nodes.get('task-list')).find(node => node.className === 'task-details-disclosure'); assert.equal(current.open, false);
     await app.nodes.get('task-list').children[0].children.at(-1).dispatch('click'); assert.equal(app.nodes.get('edit-text').value, full);
     assert.equal(app.requests.filter(request => request.method === 'POST' && request.url.endsWith('/workspace/operations')).length, 0);
+  } finally { app.close(); }
+});
+
+const sourceWindowA = { id: 'window-a', title: 'Paper A', appName: 'Fixture reader', pid: 71 };
+const sourceWindowB = { id: 'window-b', title: 'Paper B', appName: 'Fixture editor', pid: 72 };
+const pinPacket = (id, window) => ({ id, window, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 28800000).toISOString() });
+
+test('window context starts absent, is selected only explicitly, and stores no pin or title in browser storage', async () => {
+  const app = await createUI({ contextWindows: [sourceWindowA] });
+  try {
+    assert.equal(app.ui.get().selectedWindowContext, null); assert.equal(app.nodes.get('selected-window-context').hidden, true);
+    app.ui.addMessage('assistant', 'Use Paper A as context'); assert.equal(app.ui.get().selectedWindowContext, null);
+    await app.ui.selectWindowContext(sourceWindowA); const pin = app.ui.get().selectedWindowContext;
+    assert.equal(pin.status, 'ready'); assert.equal(pin.window.title, 'Paper A'); assert.equal(app.nodes.get('selected-window-context').hidden, false); assert.match(app.nodes.get('window-context-status').textContent, /chosen AI with each question/);
+    assert.deepEqual(JSON.parse(app.requests.find(request => request.url.endsWith('/context')).body), { windowId: 'window-a' });
+    assert.equal(app.requests.filter(request => request.url.endsWith('/tools/run')).length, 0); assert.equal(app.requests.filter(request => request.url.endsWith('/chat')).length, 0);
+    assert.ok([...app.storage.values()].every(value => !value.includes(pin.id) && !value.includes('Paper A')));
+  } finally { app.close(); }
+});
+
+test('actual window-list context buttons name their individual window and select only the clicked row', async () => {
+  const app = await createUI({ contextWindows: [sourceWindowA, sourceWindowB] });
+  try {
+    app.setIntercept((url, options, { workspace }) => { if (!url.endsWith('/tools/run')) return null; const body = JSON.parse(options.body); assert.equal(body.tool, 'desktop_list_windows'); return response({ tool: body.tool, result: { windows: [sourceWindowA, sourceWindowB], truncated: false }, workspace }); });
+    await app.nodes.get('desktop-window-list').dispatch('click');
+    const controls = descendants(app.nodes.get('desktop-window-results')).filter(node => node.tagName === 'button' && node.textContent === 'Use as context');
+    assert.deepEqual(controls.map(node => node.attributes['aria-label']), ['Use as context: Paper A', 'Use as context: Paper B']);
+    await controls[0].dispatch('click'); await until(() => app.ui.get().selectedWindowContext?.status === 'ready');
+    assert.equal(app.ui.get().selectedWindowContext.window.id, sourceWindowA.id); assert.equal(app.requests.filter(request => request.url.endsWith('/context')).length, 1);
+  } finally { app.close(); }
+});
+
+test('voice freezes its selected source before permission and an old source cannot retarget a new question', async () => {
+  const app = await createUI({ contextWindows: [sourceWindowA, sourceWindowB] });
+  try {
+    await app.ui.selectWindowContext(sourceWindowA); const firstId = app.ui.get().selectedWindowContext.id;
+    const opening = app.ui.startRecording(); await until(() => app.waitingForMicrophone); assert.equal(app.ui.get().voiceCaptureContext.windowContext.id, firstId);
+    app.grantMicrophone(); await opening; const recorded = copy(app.ui.get().recording);
+    await app.ui.selectWindowContext(sourceWindowB); assert.equal(app.stoppedTracks, 1);
+    await app.ui.runCommand('Explain the old source', { voice: true, providerId: recorded.providerId, conversationContext: recorded.conversationContext, windowContext: recorded.windowContext, approvalContext: null });
+    assert.equal(app.requests.filter(request => request.url.endsWith('/chat')).length, 0); assert.match(app.nodes.get('question-error').textContent, /context changed or is unavailable/);
+    await app.ui.runCommand('Explain Paper B'); const question = JSON.parse(app.requests.find(request => request.url.endsWith('/chat')).body);
+    assert.equal(question.contextId, app.ui.get().selectedWindowContext.id); assert.notEqual(question.contextId, firstId); assert.equal('windowText' in question, false);
+  } finally { app.close(); }
+});
+
+test('clearing while microphone permission is pending cancels capture and releases the original pin', async () => {
+  const app = await createUI({ contextWindows: [sourceWindowA] });
+  try {
+    await app.ui.selectWindowContext(sourceWindowA); const id = app.ui.get().selectedWindowContext.id, opening = app.ui.startRecording(); await until(() => app.waitingForMicrophone);
+    await app.ui.clearWindowContext(); assert.equal(app.ui.get().selectedWindowContext, null); assert.equal(app.nodes.get('selected-window-context').hidden, true);
+    app.grantMicrophone(); await opening; await until(() => app.stoppedTracks === 1);
+    assert.equal(app.ui.get().recording, null); assert.equal(app.ui.get().activeRequest, null); assert.equal(app.requests.some(request => request.url.endsWith('/context/' + id + '/clear')), true);
+    assert.equal(app.requests.filter(request => /\/(?:chat|transcribe)$/.test(request.url)).length, 0);
+  } finally { app.close(); }
+});
+
+test('clearing context cancels an in-flight transcription and never forwards its late words to chat', async () => {
+  const app = await createUI({ contextWindows: [sourceWindowA] });
+  try {
+    await app.ui.selectWindowContext(sourceWindowA); const opening = app.ui.startRecording(); await until(() => app.waitingForMicrophone); app.grantMicrophone(); await opening;
+    const frozen = copy(app.ui.get().recording), transcript = deferred(); let requestId;
+    app.setIntercept((url, options) => { if (!url.endsWith('/transcribe')) return null; requestId = options.headers.get('X-Request-Id'); return transcript.promise; });
+    const processing = app.ui.processVoiceSegment({ blob: new Blob(['synthetic audio']), context: frozen, signal: new AbortController().signal }); await until(() => !!requestId);
+    await app.ui.clearWindowContext(); assert.equal(app.ui.get().turnBusy, false); assert.equal(app.ui.get().activeRequest, null);
+    transcript.resolve(response({ id: requestId, text: 'Explain this document' })); await processing;
+    assert.equal(app.requests.filter(request => request.url.endsWith('/chat')).length, 0); assert.equal(app.requests.some(request => request.url.endsWith('/cancel') && JSON.parse(request.body).id === requestId), true);
+  } finally { app.close(); }
+});
+
+test('clearing context cancels its active chat request and ignores a late response from that source', async () => {
+  const app = await createUI({ contextWindows: [sourceWindowA] });
+  try {
+    await app.ui.selectWindowContext(sourceWindowA); const contextId = app.ui.get().selectedWindowContext.id, pending = deferred(); let request;
+    app.setIntercept((url, options, { records }) => {
+      if (!url.endsWith('/chat')) return null; request = JSON.parse(options.body); const record = records.get(request.conversationId);
+      record.turns.push({ id: request.id, message: request.message, status: 'running' }); record.activeRequestId = request.id; record.revision++; return pending.promise;
+    });
+    const asking = app.ui.runCommand('Explain Paper A'); await until(() => !!request); assert.equal(request.contextId, contextId);
+    await app.ui.clearWindowContext(); assert.equal(app.ui.get().activeRequest, null); assert.equal(app.ui.get().turnBusy, false); assert.equal(app.ui.get().selectedWindowContext, null);
+    pending.resolve(response({ id: request.id, text: 'Late answer from the cleared source', actions: [], windowContext: { contextId, title: 'Paper A', readAt: new Date().toISOString() } })); await asking;
+    assert.doesNotMatch(app.nodes.get('messages').textContent, /Late answer from the cleared source/); assert.equal(app.requests.some(item => item.url.endsWith('/cancel') && JSON.parse(item.body).id === request.id), true);
+    assert.equal(app.requests.filter(item => item.url.endsWith('/chat')).length, 1);
+  } finally { app.close(); }
+});
+
+test('a late pin response is released instead of replacing a newer explicitly selected window', async () => {
+  const first = deferred(), app = await createUI();
+  try {
+    app.setIntercept((url, options) => { if (!url.endsWith('/context')) return null; return JSON.parse(options.body).windowId === sourceWindowA.id ? first.promise : response({ context: pinPacket('pin-b', sourceWindowB) }); });
+    const selectingFirst = app.ui.selectWindowContext(sourceWindowA); await app.ui.selectWindowContext(sourceWindowB);
+    first.resolve(response({ context: pinPacket('pin-a', sourceWindowA) })); await selectingFirst;
+    assert.equal(app.ui.get().selectedWindowContext.id, 'pin-b'); assert.match(app.nodes.get('window-context-label').textContent, /Paper B/);
+    assert.equal(app.requests.some(request => request.url.endsWith('/context/pin-a/clear')), true);
+  } finally { app.close(); }
+});
+
+test('failed replacement and attachment failure stay unavailable until Clear or reselect without source fallback', async () => {
+  const app = await createUI({ contextWindows: [sourceWindowA, sourceWindowB] });
+  try {
+    await app.ui.selectWindowContext(sourceWindowA);
+    app.setIntercept((url, options) => url.endsWith('/context') && JSON.parse(options.body).windowId === sourceWindowB.id ? response({ error: { code: 'window_context_unavailable', message: 'Paper B is no longer available.' } }, 409) : null);
+    await app.ui.selectWindowContext(sourceWindowB); assert.equal(app.ui.get().selectedWindowContext.status, 'unavailable'); assert.equal(app.ui.get().selectedWindowContext.id, null); assert.match(app.nodes.get('window-context-label').textContent, /Paper B/);
+    app.nodes.get('question').value = 'Keep this draft'; await app.ui.runCommand('Keep this draft'); assert.equal(app.requests.filter(request => request.url.endsWith('/chat')).length, 0); assert.equal(app.nodes.get('question').value, 'Keep this draft');
+    await app.ui.clearWindowContext(); app.setIntercept(null); await app.ui.selectWindowContext(sourceWindowA);
+    app.setIntercept(url => url.endsWith('/chat') ? response({ error: { code: 'window_context_empty', message: 'This window has no readable text.' } }, 409) : null);
+    await app.ui.runCommand('Explain this source'); assert.equal(app.ui.get().selectedWindowContext.status, 'unavailable'); assert.match(app.nodes.get('window-context-status').textContent, /no readable text/);
+    await app.ui.runCommand('Try another question'); assert.equal(app.requests.filter(request => request.url.endsWith('/chat')).length, 1);
+    await app.ui.clearWindowContext(); app.setIntercept(null); await app.ui.runCommand('A question without window text'); const last = app.requests.filter(request => request.url.endsWith('/chat')).at(-1); assert.equal('contextId' in JSON.parse(last.body), false);
+  } finally { app.close(); }
+});
+
+test('expiry and worker restart invalidate context including a pin request that resolves after restart', async () => {
+  const app = await createUI({ contextWindows: [sourceWindowA] });
+  try {
+    await app.ui.selectWindowContext(sourceWindowA); app.ui.get().selectedWindowContext.expiresAt = new Date(Date.now() - 1).toISOString(); app.ui.renderWindowContext();
+    assert.equal(app.ui.get().selectedWindowContext.status, 'unavailable'); assert.match(app.nodes.get('window-context-status').textContent, /expired/); await app.ui.runCommand('Explain'); assert.equal(app.requests.filter(request => request.url.endsWith('/chat')).length, 0);
+    await app.ui.clearWindowContext(); const pending = deferred(); app.setIntercept(url => url.endsWith('/context') ? pending.promise : null);
+    const selecting = app.ui.selectWindowContext(sourceWindowA); app.ui.applyRuntime({ managed: true, restarting: false, workerPid: 101 });
+    pending.resolve(response({ context: pinPacket('old-worker-pin', sourceWindowA) })); await selecting;
+    assert.equal(app.ui.get().selectedWindowContext.status, 'unavailable'); assert.equal(app.ui.get().selectedWindowContext.id, null); assert.match(app.nodes.get('window-context-status').textContent, /restarted/); assert.equal(app.requests.some(request => request.url.endsWith('/context/old-worker-pin/clear')), true);
+  } finally { app.close(); }
+});
+
+test('saved answer provenance shows the actual fresh window title, read time and truncation without persisting the pin in browser storage', async () => {
+  const app = await createUI({ contextWindows: [sourceWindowA] });
+  try {
+    await app.ui.selectWindowContext(sourceWindowA); const contextId = app.ui.get().selectedWindowContext.id;
+    app.setIntercept((url, options, { records, workspace }) => {
+      if (!url.endsWith('/chat')) return null; const body = JSON.parse(options.body), record = records.get(body.conversationId);
+      const windowContext = { contextId, windowId: sourceWindowA.id, title: 'Paper A — revised title', appName: sourceWindowA.appName, readAt: '2026-10-24T15:30:00Z', sourceTruncated: true, formatterTruncated: false, truncated: true, empty: false };
+      const reply = { id: body.id, text: 'An explanation grounded in the fresh read.', actions: [], providerId: body.providerId, windowContext }; record.turns.push({ id: body.id, message: body.message, status: 'completed', reply }); record.revision += 2; return response({ ...reply, conversationId: record.id, conversationRevision: record.revision, workspace });
+    });
+    await app.ui.runCommand('Explain the selected window'); const source = descendants(app.nodes.get('messages')).find(node => node.className === 'window-context-source');
+    assert.match(source.textContent, /Paper A — revised title/); assert.match(source.textContent, /Read /); assert.match(source.textContent, /Some window text was omitted/); assert.equal(app.ui.get().selectedWindowContext.window.title, 'Paper A — revised title');
+    await app.ui.refreshConversation(); assert.equal(descendants(app.nodes.get('messages')).filter(node => node.className === 'window-context-source').length, 1);
+    const saved = app.records.get(app.ui.get().id); saved.turns.push({ id: 'interrupted-before-read', message: 'A question interrupted before its read', status: 'interrupted', error: { message: 'Companion restarted before this read completed.', actions: [], windowContext: { contextId, windowId: sourceWindowA.id, title: 'Paper A selected only', appName: sourceWindowA.appName } } }); saved.revision++;
+    await app.ui.refreshConversation(); const selectedOnly = descendants(app.nodes.get('messages')).filter(node => node.className === 'window-context-source').at(-1);
+    assert.match(selectedOnly.textContent, /^Selected source: Paper A selected only/); assert.match(selectedOnly.textContent, /No completed read recorded\./); assert.doesNotMatch(selectedOnly.textContent, /Read unknown time|Window source:|text was omitted/);
+    assert.ok([...app.storage.values()].every(value => !value.includes(contextId) && !value.includes('Paper A')));
   } finally { app.close(); }
 });
