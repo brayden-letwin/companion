@@ -21,15 +21,18 @@ function contextDesktop({read,select}={}){
     releaseContext(id){releases.push(id);pins.delete(id);return{released:true};},async cancelAll(){return{stopped:true};},async close(){}
   };
 }
-async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.', toolCalls: [] }), desktop, capabilities = [], capabilityRoot } = {}) {
+async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.', toolCalls: [] }), desktop, capabilities = [], capabilityRoot,enableProviderChecks=false,probeConnection,invalidProviderCheckHistory=false } = {}) {
   const dataDirectory = await mkdtemp(path.join(tmpdir(), 'companion-productivity-api-'));
   let store = await createProductivityStore({ dataDirectory });
   const stores = [store], apps = [], calls = [], jobs = [], builderCalls = []; let runtimeCount = 0;
-  const descriptors = [{ id: 'fake', type: 'codex', label: 'Synthetic model', model: '', hasKey: false, ready: true }];
+  const descriptors = [{ id: 'fake', type: 'codex', label: 'Synthetic model', model: '',revision:randomUUID(), hasKey: false, ready: true }],probeCalls=[];
+  if(invalidProviderCheckHistory)await writeFile(path.join(dataDirectory,'provider-checks.json'),'{invalid synthetic history');
   const router = {
     getStatus: async () => ({ defaultProviderId: 'fake', providers: descriptors, codexAvailable: true, reasoningReady: true }),
     async complete(input) { calls.push({ ...input, messages: structuredClone(input.messages) }); return complete(input, calls.length); },
-    async configure(input) { descriptors.push({ id: input.id, type: input.type, label: input.label || input.type, model: input.model || 'synthetic', hasKey: Boolean(input.apiKey), ready: Boolean(input.apiKey) }); },
+    async getProviderConfigurations(){return structuredClone(descriptors);},
+    async probeConnection(input){probeCalls.push(input);return probeConnection?probeConnection(input,probeCalls.length):{passed:true,providerId:input.providerId,revision:input.expectedRevision};},
+    async configure(input) { const index=descriptors.findIndex(item=>item.id===input.id),previous=descriptors[index],value={id:input.id,type:input.type,label:input.label||previous?.label||input.type,model:input.model??previous?.model??'synthetic',revision:randomUUID(),hasKey:input.apiKey===undefined?previous?.hasKey||false:Boolean(input.apiKey),ready:input.type==='codex'||Boolean(input.apiKey||previous?.hasKey)};if(index<0)descriptors.push(value);else descriptors[index]=value; },
     async select(id) { assert.ok(descriptors.some(entry => entry.id === id)); },
     async remove(id) { const index = descriptors.findIndex(entry => entry.id === id); if (index >= 0) descriptors.splice(index, 1); },
   };
@@ -49,7 +52,7 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
   };
   let tools = createProductivityTools({ store, builder, desktop, capabilities, root:capabilityRoot });
   const legacyProvider = { getStatus: async () => ({ provider: 'local', reasoningReady: false, transcriptionReady: false }), ask: async () => ({ text: 'Legacy synthetic response.' }), transcribe: async () => ({ text: 'Synthetic transcript.' }), cancel() {}, cancelScope() {} };
-  const createApp = () => createSharedServer({ dbPath: path.join(dataDirectory, 'room.sqlite'), port: 0, assistantProvider: legacyProvider, assistantOptions: { createProductivityRuntime: async () => { runtimeCount += 1; return { router, store, builder, tools, desktop }; } } });
+  const createApp = () => createSharedServer({ dbPath: path.join(dataDirectory, 'room.sqlite'), port: 0, assistantProvider: legacyProvider, assistantOptions: { createProductivityRuntime: async () => { runtimeCount += 1; return { router, store, builder, tools, desktop,enableProviderChecks }; } } });
   let app = await createApp(); apps.push(app);
   let address = await app.listen(), origin = new URL(address.url).origin;
   t.after(async () => { for (const item of apps) await item.close(); for (const item of stores) item.close(); const resolved = path.resolve(dataDirectory); assert.ok(resolved.startsWith(path.resolve(tmpdir()) + path.sep)); await rm(resolved, { recursive: true, force: true }); });
@@ -62,8 +65,70 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
     await app.close(); store.close(); store = await createProductivityStore({ dataDirectory }); stores.push(store); if(capabilityRoot)capabilities=await loadCapabilities({root:capabilityRoot}); tools = createProductivityTools({ store, builder, desktop, capabilities, root:capabilityRoot });
     app = await createApp(); apps.push(app); address = await app.listen(); origin = new URL(address.url).origin; return store;
   }
-  return { app, store, router, tools, calls, jobs, builderCalls, origin, request, session, restart, runtimeCount: () => runtimeCount };
+  return { app, store, router, tools, calls, jobs, builderCalls,probeCalls,descriptors, origin, request, session, restart, runtimeCount: () => runtimeCount };
 }
+
+async function settledProviderCheck(f,id,user){const until=Date.now()+3000;for(;;){const response=await f.request('GET','/api/assistant/provider-checks/'+id,undefined,user);assert.equal(response.status,200);if(!['queued','running','stopping'].includes(response.value.check.status))return response.value.check;if(Date.now()>until)throw Error('Synthetic connection test did not settle.');await new Promise(resolve=>setTimeout(resolve,5));}}
+
+test('explicit connection checks require authentication and exact metadata, retain one receipt and never use chat context',async t=>{
+ const f=await fixture(t,{enableProviderChecks:true}),route='/api/assistant/provider-checks',id=randomUUID();assert.equal((await f.request('GET',route)).status,401);assert.equal(f.runtimeCount(),0);
+ const user=await f.session(),before=f.store.snapshot(),providers=(await f.request('GET','/api/assistant/providers',undefined,user)).value,provider=providers.providers[0];assert.equal(provider.availability,'signed_in');assert.equal(provider.verified,false);assert.equal(provider.connectionCheck,null);assert.equal(providers.connectionChecksAvailable,true);assert.equal(f.probeCalls.length,0);
+ const body={id,providerId:provider.id,revision:provider.revision};
+ for(const extra of [{message:'PRIVATE CHAT MUST NOT SEND'},{apiKey:'PRIVATE KEY MUST NOT SEND'},{model:'another-model'},{contextId:randomUUID()}])assert.equal((await f.request('POST',route,{...body,...extra},user)).status,400);
+ assert.equal((await f.request('POST',route,body,user,{'X-CSRF-Token':'invalid'})).status,403);assert.equal(f.probeCalls.length,0);
+ const accepted=await f.request('POST',route,body,user);assert.equal(accepted.status,202);assert.equal(accepted.value.check.id,id);const check=await settledProviderCheck(f,id,user);assert.equal(check.status,'passed');assert.equal(check.configurationMatches,true);assert.equal(check.observedThisSession,true);assert.equal(check.completionOnly,true);assert.equal(check.scope,'app_configuration');
+ assert.equal(f.probeCalls.length,1);assert.deepEqual(Object.keys(f.probeCalls[0]).sort(),['expectedRevision','onStopping','providerId','signal']);assert.equal(f.calls.length,0);
+ const replay=await f.request('POST',route,body,user);assert.equal(replay.value.check.id,id);assert.equal(f.probeCalls.length,1);const listed=(await f.request('GET',route,undefined,user)).value;assert.equal(listed.checks.length,1);assert.equal(listed.checks[0].id,id);
+ const verified=(await f.request('GET','/api/assistant/providers',undefined,user)).value.providers[0];assert.equal(verified.verified,true);assert.equal(verified.connectionCheck.id,id);assert.deepEqual(f.store.snapshot(),before);
+ const encoded=JSON.stringify({accepted:accepted.value,listed,verified});for(const secret of ['PRIVATE CHAT','PRIVATE KEY','apiKey','nonce','marker','sessionId'])assert.ok(!encoded.includes(secret),secret);
+ await f.restart();const nextUser=await f.session(),after=(await f.request('GET','/api/assistant/providers',undefined,nextUser)).value.providers[0];assert.equal(after.connectionCheck.status,'passed');assert.equal(after.connectionCheck.observedThisSession,false);assert.equal(after.verified,false);assert.equal(f.probeCalls.length,1);assert.deepEqual((await f.request('GET','/api/assistant/workspace',undefined,nextUser)).value,before);
+});
+
+test('changing a provider and global Stop prevent late test success while accepted checks retain their original IDs',async t=>{
+ let release;const pending=new Promise(resolve=>release=resolve),f=await fixture(t,{enableProviderChecks:true,probeConnection:async input=>{await pending;return{passed:true,providerId:input.providerId,revision:input.expectedRevision};}});
+ try{
+ const user=await f.session(),provider=f.descriptors[0],id=randomUUID(),body={id,providerId:provider.id,revision:provider.revision},route='/api/assistant/provider-checks';assert.equal((await f.request('POST',route,body,user)).status,202);
+ for(let tries=0;!f.probeCalls.length&&tries<50;tries++)await new Promise(resolve=>setTimeout(resolve,5));assert.equal(f.probeCalls.length,1);
+ const changed=await f.request('POST','/api/assistant/providers/configure',{id:provider.id,type:'codex',model:'synthetic-new-model'},user);assert.equal(changed.status,200);assert.notEqual(changed.value.providers[0].revision,provider.revision);assert.equal(changed.value.providers[0].verified,false);
+ const stopping=(await f.request('GET',route+'/'+id,undefined,user)).value.check;assert.equal(stopping.configurationMatches,false);assert.ok(['stopping','stale','cancelled'].includes(stopping.status));assert.equal(f.probeCalls[0].signal.aborted,true);
+ await f.request('POST','/api/assistant/stop',{},user);release();const ended=await settledProviderCheck(f,id,user);assert.notEqual(ended.status,'passed');assert.equal(ended.configurationMatches,false);
+ const replay=await f.request('POST',route,body,user);assert.equal(replay.value.check.id,id);assert.equal(f.probeCalls.length,1);assert.equal((await f.request('GET',route+'?providerId=fake',undefined,user)).status,400);
+ assert.equal((await f.request('POST',route+'/'+id+'/cancel',{providerId:'other'},user)).status,400);assert.equal(f.store.snapshot().revision,0);
+ }finally{release();}
+});
+
+test('unreadable private connection-test history isolates test routes while real workspace and configuration stay usable',async t=>{
+ const f=await fixture(t,{enableProviderChecks:true,invalidProviderCheckHistory:true}),user=await f.session(),before=f.store.snapshot();assert.equal((await f.request('GET','/api/assistant/workspace',undefined,user)).status,200);
+ const providers=(await f.request('GET','/api/assistant/providers',undefined,user)).value;assert.equal(providers.connectionChecksAvailable,false);assert.equal(providers.providers[0].ready,true);assert.equal(providers.providers[0].verified,false);
+ for(const method of ['GET','POST'])assert.equal((await f.request(method,'/api/assistant/provider-checks',method==='POST'?{id:randomUUID(),providerId:'fake',revision:f.descriptors[0].revision}:undefined,user)).status,503);
+ assert.equal(f.probeCalls.length,0);assert.equal(f.calls.length,0);assert.deepEqual(f.store.snapshot(),before);
+});
+
+test('cancelling one accepted connection test preserves a separate test until global Stop and actual settlement',async t=>{
+ const releases=new Map(),f=await fixture(t,{enableProviderChecks:true,probeConnection:input=>new Promise(resolve=>releases.set(input.providerId,()=>resolve({passed:true,providerId:input.providerId,revision:input.expectedRevision})))});
+ try{
+  const user=await f.session();await f.request('POST','/api/assistant/providers/configure',{id:'other',type:'compatible',model:'synthetic-model',baseUrl:'https://synthetic.example/v1',apiKey:'synthetic-unused-test-key'},user);
+  const first=f.descriptors.find(item=>item.id==='fake'),second=f.descriptors.find(item=>item.id==='other'),ids=[randomUUID(),randomUUID()],route='/api/assistant/provider-checks';
+  for(const [index,provider]of[first,second].entries())assert.equal((await f.request('POST',route,{id:ids[index],providerId:provider.id,revision:provider.revision},user)).status,202);
+  for(let tries=0;releases.size<2&&tries<100;tries++)await new Promise(resolve=>setTimeout(resolve,5));assert.equal(releases.size,2);
+  const cancel=await f.request('POST',route+'/'+ids[0]+'/cancel',{},user);assert.equal(cancel.status,200);assert.equal(cancel.value.check.status,'stopping');assert.equal(f.probeCalls.find(input=>input.providerId==='fake').signal.aborted,true);assert.equal(f.probeCalls.find(input=>input.providerId==='other').signal.aborted,false);
+  releases.get('fake')();assert.equal((await settledProviderCheck(f,ids[0],user)).status,'cancelled');assert.equal((await f.request('GET',route+'/'+ids[1],undefined,user)).value.check.status,'running');
+  const stopped=await f.request('POST','/api/assistant/stop',{},user);assert.equal(stopped.status,200);assert.equal(stopped.value.providerChecks.stopped,1);releases.get('other')();assert.equal((await settledProviderCheck(f,ids[1],user)).status,'cancelled');assert.equal(f.probeCalls.length,2);assert.equal(f.calls.length,0);assert.equal(f.store.snapshot().revision,0);
+ }finally{for(const release of releases.values())release();}
+});
+
+test('a provider status read cannot combine an older displayed configuration with a newer successful test',async t=>{
+ let release,entered;const held=new Promise(resolve=>release=resolve),started=new Promise(resolve=>entered=resolve),f=await fixture(t,{enableProviderChecks:true});
+ try{
+  const user=await f.session(),initial=structuredClone(f.descriptors[0]),getStatus=f.router.getStatus;let reads=0;
+  f.router.getStatus=async()=>{const status=structuredClone(await getStatus());if(++reads===1){entered();await held;}return status;};
+  const staleResponse=f.request('GET','/api/assistant/providers',undefined,user);await started;
+  const changed=(await f.request('POST','/api/assistant/providers/configure',{id:initial.id,type:'codex',model:'new-model'},user)).value.providers[0];assert.notEqual(changed.revision,initial.revision);
+  const id=randomUUID();assert.equal((await f.request('POST','/api/assistant/provider-checks',{id,providerId:changed.id,revision:changed.revision},user)).status,202);assert.equal((await settledProviderCheck(f,id,user)).status,'passed');
+  release();const stale=(await staleResponse).value.providers[0];assert.equal(stale.revision,initial.revision);assert.equal(stale.connectionCheck.revision,changed.revision);assert.equal(stale.verified,false);
+  const current=(await f.request('GET','/api/assistant/providers',undefined,user)).value.providers[0];assert.equal(current.revision,changed.revision);assert.equal(current.verified,true);
+ }finally{release();}
+});
 
 test('retained build attempts require a local session and only read the exact original candidate',async t=>{
   const f=await fixture(t),id=randomUUID(),route='/api/assistant/features/'+id+'/attempts/1';

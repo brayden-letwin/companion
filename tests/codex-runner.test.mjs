@@ -117,3 +117,29 @@ test('pre-spawn cancellation, invalid input and confirmed spawn failures notify 
   const variants=[{prompt:'',code:'validation_error'},{prompt:'Synthetic pre-abort.',signal:controller.signal,code:'request_cancelled'},{prompt:'Synthetic spawn throw.',spawnImpl:()=>{throw new Error('Synthetic private spawn diagnostic.');},code:'provider_unavailable'},{prompt:'Synthetic absent-pid spawn error.',spawnImpl:fakeSpawn(child=>child.emit('error',new Error('Synthetic failed spawn.'))),code:'provider_unavailable'}];
   for(const {code,...options}of variants){let count=0,started=0;await assert.rejects(runCodexCompletion({dataDirectory,...options,onHelperStarted(){started++;},onHelperSettled(...args){assert.deepEqual(args,[]);count++;throw new Error('Synthetic observer failure.');}}),{code});assert.equal(count,1);assert.equal(started,options.spawnImpl&&options.prompt.includes('absent-pid')?1:0);assert.deepEqual(await readdir(dataDirectory),[]);}
 });
+
+test('Codex connection-probe mode disables available tools without changing the configured default model',async t=>{
+  const dataDirectory=await directory(t);let inspected=false;
+  const spawnImpl=fakeSpawn(async(child,args,options)=>{
+    assert.deepEqual(await readdir(options.cwd),['connection-probe-instructions.txt']);assert.ok(!args.includes('--ignore-user-config'));assert.ok(!args.includes('--model'));assert.ok(!args.includes('--output-schema'));assert.equal(options.shell,false);
+    for(const feature of ['shell_tool','hooks','memories','multi_agent','multi_agent_v2','browser_use','browser_use_external','browser_use_full_cdp_access','in_app_browser','computer_use','view_image','image_generation','skill_search','skill_mcp_dependency_install','workspace_dependencies','sleep_tool','goals','tool_suggest'])assert.ok(args.some((value,index)=>value==='--disable'&&args[index+1]===feature),feature);
+    for(const option of ['mcp_servers={}','features.apps=false','features.plugins=false','web_search="disabled"','tools.view_image=false','project_doc_max_bytes=0','developer_instructions=""'])assert.ok(args.includes(option));
+    const instructionsPath=JSON.parse(args.find(arg=>arg.startsWith('model_instructions_file=')).slice('model_instructions_file='.length));assert.equal(instructionsPath,path.join(options.cwd,'connection-probe-instructions.txt'));assert.match(await readFile(instructionsPath,'utf8'),/one fixed synthetic connection check/);assert.ok(!child.input.includes(options.cwd));
+    inspected=true;finish(child,'COMPANION_CONNECTION_OK');
+  });
+  assert.equal((await runCodexCompletion({connectionProbe:true,prompt:'Synthetic connection check only.',dataDirectory,spawnImpl})).text,'COMPANION_CONNECTION_OK');assert.equal(inspected,true);
+});
+
+test('connection probes reject every non-message item proposal, repeated answers and outputs beyond their fixed cap',async t=>{
+  const dataDirectory=await directory(t);
+  for(const type of ['command_execution','mcp_tool_call','web_search','file_change','custom_tool_call','collab_tool_call','todo_list','future_unknown_action'])await assert.rejects(runCodexCompletion({connectionProbe:true,prompt:'Synthetic check.',dataDirectory,spawnImpl:fakeSpawn(child=>{child.stdout.write(JSON.stringify({type:'item.updated',item:{type}})+'\n');})}),{code:'unexpected_provider_action'});
+  await assert.rejects(runCodexCompletion({connectionProbe:true,prompt:'Synthetic check.',dataDirectory,spawnImpl:fakeSpawn(child=>{child.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'First'}})+'\n');finish(child,'COMPANION_CONNECTION_OK');})}),{code:'invalid_provider_response'});
+  await assert.rejects(runCodexCompletion({connectionProbe:true,prompt:'Synthetic check.',maxOutputBytes:2000000,dataDirectory,spawnImpl:fakeSpawn(child=>child.stdout.write('x'.repeat(32769)))}),{code:'provider_output_limit'});
+  const result=await runCodexCompletion({connectionProbe:true,prompt:'Synthetic check.',dataDirectory,spawnImpl:fakeSpawn(child=>{child.stdout.write('{"type":"item.completed","item":{"type":"reasoning","text":"Synthetic reasoning omitted"}}\n');finish(child,'COMPANION_CONNECTION_OK');})});assert.equal(result.text,'COMPANION_CONNECTION_OK');
+});
+
+test('fixed CLI startup diagnostic items are discarded and cannot replace real probe completion',async t=>{
+  const dataDirectory=await directory(t),diagnostic=JSON.stringify({type:'item.completed',item:{id:'synthetic-diagnostic',type:'error',message:'SYNTHETIC_PRIVATE_DIAGNOSTIC_NEVER_RETURNED'}})+'\n';
+  const result=await runCodexCompletion({connectionProbe:true,prompt:'Synthetic fixed check.',dataDirectory,spawnImpl:fakeSpawn(child=>{child.stdout.write('{"type":"thread.started"}\n');child.stdout.write(diagnostic);child.stdout.write('{"type":"turn.started"}\n');finish(child,'COMPANION_CONNECTION_OK');})});assert.deepEqual(result,{text:'COMPANION_CONNECTION_OK',toolCalls:[]});assert.ok(!JSON.stringify(result).includes('SYNTHETIC_PRIVATE_DIAGNOSTIC'));
+  for(const completed of [false,true])await assert.rejects(runCodexCompletion({connectionProbe:true,prompt:'Synthetic fixed check.',dataDirectory,spawnImpl:fakeSpawn(child=>{child.stdout.write(diagnostic);if(completed)child.stdout.write('{"type":"turn.completed"}\n');child.exitCode=0;child.emit('close',0);})}),error=>error.code==='provider_unavailable'&&!error.message.includes('SYNTHETIC_PRIVATE_DIAGNOSTIC'));
+});
