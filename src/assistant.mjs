@@ -1,3 +1,4 @@
+import { createVoiceSession } from './voice-session.mjs';
 const $ = id => document.getElementById(id);
 const shellCandidate = window.companionShell;
 const nativeShell = shellCandidate?.desktop===true&&['corner','workspace'].includes(shellCandidate.mode)
@@ -18,6 +19,9 @@ let runtimeNotice = null, runtimeRetry = null, mcpConfiguration = '', integratio
 let desktopStatus=null, desktopActions=[], desktopRefreshPromise=null, desktopEpoch=0, desktopToolBusy=false, desktopMutationBusy=false;
 let desktopExecutionGeneration=0, activeDesktopRequest=null, desktopStopPromise=null, desktopSnapshot=null, desktopReview=null, desktopInputTarget=null;
 let desktopReviewGeneration=0;
+let voiceDialogOverride=false;
+let voiceSession=null,voiceSessionState={enabled:false,optedIn:false,visible:true,status:'off'},voiceCaptureContext=null,voiceFirstContext=null,activeVoiceSegment=null,voiceOwnershipRequest=null,voiceOwnsCapture=false;
+let chatOpen=false,memoryBusy=false;
 let currentView = 'today', showCompleted = false, workspacePending = false, jobsPending = false;
 let operationBusy = false, featureBusy = false, providerBusy = false, editingProviderId = null, editingTarget = null;
 let pendingWorkspaceRequest = null;
@@ -28,6 +32,14 @@ const extensions = new Map();
 const runningWorkflows = new Set(), workflowResults = new Map();
 const jobDetails = new Map(), jobDetailPending = new Set();
 const jobDetailRetryAt = new Map();
+const CONVERSATION_ID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
+const savedConversationId = readStored('conversationId', null);
+let conversationId = typeof savedConversationId==='string'&&CONVERSATION_ID.test(savedConversationId)?savedConversationId:null;
+let conversations=[], conversationDetail=null, conversationInitialized=false, conversationSelectionGeneration=0;
+let conversationListPending=null, conversationDetailRequest=null, conversationLoading=false, conversationError='', conversationRenderKey='';
+let localChatTurn=null, newConversationRequest=null, conversationOptionsKey='';
+const conversationDrafts=new Map(), conversationUncertain=new Map();
+let conversationEarlierTurns=[],conversationEarlierCursor=null,conversationHasEarlier=false,conversationEarlierLoaded=false,conversationEarlierRequest=null;
 const preferences = readStored('preferences', {});
 $('read-aloud').checked = preferences?.readAloud === true;
 $('settings-read-aloud').checked = $('read-aloud').checked;
@@ -39,8 +51,94 @@ function button(text,className,action) { const node=element('button',className,t
 function timeLabel(value) { const date=new Date(value); return Number.isNaN(date.getTime())?'':date.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}); }
 function dateLabel(value) { const date=new Date(value); return Number.isNaN(date.getTime())?'':date.toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
 function toast(text) { $('toast').textContent=text; $('toast').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('toast').hidden=true,4500); }
+function captureConversationContext(){return {id:conversationId,selection:conversationSelectionGeneration};}
+function currentConversationContext(context){return !!context&&context.selection===conversationSelectionGeneration&&context.id===conversationId;}
+function conversationLocallyBusy(){return turnBusy||!!recording||microphoneOpening||voicePipeline;}
+function saveConversationDraft(){conversationDrafts.set(conversationId||'new',$('question').value);}
+function selectedConversationRunning(){return !!conversationDetail?.activeRequestId||conversationDetail?.turns?.some(turn=>turn.status==='running');}
+function renderConversationControls(){
+  const busy=conversationLocallyBusy()||conversationLoading||!!runtimeReconnectPromise;
+  const listKey=JSON.stringify(conversations.map(item=>[item.id,item.title,item.lastStatus]));
+  if(listKey!==conversationOptionsKey){conversationOptionsKey=listKey;const options=[element('option','','New conversation')];options[0].value='';for(const item of conversations){const option=element('option','',item.title||'Conversation');option.value=item.id;options.push(option);}$('conversation-select').replaceChildren(...options);}
+  $('conversation-select').value=conversationId||'';$('conversation-select').disabled=busy;$('conversation-new').disabled=busy;$('conversation-refresh').disabled=!!conversationListPending||!!conversationDetailRequest||!!runtimeReconnectPromise;
+  const uncertain=conversationId&&conversationUncertain.has(conversationId),running=selectedConversationRunning();
+  const last=conversationDetail?.turns?.at(-1);
+  $('conversation-status').textContent=conversationLoading?'Opening saved conversation…':uncertain?'Check the saved request before sending again. Use Refresh.':busy&&localChatTurn?'Working on this request. Cancel before switching conversations.':busy?'Finish recording or use Cancel before switching conversations.':running?'A saved request is running. You can open another conversation.':last?.status==='interrupted'?'Interrupted. Completed actions stay saved. Send a new message to continue.':conversationId?'Saved on this PC.':'Saved on this PC after you send.';
+  $('conversation-error').textContent=conversationError;
+  $('conversation-earlier').hidden=!conversationHasEarlier;$('conversation-load-earlier').disabled=!!conversationEarlierRequest||!!runtimeReconnectPromise;$('conversation-load-earlier').textContent=conversationEarlierRequest?'Loading…':'Load earlier';
+  const cannotSend=turnBusy||!!runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||conversationLoading||running||!!uncertain;
+  $('send-question').disabled=cannotSend;
+  if(running||uncertain||conversationLoading)$('mic-button').disabled=true;
+  else if(!runtimeReconnectPromise&&!desktopToolBusy&&!desktopMutationBusy)$('mic-button').disabled=false;
+}
+function summarizeConversation(detail){return {id:detail.id,title:detail.title,revision:detail.revision,createdAt:detail.createdAt,updatedAt:detail.updatedAt,activeRequestId:detail.activeRequestId,turnCount:detail.totalTurns??detail.turns.length,lastStatus:detail.turns.at(-1)?.status||null};}
+function validateConversation(detail,id=detail?.id){if(!detail||detail.id!==id||!CONVERSATION_ID.test(detail.id)||!Number.isSafeInteger(detail.revision)||!Array.isArray(detail.turns))throw new Error('The saved conversation could not be read.');return detail;}
+function clearAcceptedDraft(turn){if(!turn||turn.conversationId!==conversationId)return;if($('question').value.trim()===turn.message){$('question').value='';conversationDrafts.set(conversationId,'');}}
+function adoptConversation(detail,context){
+  validateConversation(detail);if(!currentConversationContext(context)||detail.id!==conversationId)return false;
+  if(conversationDetail&&conversationDetail.id===detail.id&&conversationDetail.revision>detail.revision)return false;
+  if(conversationEarlierLoaded&&conversationDetail?.id===detail.id){const retained=new Map([...conversationEarlierTurns,...conversationDetail.turns].map(turn=>[turn.id,turn]));conversationEarlierTurns=[...retained.values()];}
+  if(!conversationEarlierLoaded){conversationEarlierCursor=detail.olderThan||detail.turns[0]?.id||null;conversationHasEarlier=detail.hasMore===true;}
+  conversationDetail=detail;const summary=summarizeConversation(detail);conversations=[summary,...conversations.filter(item=>item.id!==summary.id)];
+  conversationUncertain.delete(detail.id);
+  if(localChatTurn?.conversationId===detail.id&&detail.turns.some(turn=>turn.id===localChatTurn.id))clearAcceptedDraft(localChatTurn);
+  renderSavedConversation();renderConversationControls();return true;
+}
+function attachSavedFeatureLink(article,featureJob){const job=featureJob?.job||featureJob;if(!job?.id)return;article.append(button('View feature build ↗','quiet-button',()=>{selectedJobId=job.id;showView('build');}));}
+function renderSavedConversation(){
+  const merged=new Map([...conversationEarlierTurns,...(conversationDetail?.turns||[])].map(turn=>[turn.id,turn]));const turns=[...merged.values()];if(localChatTurn?.conversationId===conversationId&&!turns.some(turn=>turn.id===localChatTurn.id))turns.push(localChatTurn);
+  const key=JSON.stringify([conversationId,conversationDetail?.revision,turns,desktopActions.map(action=>[action.id,action.status])]);if(key===conversationRenderKey)return;conversationRenderKey=key;
+  const scroll=$('content-scroll'),previousTop=scroll.scrollTop,nearBottom=scroll.scrollHeight-scroll.scrollTop-(scroll.clientHeight||0)<120;
+  messages=[];latestAnswer=null;$('messages').replaceChildren();$('welcome-card').hidden=turns.length>0;$('today-summary').hidden=turns.length>0;$('today-bottom').hidden=turns.length>0;
+  const labels={running:'Working…',failed:'Could not finish',cancelled:'Stopped',interrupted:'Interrupted'};
+  for(const turn of turns){
+    const user=addMessage('user',typeof turn.message==='string'?turn.message:'');user.dataset.turnId=turn.id;
+    if(turn.reply&&typeof turn.reply.text==='string'){const provider=providers.find(item=>item.id===(turn.reply.providerId||turn.providerId));const answer=addMessage('assistant',turn.reply.text,'Companion'+(provider?' · '+provider.label:''));renderActionReceipts(answer,turn.reply.actions,{historical:true});attachSavedFeatureLink(answer,turn.reply.featureJob);}
+    else if(turn.status!=='completed'){const fallback=turn.status==='interrupted'?'Companion restarted before this request finished. Check completed actions before sending a new request.':turn.status==='cancelled'?'Stopped. Actions already completed remain saved.':turn.status==='failed'?'This request did not finish. Completed actions remain saved.':'This request is saved and running.';user.append(element('p','saved-turn-status status-'+turn.status,labels[turn.status]||turn.status),element('p','saved-turn-detail',turn.error?.message||fallback));renderActionReceipts(user,turn.error?.actions,{historical:true});}
+  }
+  updateCornerPreview(turns.at(-1)?.reply?.text||turns.at(-1)?.message||'');renderCorner();
+  if(!nearBottom&&!localChatTurn)scroll.scrollTop=previousTop;
+}
+async function refreshConversation({quiet=false}={}){
+  const context=captureConversationContext();if(!context.id||destroyed||runtimeReconnectPromise)return null;
+  if(conversationDetailRequest?.id===context.id&&conversationDetailRequest.selection===context.selection)return conversationDetailRequest.promise;
+  const request={...context,promise:null};conversationDetailRequest=request;renderConversationControls();
+  request.promise=(async()=>{try{const detail=validateConversation(await boundedApi('conversations/'+encodeURIComponent(context.id)),context.id);if(adoptConversation(detail,context)){conversationError='';renderConversationControls();}return detail;}catch(error){if(currentConversationContext(context)){conversationError=error.message;renderConversationControls();}if(!quiet)throw error;return null;}finally{if(conversationDetailRequest===request){conversationDetailRequest=null;renderConversationControls();}}})();return request.promise;
+}
+async function refreshConversations({initialize=false,quiet=false}={}){
+  if(conversationListPending)return conversationListPending;
+  conversationListPending=(async()=>{try{const value=await boundedApi('conversations');if(!Array.isArray(value.conversations))throw new Error('Saved conversations could not be read.');conversations=value.conversations.filter(item=>item&&CONVERSATION_ID.test(item.id));if(conversationDetail?.id===conversationId&&!conversations.some(item=>item.id===conversationId))conversations.unshift(summarizeConversation(conversationDetail));conversationError='';
+    if(initialize&&!conversationInitialized){conversationInitialized=true;const desired=conversations.some(item=>item.id===conversationId)?conversationId:conversations[0]?.id||null;conversationId=desired;if(desired)store('conversationId',desired);}
+    renderConversationControls();if(conversationId)await refreshConversation({quiet});else renderSavedConversation();
+  }catch(error){conversationError=error.message;renderConversationControls();if(!quiet)throw error;}finally{conversationListPending=null;renderConversationControls();}})();return conversationListPending;
+}
+async function selectConversation(id,{allowVoiceCommand=false}={}){
+  if((conversationLocallyBusy()&&!(allowVoiceCommand&&!turnBusy&&!recording&&!microphoneOpening))||conversationLoading||runtimeReconnectPromise){toast('Use Cancel or finish this request before switching conversations.');renderConversationControls();return false;}
+  if(id!==null&&(!CONVERSATION_ID.test(id)||!conversations.some(item=>item.id===id)))return false;
+  if(id===conversationId){conversationInitialized=true;store('conversationId',id);if(id)await refreshConversation({quiet:true});else renderConversationControls();return true;}
+  saveConversationDraft();disableHandsFree();stopSpeech();conversationInitialized=true;conversationSelectionGeneration++;conversationId=id;conversationDetail=null;conversationEarlierTurns=[];conversationEarlierCursor=null;conversationHasEarlier=false;conversationEarlierLoaded=false;conversationEarlierRequest=null;conversationRenderKey='';conversationError='';newConversationRequest=null;store('conversationId',id);$('question').value=conversationDrafts.get(id||'new')||'';conversationLoading=!!id;renderSavedConversation();renderConversationControls();
+  const context=captureConversationContext();try{if(id)await refreshConversation({quiet:true});}finally{if(currentConversationContext(context)){conversationLoading=false;renderConversationControls();}}return true;
+}
+async function loadEarlierConversation(){
+  const context=captureConversationContext(),cursor=conversationEarlierCursor;if(!context.id||!cursor||!conversationHasEarlier||conversationEarlierRequest||runtimeReconnectPromise)return;
+  const request={...context,cursor};conversationEarlierRequest=request;conversationError='';renderConversationControls();
+  const scroll=$('content-scroll'),previousTop=scroll.scrollTop,previousHeight=scroll.scrollHeight;
+  try{const page=validateConversation(await boundedApi('conversations/'+encodeURIComponent(context.id)+'?before='+encodeURIComponent(cursor)),context.id);if(!currentConversationContext(context)||conversationEarlierRequest!==request)return;
+    const merged=new Map([...page.turns,...conversationEarlierTurns].map(turn=>[turn.id,turn]));conversationEarlierTurns=[...merged.values()];conversationEarlierLoaded=true;conversationEarlierCursor=page.olderThan||page.turns[0]?.id||null;conversationHasEarlier=page.hasMore===true;renderSavedConversation();scroll.scrollTop=previousTop+Math.max(0,scroll.scrollHeight-previousHeight);
+  }catch(error){if(currentConversationContext(context)){conversationError=error.message;}}
+  finally{if(conversationEarlierRequest===request){conversationEarlierRequest=null;renderConversationControls();}}
+}
+async function ensureConversation(context){
+  if(context.id){const detail=validateConversation(await boundedApi('conversations/'+encodeURIComponent(context.id)),context.id);return detail;}
+  newConversationRequest??={id:crypto.randomUUID()};const request=newConversationRequest;const detail=validateConversation(await boundedApi('conversations',{method:'POST',body:JSON.stringify(request)}),request.id);return detail;
+}
+$('question').addEventListener('input',saveConversationDraft);
+$('conversation-select').addEventListener('change',event=>{void selectConversation(event.target.value||null);});
+$('conversation-new').addEventListener('click',()=>{void selectConversation(null);});
+$('conversation-refresh').addEventListener('click',()=>{void refreshConversations({initialize:true,quiet:true});});
+$('conversation-load-earlier').addEventListener('click',()=>{void loadEarlierConversation();});
 function emptyState(title,description) { const node=element('div','empty-state'); node.append(element('span','empty-glyph','✧'),element('h2','',title),element('p','',description)); return node; }
-function showDialog(id) { ensureCornerExpanded();disableHandsFree(); if(recording||microphoneOpening)stopRecording(false); if(!$(id).open)$(id).showModal(); }
+function showDialog(id) { ensureCornerExpanded();voiceDialogOverride=false;voiceSession?.pause('dialog');disableHandsFree(); if(recording||microphoneOpening)stopRecording(false); if(!$(id).open)$(id).showModal(); }
 function renderCorner(){
   document.body.classList.toggle('corner-mode',cornerMode);document.body.classList.toggle('native-shell',!!nativeShell);
   document.body.classList.toggle('corner-expanded',cornerMode&&cornerExpanded);document.body.classList.toggle('corner-collapsed',cornerMode&&!cornerExpanded);
@@ -58,17 +156,17 @@ function initNativeShell(){
   $('corner-expand').addEventListener('click',()=>setCornerExpanded(!cornerExpanded));
   $('corner-recent').addEventListener('click',()=>{ensureCornerExpanded();showView('today');});
   $('corner-open-workspace').addEventListener('click',()=>{if(nativeShell){try{nativeShell.openWorkspace();}catch{toast('The workspace could not be opened.');}}else location.assign('assistant.html?mode=workspace');});
-  $('corner-hide').addEventListener('click',()=>{if(!nativeShell)return;cancelTurn(false);try{nativeShell.hide();}catch{toast('The corner could not be hidden.');}});
+  $('corner-hide').addEventListener('click',()=>{if(!nativeShell)return;setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});try{nativeShell.hide();}catch{toast('The corner could not be hidden.');}});
   $('corner-desktop').addEventListener('click',()=>{ensureCornerExpanded();showView('desktop');});
   $('restart-desktop').addEventListener('click',restartNativeDesktop);
   if(!nativeShell)return;
   try{
-    shellSubscriptions.push(nativeShell.onStop(event=>{if(event?.reason==='hidden')cancelTurn(false);else stopAllActivity(false,{global:event?.reason==='shortcut'});}));
+    shellSubscriptions.push(nativeShell.onStop(event=>{if(event?.reason==='hidden'){setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});}else stopAllActivity(false,{global:event?.reason==='shortcut'});}));
     shellSubscriptions.push(nativeShell.onModeChanged(state=>{
       if(!state||state.mode!==nativeShell.mode)return;
       if(typeof state.expanded==='boolean')cornerExpanded=state.expanded;
       if(typeof state.sourceRuntime==='boolean'){nativeSourceRuntime=state.sourceRuntime;featureRenderKey='';renderJobs();}
-      if(state.visible===false)cancelTurn(false);if(typeof state.visible==='boolean')nativeWindowVisible=state.visible;
+      if(state.visible===false){setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});}if(typeof state.visible==='boolean'){nativeWindowVisible=state.visible;if(state.visible)void setVoiceVisible(true);}
       if(state.shortcuts){$('native-shortcut-hint').hidden=false;$('native-shortcut-hint').textContent=[state.shortcuts.toggle?'Ctrl + Alt + Space shows corner':'Corner shortcut unavailable',state.shortcuts.stop?'Ctrl + Alt + Esc stops':'Global stop unavailable'].join(' · ');}
       renderCorner();
     }));
@@ -77,14 +175,18 @@ function initNativeShell(){
 function restartNativeDesktop(){if(typeof nativeShell?.restart!=='function'){toast('Close and relaunch the Companion desktop app to load its updated controls.');return;}stopAllActivity();try{nativeShell.restart();}catch{toast('The desktop app could not be relaunched.');}}
 function desktopUpdateNotice(){return nativeSourceRuntime===true?'Desktop source changed. Restart the desktop app to load its updated controls; a server-worker restart does not reload desktop code.':nativeSourceRuntime===false?'Desktop source changed. Rebuild the desktop app to load it; relaunching this copied package does not load repository edits.':'Desktop source changed. Relaunch from the updated source, or rebuild a copied desktop package, to load it.';}
 for(const close of document.querySelectorAll('.close-dialog'))close.addEventListener('click',()=>close.closest('dialog').close());
+for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('close',()=>{void Promise.resolve().then(()=>{if(!document.querySelector('dialog[open]')){voiceDialogOverride=false;maybeResume();}});});
+function setChatOpen(value){chatOpen=!!value;document.body.classList.toggle('chat-open',chatOpen);$('chat-toggle').setAttribute('aria-expanded',String(chatOpen));$('chat-toggle').setAttribute('aria-pressed',String(chatOpen));showView('today');if(chatOpen)void refreshConversations({initialize:true,quiet:true});}
+$('chat-toggle').addEventListener('click',()=>setChatOpen(!chatOpen));
+$('voice-home').addEventListener('click',()=>setChatOpen(false));
 function showView(view) {
   if(!['today','tasks','notes','workflows','build','settings','desktop'].includes(view)&&!extensions.has(view))return;
-  currentView=view;
+  currentView=view;document.body.classList.toggle('tools-open',view!=='today');$('voice-home').setAttribute('aria-pressed',String(view==='today'&&!chatOpen));
   document.querySelectorAll('.view-panel').forEach(panel=>panel.hidden=panel.id!==view+'-view');
   document.querySelectorAll('[data-view]').forEach(item=>{item.classList.toggle('active',item.dataset.view===view);item.setAttribute('aria-current',item.dataset.view===view?'page':'false');});
-  $('view-title').textContent=extensions.get(view)?.title||({today:'Today',tasks:'Tasks',notes:'Notes',workflows:'Workflows',build:'Build a feature',settings:'Settings',desktop:'Computer'})[view];
+  $('view-title').textContent=extensions.get(view)?.title||({today:'Chat',tasks:'Tasks',notes:'Notes',workflows:'Workflows',build:'Build a feature',settings:'Settings',desktop:'Computer'})[view];
   $('content-scroll').scrollTop=0;
-  if(view==='settings'){renderProviders();renderRuntime();if(!mcpConfiguration)void loadIntegrations();void refreshDesktop().catch(error=>{$('desktop-settings-status').textContent=error.message;});}
+  if(view==='settings'){renderMemory();renderProviders();renderRuntime();if(!mcpConfiguration)void loadIntegrations();void refreshDesktop().catch(error=>{$('desktop-settings-status').textContent=error.message;});}
   if(view==='build'){renderJobs();refreshJobsSafely();}
   if(view==='desktop')void refreshDesktop().catch(error=>{$('desktop-error').textContent=error.message;});
   if(view!=='settings')$('provider-key').value='';
@@ -99,7 +201,7 @@ async function api(path,options={}) {
   try{response=await fetch('/api/assistant/'+path,{...rest,headers,credentials:'same-origin',cache:'no-store',redirect:'error',signal});}
   catch(error){if(error.name==='AbortError')throw error;throw new Error('Companion’s service could not be reached. Double-click Start Companion.cmd, then check again.');}
   let data;try{data=await response.json();}catch{throw new Error('The service returned an unreadable response. Check the connection and try again.');}
-  if(!response.ok){const error=new Error(data?.error?.message||'This request could not be completed.');error.code=data?.error?.code;error.status=response.status;error.workspace=data?.workspace;error.actions=data?.actions;throw error;}
+  if(!response.ok){const error=new Error(data?.error?.message||'This request could not be completed.');error.code=data?.error?.code;error.status=response.status;error.workspace=data?.workspace;error.actions=data?.actions;error.conversation=data?.conversation;error.conversationId=data?.conversationId;throw error;}
   return data;
 }
 async function boundedApi(path,options={},milliseconds=15000){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),milliseconds);try{return await api(path,{...options,signal:controller.signal});}catch(error){if(error.name==='AbortError')throw new Error('This request took too long. Check the connection and try again.');throw error;}finally{clearTimeout(timeout);}}
@@ -123,6 +225,7 @@ async function checkService({reconnecting=false,force=false,deadline=Infinity}={
       if(results[3].status==='fulfilled'&&Array.isArray(results[3].value.jobs)){jobs=results[3].value.jobs;if(!selectedJobId&&jobs.length)selectedJobId=jobs[0].id;renderJobs();}else if(results[3].status==='rejected')serviceError||=results[3].reason.message;
       if(results[4].status==='fulfilled')applyRuntime(results[4].value);
       if(results[5].status==='fulfilled')applyDesktopStatus(results[5].value);
+      void refreshConversations({initialize:true,quiet:true});
       return {workspaceReady:results[2].status==='fulfilled',jobsReady:results[3].status==='fulfilled',runtimeReady:results[4].status==='fulfilled'};
     }catch(error){if(check===serviceCheckGeneration){serviceError=error.message;providers=[];activeProviderId='';service={transcriptionReady:false};}return {workspaceReady:false,jobsReady:false,runtimeReady:false};}
     finally{if(check===serviceCheckGeneration){renderProviders();renderService();renderRuntime();$('connection-refresh').disabled=!!runtimeReconnectPromise;$('retry-service').disabled=!!runtimeReconnectPromise;checkingService=null;}}
@@ -140,7 +243,7 @@ function renderService(){
   details.append(element('p','',ready?`${provider.label}${provider.model?' · '+provider.model:''}`:serviceError||provider?.unavailableReason||'Open Settings to use your existing Codex sign-in, or connect GPT, Claude, a compatible API, or a local model.'));
   details.append(element('strong','',service.transcriptionReady?'Voice input is ready':'Voice input is not ready'),element('p','',$('transcription-status').textContent));
   details.append(element('small','','Your chosen provider handles your messages. API connections may incur provider charges. Tasks, notes, workflows, and build history are saved on this PC.'));
-  if(!turnBusy&&!recording&&!microphoneOpening)setState('idle');updateVoiceHelp();
+  if(!turnBusy&&!voicePipeline&&!recording&&!microphoneOpening)setState('idle');updateVoiceHelp();void restoreVoiceIfAllowed();
   renderRuntime();
 }
 function applyRuntime(value){
@@ -167,6 +270,7 @@ function renderRuntime(){
   $('provider-select').disabled=busy||providerBusy||!providers.length;
   $('provider-save').disabled=busy||providerBusy;
   $('build-submit').disabled=busy||featureBusy;
+  renderConversationControls();renderVoiceControls();
   if(busy||desktopToolBusy||desktopMutationBusy)$('hands-free').disabled=true;if(busy){$('connection-label').textContent='Reconnecting to Companion…';$('connection-dot').className='status-dot offline';}
 }
 async function reconnectAfterRestart(metadata,{jobId=null,action='restart'}={}){
@@ -298,7 +402,7 @@ async function runDesktopTool(tool,args={}){
   const timeout=setTimeout(()=>controller.abort(),45000);
   try{const value=await api('tools/run',{method:'POST',body:JSON.stringify({tool,arguments:args,operationId:crypto.randomUUID()}),signal:controller.signal});if(turn!==desktopExecutionGeneration)throw new DOMException('Stopped.','AbortError');if(value.workspace)applyWorkspace(value.workspace);if(value.result?.error)throw new Error(value.result.error);ingestDesktopResult(value.result);return value.result;}
   catch(error){if(error.name==='AbortError')throw new Error('The computer request was stopped. Check its actual result before trying again.');throw error;}
-  finally{clearTimeout(timeout);if(activeDesktopRequest?.turn===turn)activeDesktopRequest=null;if(turn===desktopExecutionGeneration){desktopToolBusy=false;setState('idle');renderDesktopStatus();renderRuntime();}}
+  finally{clearTimeout(timeout);if(activeDesktopRequest?.turn===turn)activeDesktopRequest=null;if(turn===desktopExecutionGeneration){desktopToolBusy=false;setState('idle');renderDesktopStatus();renderRuntime();maybeResume();}}
 }
 $('desktop-app-form').addEventListener('submit',async event=>{event.preventDefault();$('desktop-error').textContent='';try{const result=await runDesktopTool('desktop_list_apps',{query:$('desktop-app-query').value.trim()});const list=$('desktop-app-results');list.replaceChildren();if(!Array.isArray(result.apps))throw new Error('Installed apps could not be read.');if(!result.apps.length)list.append(element('p','desktop-hint','No matching installed apps were found.'));for(const app of result.apps){const row=element('div','desktop-app-row');row.append(element('span','',app.name),button('Open ↗','quiet-button',async()=>{try{const opened=await runDesktopTool('desktop_open_app',{appId:app.id});if(opened.desktopReceipt?.status==='completed')toast(opened.desktopReceipt.summary);}catch(error){$('desktop-error').textContent=error.message;}}));list.append(row);}if(result.truncated)list.append(element('p','form-hint','More apps match. Narrow your search.'));}catch(error){$('desktop-error').textContent=error.message;}});
 $('desktop-window-list').addEventListener('click',async()=>{$('desktop-error').textContent='';try{const result=await runDesktopTool('desktop_list_windows',{});const list=$('desktop-window-results');list.replaceChildren();if(!Array.isArray(result.windows))throw new Error('Open windows could not be read.');if(!result.windows.length)list.append(element('p','desktop-hint','No available windows were found.'));for(const window of result.windows){const row=element('div','desktop-window-row'),info=element('div');info.append(element('strong','',window.title||'Untitled window'),element('span','',window.appName));const actions=element('div','desktop-window-actions');actions.append(button('Focus','quiet-button',async()=>{try{const result=await runDesktopTool('desktop_focus_window',{windowId:window.id});if(result.desktopReceipt?.status==='completed')toast(result.desktopReceipt.summary);}catch(error){$('desktop-error').textContent=error.message;}}),button('Read window','quiet-button',()=>void readDesktopWindow(window.id)));row.append(info,actions);list.append(row);}if(result.truncated)list.append(element('p','form-hint','The window list is truncated.'));}catch(error){$('desktop-error').textContent=error.message;}});
@@ -351,7 +455,7 @@ async function desktopActionOperation(operation){
   const turn=++desktopExecutionGeneration,controller=new AbortController();activeDesktopRequest={controller,turn};desktopMutationBusy=true;renderDesktopReview();renderDesktopStatus();renderRuntime();const timeout=setTimeout(()=>controller.abort(),45000);
   try{const value=await api(`desktop/actions/${encodeURIComponent(frozen.id)}/${operation}`,{method:'POST',body:JSON.stringify({}),signal:controller.signal});if(turn!==desktopExecutionGeneration)return;if(value.desktopAction)rememberDesktopAction(value.desktopAction);if(value.workspace)applyWorkspace(value.workspace);if(value.desktopAction?.status==='completed')updateCornerPreview(value.desktopAction.receipt?.summary||value.desktopAction.summary);}
   catch(error){if(turn===desktopExecutionGeneration){$('desktop-review-error').textContent=error.name==='AbortError'?'The action was stopped. Check the actual result before trying again.':error.message;void refreshDesktop().catch(()=>{});}}
-  finally{clearTimeout(timeout);if(activeDesktopRequest?.turn===turn)activeDesktopRequest=null;if(turn===desktopExecutionGeneration){desktopMutationBusy=false;renderDesktopReview();renderDesktopStatus();renderRuntime();}}
+  finally{clearTimeout(timeout);if(activeDesktopRequest?.turn===turn)activeDesktopRequest=null;if(turn===desktopExecutionGeneration){desktopMutationBusy=false;renderDesktopReview();renderDesktopStatus();renderRuntime();maybeResume();}}
 }
 $('desktop-review-approve').addEventListener('click',()=>void desktopActionOperation('approve'));
 $('desktop-review-cancel').addEventListener('click',()=>void desktopActionOperation('cancel'));
@@ -398,6 +502,13 @@ $('connection-refresh').addEventListener('click',()=>void checkService());$('ret
 $('service-details').addEventListener('click',()=>{renderService();showDialog('service-dialog');});
 $('open-connections').addEventListener('click',()=>{$('service-dialog').close();showView('settings');});
 function applyWorkspace(value){if(!value||!Number.isSafeInteger(value.revision)||!Array.isArray(value.tasks)||!Array.isArray(value.notes)||!Array.isArray(value.workflows))throw new Error('Your workspace could not be read.');if(workspace&&value.revision<workspace.revision)return;workspace=value;renderWorkspace();}
+function renderMemory(){
+  const list=$('memory-list');list.replaceChildren();const all=Array.isArray(workspace?.preferences)?workspace.preferences:[],visible=all.filter(item=>$('memory-show-forgotten').checked||!item.archived);
+  if(!visible.length){list.append(element('p','memory-empty','No preferences saved yet.'));return;}
+  for(const item of visible){const row=element('article','memory-row'+(item.archived?' memory-forgotten':'')),text=element('div');text.append(element('strong','',item.label||item.key),element('p','',item.value));const action=button(item.archived?'Remember again':'Forget','quiet-button',()=>void changeMemory(item));action.disabled=memoryBusy;row.append(text,action);list.append(row);}
+}
+async function changeMemory(item){if(memoryBusy||runtimeReconnectPromise)return;memoryBusy=true;$('memory-error').textContent='';renderMemory();try{const tool=item.archived?'remember_preference':'forget_preference',args=item.archived?{key:item.key,label:item.label,value:item.value}:{preferenceId:item.id};const value=await boundedApi('tools/run',{method:'POST',body:JSON.stringify({tool,arguments:args,operationId:crypto.randomUUID()})});if(value.result?.error)throw new Error(value.result.error);if(value.workspace)applyWorkspace(value.workspace);else await refreshWorkspace();}catch(error){$('memory-error').textContent=error.message;}finally{memoryBusy=false;renderMemory();}}
+$('memory-show-forgotten').addEventListener('change',renderMemory);
 async function refreshWorkspace(){if(workspacePending||destroyed)return;workspacePending=true;try{applyWorkspace(await boundedApi('workspace'));}finally{workspacePending=false;}}
 async function workspaceOperation(type,fields={}){
   if(runtimeReconnectPromise)throw new Error('Companion is reconnecting. Your draft is still here; save when it is ready.');
@@ -427,6 +538,7 @@ $('retry-workspace-change').addEventListener('click',async()=>{
   }catch(error){toast(error.message);}finally{operationBusy=false;$('retry-workspace-change').disabled=false;}
 });
 function renderWorkspace(){
+  renderMemory();
   if(!workspace)return;
   const tasks=workspace.tasks.filter(task=>task.status!=='done'),notes=workspace.notes.filter(note=>!note.archived);
   $('task-count').textContent=tasks.length;$('note-count').textContent=notes.length;$('today-task-count').textContent=tasks.length;$('today-note-count').textContent=notes.length;$('today-workflow-count').textContent=workspace.workflows.length;
@@ -553,29 +665,29 @@ async function loadExtensions(){
   }catch(error){toast(error.message);}
 }
 function setState(state,detail=''){
-  const labels={idle:'Here when you need me.',opening:'Opening your microphone…',listening:'Listening to you.',transcribing:'Turning speech into text…',thinking:'Working on it…',desktop:'Working with your computer…',speaking:'Reading the reply aloud.'};
+  const labels={idle:voiceSessionState.enabled?'Microphone paused':'Microphone off',opening:'Opening your microphone…',listening:'Listening…',transcribing:'Turning speech into text…',thinking:'Working…',desktop:'Working with your computer…',speaking:'Reading the reply aloud.'};
   $('voice-state').textContent=labels[state]||state;$('voice-detail').textContent=detail||(state==='idle'?'Type, or tap the mic.':'');
   $('corner-state').textContent=labels[state]||state;
   $('desktop-review-mic').textContent=state==='listening'?'Finish recording':'Speak this command';$('desktop-review-mic').setAttribute('aria-pressed',String(state==='listening'));
   $('mic-button').classList.toggle('recording',state==='listening');$('mic-button').classList.toggle('working',['thinking','transcribing','desktop'].includes(state));$('mic-button').setAttribute('aria-pressed',String(state==='listening'));$('mic-button').setAttribute('aria-label',state==='listening'?'Finish recording':'Start recording');
-  $('turn-progress').hidden=!['thinking','transcribing','speaking','opening','listening','desktop'].includes(state);$('progress-text').textContent=state==='listening'?'Microphone on · up to 60 seconds':labels[state]||state;
+  $('turn-progress').hidden=!['thinking','transcribing','speaking','opening','listening','desktop'].includes(state);$('progress-text').textContent=state==='listening'?'Microphone on · up to 60 seconds':labels[state]||state;renderConversationControls();
 }
-function setBusy(busy){turnBusy=busy;$('send-question').disabled=busy||!!runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy;}
+function setBusy(busy){turnBusy=busy;if(busy)voiceSession?.pause('busy');renderConversationControls();if(!busy)maybeResume();}
 function addMessage(role,text,label=role==='user'?'You':'Companion'){
   $('welcome-card').hidden=true;$('today-summary').hidden=true;$('today-bottom').hidden=true;
   const article=element('article','message '+role);article.append(element('div','message-label',label),element('div','message-text',text));
   if(role==='assistant'){latestAnswer={text};const actions=element('div','message-actions');actions.append(button('Save as a note','quiet-button',async()=>{try{await workspaceOperation('addNote',{text});toast('Saved in your notes.');}catch(error){toast(error.message);}}));article.append(actions);}
-  $('messages').append(article);messages.push({role,text});if(messages.length>40)messages.shift();while($('messages').children.length>40)$('messages').firstElementChild.remove();updateCornerPreview(text);
+  $('messages').append(article);messages.push({role,text});updateCornerPreview(text);
   $('content-scroll').scrollTop=$('content-scroll').scrollHeight;return article;
 }
-function renderActionReceipts(container,actions){
+function renderActionReceipts(container,actions,{historical=false}={}){
   if(!container||!Array.isArray(actions))return;
   const labels={create_task:'Task saved',update_task:'Task updated',complete_task:'Task completed',save_note:'Note saved',list_tasks:'Tasks checked',list_notes:'Notes checked',search_notes:'Notes searched',read_note:'Note opened',start_focus:'Focus started',stop_focus:'Focus ended',save_workflow:'Workflow saved',run_workflow:'Workflow run',build_feature:'Feature build',list_feature_builds:'Builds checked',get_time:'Current time'};
-  for(const action of actions){const result=action.result||{},failed=action.status==='failed'||!!action.error||!!result.error;let text;
+  for(const action of actions){let result=action.result||{};if(historical&&result.desktopAction){const current=desktopActions.find(item=>item.id===result.desktopAction.id);if(current)result={...result,desktopAction:current};}const failed=action.status==='failed'||!!action.error||!!result.error;let text;
     if(failed){const error=result.error||action.error;text=(labels[action.tool]||action.tool||'Action')+' · could not finish: '+(typeof error==='string'?error:error?.message||'Unknown error');}
-    else if(result.desktopAction){ingestDesktopResult(result);text=(desktopPending(result.desktopAction)?'Needs your review · ':DESKTOP_LABELS[result.desktopAction.status]+' · ')+result.desktopAction.summary;}
-    else if(result.desktopReceipt){ingestDesktopResult(result);text=result.desktopReceipt.summary;}
-    else if(result.featureJob)text='Feature build started · '+(JOB_LABELS[result.featureJob.status]||result.featureJob.status);
+    else if(result.desktopAction){if(!historical)ingestDesktopResult(result);text=(desktopPending(result.desktopAction)?(historical?'Prepared desktop action · ':'Needs your review · '):DESKTOP_LABELS[result.desktopAction.status]+' · ')+result.desktopAction.summary;}
+    else if(result.desktopReceipt){if(!historical)ingestDesktopResult(result);text=result.desktopReceipt.summary;}
+    else if(result.featureJob)text=historical?'Feature build requested · check build history for its current state':'Feature build started · '+(JOB_LABELS[result.featureJob.status]||result.featureJob.status);
     else if(result.task)text=(labels[action.tool]||'Task updated')+' · '+result.task.title;
     else if(result.note)text=(labels[action.tool]||'Note opened')+' · '+result.note.title;
     else if(Array.isArray(result.tasks))text='Tasks checked · '+result.tasks.length+' found';
@@ -586,35 +698,48 @@ function renderActionReceipts(container,actions){
     if(!failed&&desktopPending(result.desktopAction))receipt.append(button('Review action ↗','quiet-button',()=>void openDesktopReview(result.desktopAction.id)));
   }
 }
-async function requestWithTurn(path,body,options,turn){const id=crypto.randomUUID(),controller=new AbortController();activeRequest={id,controller,turn};const timeout=setTimeout(()=>controller.abort(),path==='transcribe'?90000:300000);try{const value=await api(path,{method:'POST',body:options?.raw?body:JSON.stringify({...body,id}),signal:controller.signal,raw:options?.raw,id,headers:options?.headers});if(value.id!==id)throw new Error('The response could not be matched to this request. Try again.');return value;}catch(error){if(error.name==='AbortError'&&turn===generation){void cancelBackend(id);throw new Error('This request took too long. Check your connection, then try again.');}throw error;}finally{clearTimeout(timeout);if(activeRequest?.id===id)activeRequest=null;}}
+async function requestWithTurn(path,body,options,turn){const id=options?.requestId||crypto.randomUUID(),controller=new AbortController();activeRequest={id,controller,turn};const timeout=setTimeout(()=>controller.abort(),path==='transcribe'?90000:300000);try{const value=await api(path,{method:'POST',body:options?.raw?body:JSON.stringify({...body,id}),signal:controller.signal,raw:options?.raw,id,headers:options?.headers});if(value.id!==id)throw new Error('The response could not be matched to this request. Try again.');return value;}catch(error){if(error.name==='AbortError'&&turn===generation){void cancelBackend(id);throw new Error('This request took too long. Check your connection, then try again.');}throw error;}finally{clearTimeout(timeout);if(activeRequest?.id===id)activeRequest=null;}}
 async function cancelBackend(id){if(!csrfToken||!id)return;try{await boundedApi('cancel',{method:'POST',body:JSON.stringify({id})},4000);}catch{}}
-function cancelTurn(announce=true){const wasWorking=turnBusy||!!activeRequest;generation+=1;voicePipeline=false;disableHandsFree();stopRecording(false);stopSpeech();if(activeRequest){const request=activeRequest;activeRequest=null;request.controller.abort();void cancelBackend(request.id);}setBusy(false);setState('idle');if(wasWorking&&!runtimeReconnectPromise)void refreshWorkspace().catch(()=>{});if(announce)toast('Stopped. Completed actions stay in your workspace.');}
+function cancelTurn(announce=true,{preserveVoice=false}={}){if(preserveVoice)voiceSession?.pause('hidden');else voiceSession?.disable({remember:false});const cancelledConversation=localChatTurn?.conversationId;localChatTurn=null;const wasWorking=turnBusy||!!activeRequest;generation+=1;voicePipeline=false;disableHandsFree();stopRecording(false);stopSpeech();if(activeRequest){const request=activeRequest;activeRequest=null;request.controller.abort();void cancelBackend(request.id);}setBusy(false);setState('idle');if(wasWorking&&!runtimeReconnectPromise)void refreshWorkspace().catch(()=>{});if(cancelledConversation===conversationId)void refreshConversation({quiet:true});renderSavedConversation();renderConversationControls();if(announce)toast('Stopped. Completed actions stay in your workspace.');}
 $('cancel-turn').addEventListener('click',()=>{if(desktopToolBusy||desktopMutationBusy)stopAllActivity(true);else cancelTurn();});
 async function runCommand(value,options={}){
-  const message=value.trim();if(!message)return;if(await localDesktopApproval(message,options))return;if(options.voice&&options.approvalContext){$('desktop-review-error').textContent='Say “approve desktop action” or “cancel desktop action” for this preview. These words have not approved any input.';return;}if(turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy)return;$('question-error').textContent='';
-  ensureCornerExpanded();
-  if(!options.voice&&(recording||microphoneOpening)){disableHandsFree();stopRecording(false);}
+  const message=value.trim();if(!message)return;if(await localDesktopApproval(message,options))return;if(await localVoiceCommand(message,options))return;if(options.voice&&options.approvalContext){$('desktop-review-error').textContent='Say “approve desktop action” or “cancel desktop action” for this preview. These words have not approved any input.';return;}
+  if(turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||conversationLoading)return;$('question-error').textContent='';
+  const context=Object.hasOwn(options,'conversationContext')?options.conversationContext:captureConversationContext();if(!currentConversationContext(context)){$('question-error').textContent='The conversation changed. Review your words and send them in the intended conversation.';if(options.voice)voiceSession?.disable({remember:false});return;}
+  if(conversationId&&conversationUncertain.has(conversationId)){$('question-error').textContent='Refresh this saved conversation before sending another request.';if(options.voice)voiceSession?.disable({remember:false});return;}
+  if(!options.voice)ensureCornerExpanded();if(!options.voice&&(recording||microphoneOpening)){disableHandsFree();stopRecording(false);}
   const providerId=Object.hasOwn(options,'providerId')?options.providerId:activeProviderId;const provider=providers.find(item=>item.id===providerId);
-  if(!provider?.ready){$('question-error').textContent=provider?.unavailableReason||'Choose an AI connection in Settings first. Your message stays here.';if(options.voice)disableHandsFree();return;}
-  const turn=++generation,history=messages.filter(item=>['user','assistant'].includes(item.role)&&item.text.length<=12000).slice(-12).map(({role,text})=>({role,text}));
-  showView('today');addMessage('user',message);$('question').value='';setBusy(true);setState('thinking',provider.label+' is working on your request.');
-  try{const result=await requestWithTurn('chat',{message,providerId,history},{},turn);if(turn!==generation||destroyed)return;if(typeof result.text!=='string')throw new Error('The AI returned an unreadable reply.');
-    const article=addMessage('assistant',result.text,'Companion · '+provider.label);
-    renderActionReceipts(article,result.actions);
-    if(result.workspace)applyWorkspace(result.workspace);else void refreshWorkspace().catch(error=>toast(error.message));
-    if(result.featureJob){const job=result.featureJob.job||result.featureJob;rememberJob(job);if(job.id){jobs=[job,...jobs.filter(item=>item.id!==job.id)];selectedJobId=job.id;renderJobs();article.append(button('View feature build ↗','quiet-button',()=>showView('build')));}else refreshJobsSafely();}
-    await speakText(result.text,turn);
-  }catch(error){if(turn===generation&&error.name!=='AbortError'){$('question-error').textContent=error.message;renderActionReceipts($('messages').lastElementChild,error.actions);void refreshWorkspace().catch(()=>{});if(options.voice)disableHandsFree();}}
-  finally{if(turn===generation){voicePipeline=false;setBusy(false);setState('idle');maybeResume();}}
+  if(!provider?.ready){$('question-error').textContent=provider?.unavailableReason||'Choose an AI connection in Settings first. Your message stays here.';if(options.voice)voiceSession?.disable({remember:false});return;}
+  conversationInitialized=true;const turn=++generation,requestId=crypto.randomUUID();setBusy(true);setState('thinking','Opening your saved conversation…');let targetId=context.id;
+  try{
+    const detail=await ensureConversation(context);if(turn!==generation||destroyed||!currentConversationContext(context))return;
+    if(!context.id){conversationDrafts.set(detail.id,$('question').value);conversationDrafts.delete('new');conversationId=detail.id;context.id=detail.id;targetId=detail.id;newConversationRequest=null;store('conversationId',detail.id);}
+    adoptConversation(detail,context);conversationInitialized=true;conversationError='';
+    if(detail.activeRequestId||detail.turns.some(item=>item.status==='running'))throw new Error('A request is already running in this conversation. Wait, refresh, or open another conversation. Your draft is still here.');
+    localChatTurn={id:requestId,conversationId:detail.id,message,providerId,status:'running',startedAt:new Date().toISOString()};renderSavedConversation();showView('today');setState('thinking',provider.label+' is working on your request.');
+    const result=await requestWithTurn('chat',{message,providerId,conversationId:detail.id,expectedRevision:detail.revision},{requestId},turn);
+    if(turn!==generation||destroyed||!currentConversationContext(context))return;if(typeof result.text!=='string')throw new Error('The AI returned an unreadable reply.');
+    clearAcceptedDraft(localChatTurn);if(result.workspace)applyWorkspace(result.workspace);else void refreshWorkspace().catch(error=>toast(error.message));
+    for(const action of result.actions||[])ingestDesktopResult(action.result);
+    if(result.featureJob){const job=result.featureJob.job||result.featureJob;rememberJob(job);if(job.id){jobs=[job,...jobs.filter(item=>item.id!==job.id)];selectedJobId=job.id;renderJobs();}else refreshJobsSafely();}
+    await refreshConversation();if(turn!==generation||!currentConversationContext(context))return;await speakText(result.text,turn);
+  }catch(error){
+    if(turn===generation&&currentConversationContext(context)&&error.name!=='AbortError'){
+      $('question-error').textContent=error.message;
+      if(error.conversation?.id===conversationId)adoptConversation(error.conversation,context);
+      if(targetId){if(!error.status)conversationUncertain.set(targetId,{requestId,message});await refreshConversation({quiet:true});}
+      void refreshWorkspace().catch(()=>{});if(options.voice)voiceSession?.disable({remember:false});
+    }
+  }finally{
+    if(localChatTurn?.id===requestId)localChatTurn=null;
+    if(turn===generation){voicePipeline=false;setBusy(false);setState('idle');renderSavedConversation();renderConversationControls();maybeResume();}
+  }
 }
 $('question-form').addEventListener('submit',event=>{event.preventDefault();void runCommand($('question').value);});
 $('question').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();$('question-form').requestSubmit();}});
 $('question').addEventListener('input',()=>{$('question').style.height='auto';$('question').style.height=Math.min(110,$('question').scrollHeight)+'px';});
 function localVoice() { return window.speechSynthesis?.getVoices().find(voice => voice.localService && /^en(?:-|$)/i.test(voice.lang)) || window.speechSynthesis?.getVoices().find(voice => voice.localService); }
-function updateVoiceHelp() {
-  const local = localVoice();
-  $('voice-help').textContent = $('read-aloud').checked && !local ? 'No offline device voice is available. Answers stay as text.' : $('hands-free').checked ? 'Hands-free is on. Pause to send; Companion pauses while answering.' : 'Mic only listens when you turn it on.';
-}
+function updateVoiceHelp(){const local=localVoice();$('voice-help').textContent=voiceSessionState.enabled?(!$('read-aloud').checked||!local?'Replies use text. Say “show chat” to read them.':'Speak, then pause. Voice pauses while Companion works.'):'Enable voice to listen. Chat is always available.';}
 function stopSpeech() {
   speechGeneration += 1;
   window.speechSynthesis?.cancel(); speechResolve?.(); speechResolve = null;
@@ -638,115 +763,92 @@ $('read-aloud').addEventListener('change', () => {
   updateVoiceHelp();
 });
 window.speechSynthesis?.addEventListener('voiceschanged', updateVoiceHelp);
-function disableHandsFree() { $('hands-free').checked = false; updateVoiceHelp(); }
-function maybeResume() {
-  if (!$('hands-free').checked || document.hidden || destroyed || turnBusy || recording || microphoneOpening || document.querySelector('dialog[open]')) return;
-  setTimeout(() => { if ($('hands-free').checked && !document.hidden && !turnBusy && !recording && !microphoneOpening) void startRecording(); }, 450);
+function disableHandsFree(){$('hands-free').checked=false;updateVoiceHelp();}
+function renderVoiceControls(){
+  $('voice-enable').textContent=voiceSessionState.enabled?'Turn voice off':'Enable voice';$('voice-enable').setAttribute('aria-pressed',String(voiceSessionState.enabled));$('voice-enable').disabled=!!runtimeReconnectPromise&&!voiceSessionState.enabled;
+  document.body.classList.toggle('voice-enabled',voiceSessionState.enabled);document.body.classList.toggle('voice-listening',['listening','speech'].includes(voiceSessionState.status));updateVoiceHelp();
 }
-async function startRecording() {
-  if (recording || microphoneOpening || turnBusy || runtimeReconnectPromise || desktopToolBusy || desktopMutationBusy || document.hidden || destroyed) return;
-  ensureCornerExpanded();
-  $('question-error').textContent = '';
-  if (!service.transcriptionReady) { disableHandsFree(); $('question-error').textContent = 'Voice input is not ready. Open Connection details, or type a message.'; return; }
-  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) { disableHandsFree(); $('question-error').textContent = 'This browser cannot record audio. You can type a message instead.'; return; }
-  const frozenProviderId = activeProviderId;
-  const frozenApprovalContext = clone(captureDesktopApprovalContext());
-  stopSpeech(); const turn = ++generation; microphoneOpening = true; voicePipeline = true; setState('opening', 'Your browser may ask for microphone access.');
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
-    if (turn !== generation || document.hidden || destroyed) { stream.getTracks().forEach(track => track.stop()); return; }
-    const mimeType = ['audio/webm;codecs=opus','audio/webm','audio/mp4'].find(type => MediaRecorder.isTypeSupported(type));
-    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-    const item = { recorder, stream, turn, providerId: frozenProviderId, approvalContext:frozenApprovalContext, chunks: [], bytes: 0, submit: true, timer: null, frame: null, audioContext: null, speech: false, firstSound: 0, lastSound: 0, started: performance.now(), silenceChecked: false };
-    recording = item;
-    recorder.addEventListener('dataavailable', event => {
-      if (!event.data.size) return; item.bytes += event.data.size; item.chunks.push(event.data);
-      if (item.bytes > 10 * 1024 * 1024) { item.submit = false; stopRecording(false); $('question-error').textContent = 'That recording was too large. Try a shorter question.'; disableHandsFree(); }
-    });
-    recorder.addEventListener('error', () => { item.submit = false; disableHandsFree(); stopRecording(false); $('question-error').textContent = 'The recording stopped unexpectedly. Try the microphone again.'; });
-    recorder.addEventListener('stop', () => finishRecording(item));
-    recorder.start(500); item.timer = setTimeout(() => stopRecording(true), MAX_RECORDING);
-    if ($('hands-free').checked) attachSilenceDetection(item);
-    setState('listening', $('hands-free').checked ? 'Pause when you finish. Tap the mic to finish sooner.' : 'Tap the mic again when you finish. Up to 60 seconds.');
-  } catch (error) {
-    stream?.getTracks().forEach(track => track.stop());
-    if (turn === generation) {
-      voicePipeline = false; disableHandsFree(); setState('idle');
-      $('question-error').textContent = error.name === 'NotAllowedError' ? 'Microphone access was not allowed. You can type below or enable microphone access in your browser.' : 'The microphone could not be opened. Check that it is connected and try again.';
-    }
-  } finally { if (turn === generation) microphoneOpening = false; }
+function releaseVoiceOwnership(){const entry=voiceOwnershipRequest;voiceOwnershipRequest=null;voiceOwnsCapture=false;entry?.release?.();entry?.resolve?.(false);}
+async function ownVoice(action){
+  if(voiceOwnsCapture)return action();if(voiceOwnershipRequest)return voiceOwnershipRequest.ready;
+  if(!navigator.locks?.request){$('question-error').textContent='Automatic voice needs a browser with shared microphone coordination. Use the Companion desktop app or Chat.';return false;}
+  let resolve;const entry={ready:new Promise(done=>resolve=done),resolve:null,release:null};entry.resolve=resolve;voiceOwnershipRequest=entry;
+  entry.closed=navigator.locks.request('companion.voice.capture.v1',{mode:'exclusive',ifAvailable:true},async lock=>{
+    if(voiceOwnershipRequest!==entry)return;
+    if(!lock){voiceOwnershipRequest=null;entry.resolve(false);microphoneOpening=false;setState('idle');$('question-error').textContent='Voice is active in another Companion window. Turn it off there, then enable it here.';return;}
+    voiceOwnsCapture=true;const held=new Promise(done=>entry.release=done);
+    try{await action();entry.resolve(true);if(!voiceSession?.getState().enabled)releaseVoiceOwnership();await held;}
+    catch(error){entry.resolve(false);$('question-error').textContent=error.message;releaseVoiceOwnership();}
+    finally{if(voiceOwnershipRequest===entry){voiceOwnershipRequest=null;voiceOwnsCapture=false;}}
+  }).catch(error=>{if(voiceOwnershipRequest===entry){releaseVoiceOwnership();$('question-error').textContent=error.message;}});
+  return entry.ready;
 }
-function attachSilenceDetection(item) {
-  const AudioContext = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContext) { disableHandsFree(); toast('Automatic turn ending is unavailable. Tap the mic to finish.'); return; }
-  try {
-    const audio = new AudioContext(); item.audioContext = audio;
-    const input = audio.createMediaStreamSource(item.stream), analyser = audio.createAnalyser(); analyser.fftSize = 1024; input.connect(analyser);
-    const buffer = new Float32Array(analyser.fftSize);
-    void audio.resume().catch(() => {});
-    const check = () => {
-      if (recording !== item || item.recorder.state !== 'recording') return;
-      analyser.getFloatTimeDomainData(buffer); const rms = Math.sqrt(buffer.reduce((sum, value) => sum + value * value, 0) / buffer.length); const now = performance.now();
-      if (rms > .022) { item.lastSound = now; item.firstSound ||= now; item.speech = true; }
-      if (item.speech && now - item.lastSound > 1500 && now - item.firstSound > 500) { item.silenceChecked = true; stopRecording(true); return; }
-      if (!item.speech && now - item.started > 10_000) { item.submit = false; item.silenceChecked = true; stopRecording(false, true); return; }
-      item.frame = requestAnimationFrame(check);
-    };
-    item.frame = requestAnimationFrame(check);
-  } catch { disableHandsFree(); toast('Tap the microphone when you finish; automatic turn ending is unavailable.'); }
+function makeVoiceContext(){conversationInitialized=true;return {providerId:activeProviderId,conversationContext:clone(captureConversationContext()),approvalContext:clone(captureDesktopApprovalContext())};}
+function initVoiceSession(){
+  voiceSession=createVoiceSession({mediaDevices:navigator.mediaDevices,permissions:navigator.permissions,MediaRecorder:window.MediaRecorder,AudioContext:window.AudioContext||window.webkitAudioContext,now:()=>performance.now(),requestFrame:requestAnimationFrame,cancelFrame:cancelAnimationFrame,setTimer:setTimeout,clearTimer:clearTimeout,readOptIn:()=>readStored('voiceEnabled',false)===true,writeOptIn:value=>store('voiceEnabled',value),
+    captureContext:()=>{const context=voiceFirstContext||makeVoiceContext();voiceFirstContext=null;voiceCaptureContext=clone(context);return context;},
+    onState:state=>{voiceSessionState=state;microphoneOpening=state.status==='opening';recording=['listening','speech'].includes(state.status)?{controller:true,...clone(voiceCaptureContext)}:null;
+      if(!state.enabled||!state.visible)releaseVoiceOwnership();
+      if(state.status==='opening')setState('opening','Opening your microphone…');else if(['listening','speech'].includes(state.status))setState('listening','Pause when you finish speaking.');else if(state.status==='processing'&&!turnBusy)setState('transcribing','Microphone off while Companion works.');else if(!turnBusy&&!voicePipeline)setState('idle');
+      renderConversationControls();renderVoiceControls();},
+    onSegment:processVoiceSegment,onError:error=>{$('question-error').textContent=error.message;setState('idle');renderVoiceControls();}
+  });
+  if(document.hidden||nativeWindowVisible===false)void voiceSession.setVisible(false);renderVoiceControls();
 }
-function stopRecording(submit = true, resume = false) {
-  const item = recording;
-  if (!item) {
-    if (microphoneOpening) { generation += 1; microphoneOpening = false; setState('idle'); }
-    return;
-  }
-  item.submit = submit; item.resume = resume; clearTimeout(item.timer); cancelAnimationFrame(item.frame);
-  if (item.recorder.state !== 'inactive') item.recorder.stop();
-  item.stream.getTracks().forEach(track => track.stop()); void item.audioContext?.close().catch(() => {});
-  recording = null;
-  if (!submit) setState('idle');
+async function restoreVoiceIfAllowed(){
+  if(!voiceSession||destroyed||document.hidden||nativeWindowVisible===false||!service.transcriptionReady||runtimeReconnectPromise||readStored('voiceEnabled',false)!==true||(voiceSessionState.enabled&&voiceOwnsCapture))return;
+  await ownVoice(async()=>{await voiceSession.setVisible(true);if(voiceSessionState.enabled)await voiceSession.resume();else await voiceSession.restore();});
 }
-async function finishRecording(item) {
-  if (!item.submit || item.turn !== generation || destroyed || document.hidden) { if (item.turn === generation) voicePipeline = false; if (item.resume && item.turn === generation) maybeResume(); return; }
-  const blob = new Blob(item.chunks, { type: item.recorder.mimeType || 'audio/webm' });
-  if (blob.size < 100) { $('question-error').textContent = 'That recording was too short. Try again.'; setState('idle'); disableHandsFree(); return; }
-  setBusy(true); setState('transcribing', 'The microphone is off while your speech becomes text.');
-  try {
-    const result = await requestWithTurn('transcribe', blob, { raw: true, headers: { 'Content-Type': blob.type } }, item.turn);
-    if (item.turn !== generation || destroyed) return;
-    if (typeof result.text !== 'string' || !result.text.trim()) { disableHandsFree(); throw new Error('No words were detected. Tap the microphone to try again.'); }
-    $('question').value = result.text.slice(0, 4000); setBusy(false);
-    await runCommand($('question').value, { providerId: item.providerId, approvalContext:item.approvalContext, voice: true });
-  } catch (error) {
-    if (item.turn === generation && error.name !== 'AbortError') { $('question-error').textContent = error.message; disableHandsFree(); }
-  } finally {
-    if (item.turn === generation) { voicePipeline = false; setBusy(false); setState('idle'); maybeResume(); }
-  }
+function setVoiceVisible(visible){
+  if(!voiceSession)return Promise.resolve();if(!visible){const entry=voiceOwnershipRequest,result=voiceSession.setVisible(false);releaseVoiceOwnership();return Promise.all([result,entry?.closed]);}
+  if(document.hidden||nativeWindowVisible===false)return Promise.resolve();
+  if(voiceOwnsCapture)return voiceSession.setVisible(true).then(()=>voiceSession.resume());return restoreVoiceIfAllowed();
 }
-$('mic-button').addEventListener('click', () => {
-  if (recording) stopRecording(true);
-  else if (microphoneOpening) cancelTurn(false);
-  else if (turnBusy) toast('Wait for this reply, or use Cancel to stop it.');
-  else void startRecording();
-});
-$('hands-free').addEventListener('change', () => {
-  updateVoiceHelp();
-  if ($('hands-free').checked) {
-    if (document.hidden || turnBusy || document.querySelector('dialog[open]')) { disableHandsFree(); toast('Turn on hands-free when this page is ready.'); return; }
-    if (recording) { attachSilenceDetection(recording); setState('listening', 'Pause when you finish. Tap the mic to finish sooner.'); }
-    else void startRecording();
-  } else { if (recording || microphoneOpening) stopRecording(false); }
-});
-
-
+function maybeResume(){if(!voiceSession||document.hidden||nativeWindowVisible===false||destroyed||turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||!voiceOwnsCapture||(document.querySelector('dialog[open]')&&!voiceDialogOverride))return;void voiceSession.resume();}
+async function startRecording(){
+  if(!voiceSession||microphoneOpening||turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||document.hidden||nativeWindowVisible===false||destroyed)return;
+  $('question-error').textContent='';voiceDialogOverride=!!document.querySelector('dialog[open]');if(!service.transcriptionReady){$('question-error').textContent='Voice is not ready. Open Settings to check the speech service, or use Chat.';return;}
+  if(voiceSessionState.enabled&&recording){voiceSession.finish();return;}
+  if(voiceSessionState.enabled){const frozen=makeVoiceContext();await ownVoice(async()=>{voiceFirstContext=clone(frozen);await voiceSession.enable();});return;}
+  const saved=readStored('preferences',{});if(!Object.hasOwn(saved||{},'readAloud')&&localVoice()){$('read-aloud').checked=true;$('settings-read-aloud').checked=true;store('preferences',{...saved,readAloud:true});}
+  const frozen=makeVoiceContext();microphoneOpening=true;setState('opening','Opening your microphone…');
+  await ownVoice(async()=>{voiceFirstContext=clone(frozen);await voiceSession.enable();});microphoneOpening=voiceSessionState.status==='opening';renderConversationControls();renderVoiceControls();
+}
+function stopRecording(submit=true){if(!voiceSession)return;if(submit)voiceSession.finish();else voiceSession.pause('stopped');recording=null;microphoneOpening=false;renderConversationControls();}
+async function processVoiceSegment({blob,context,signal}){
+  if(signal.aborted||destroyed||document.hidden||nativeWindowVisible===false)return;
+  const entry={};activeVoiceSegment=entry;const turn=++generation;voicePipeline=true;setBusy(true);setState('transcribing','Microphone off while Companion works.');
+  const abort=()=>{if(activeVoiceSegment===entry)cancelTurn(false,{preserveVoice:true});};signal.addEventListener('abort',abort,{once:true});
+  try{const result=await requestWithTurn('transcribe',blob,{raw:true,headers:{'Content-Type':blob.type}},turn);if(signal.aborted||turn!==generation||destroyed)return;if(typeof result.text!=='string'||!result.text.trim())throw new Error('No words were detected. Please try again.');
+    $('question').value=result.text.slice(0,4000);setBusy(false);await runCommand($('question').value,{voice:true,providerId:context?.providerId,conversationContext:context?.conversationContext,approvalContext:context?.approvalContext});
+  }catch(error){if(!signal.aborted&&activeVoiceSegment===entry){$('question-error').textContent=error.message;voiceSession.disable({remember:false});}}
+  finally{signal.removeEventListener('abort',abort);if(activeVoiceSegment===entry){activeVoiceSegment=null;voicePipeline=false;setBusy(false);if(!recording&&!microphoneOpening)setState('idle');maybeResume();}}
+}
+async function localVoiceCommand(message,options={}){
+  if(!options.voice)return false;const phrase=message.trim().toLowerCase().replace(/[.!?]+$/,'');
+  if(['stop listening','microphone off','mic off','turn voice off','disable voice'].includes(phrase)){voiceSession?.disable();stopSpeech();$('question').value='';return true;}
+  if(['stop','cancel','stop current work','cancel current work','stop everything'].includes(phrase)){void stopAllActivity(true,{global:true});$('question').value='';return true;}
+  const views={'show tasks':'tasks','open tasks':'tasks','show notes':'notes','open notes':'notes','show workflows':'workflows','open workflows':'workflows','show computer':'desktop','open computer':'desktop','show settings':'settings','open settings':'settings','show memory':'settings','open memory':'settings','show build':'build','open build':'build','build a feature':'build'};
+  const recognized=['show chat','open chat','hide chat','close chat','new conversation','review desktop action','review computer action','close preview'].includes(phrase)||Object.hasOwn(views,phrase);if(!recognized)return false;
+  if(!currentConversationContext(options.conversationContext)){$('question-error').textContent='The conversation changed. Repeat that command here.';voiceSession?.disable({remember:false});return true;}
+  if(['show chat','open chat'].includes(phrase)){setChatOpen(true);ensureCornerExpanded();}
+  else if(['hide chat','close chat'].includes(phrase))setChatOpen(false);
+  else if(phrase==='new conversation')await selectConversation(null,{allowVoiceCommand:true});
+  else if(phrase==='close preview')$('desktop-review-dialog').close();
+  else if(phrase==='review desktop action'||phrase==='review computer action'){await refreshDesktop();const action=desktopActions.find(desktopPending);if(action)await openDesktopReview(action.id);else toast('No computer action needs review.');}
+  else{showView(views[phrase]);ensureCornerExpanded();if(phrase.includes('memory'))$('memory-panel').scrollIntoView({block:'start'});}
+  if($('question').value.trim()===message.trim())$('question').value='';return true;
+}
+$('voice-enable').addEventListener('click',()=>{if(voiceSessionState.enabled){voiceSession.disable();stopSpeech();}else void startRecording();});
+$('voice-stop').addEventListener('click',()=>void stopAllActivity(true,{global:true}));
+$('mic-button').addEventListener('click',()=>{if(recording)stopRecording(true);else if(microphoneOpening)cancelTurn(false);else if(turnBusy)toast('Use Stop to cancel this request.');else void startRecording();});
+$('hands-free').addEventListener('change',()=>{if($('hands-free').checked)void startRecording();else voiceSession?.disable();});
 $('settings-read-aloud').addEventListener('change',()=>{$('read-aloud').checked=$('settings-read-aloud').checked;$('read-aloud').dispatchEvent(new Event('change'));});
 $('read-aloud').addEventListener('change',()=>{$('settings-read-aloud').checked=$('read-aloud').checked;});
-document.addEventListener('visibilitychange',()=>{if(document.hidden){if(voicePipeline||recording||microphoneOpening)cancelTurn(false);else{disableHandsFree();stopSpeech();}$('provider-key').value='';}else{void checkService();}});
-window.addEventListener('pagehide',event=>{cancelTurn(false);extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
-window.addEventListener('pageshow',event=>{if(!event.persisted)return;destroyed=false;setBusy(false);setState('idle');updateVoiceHelp();void checkService();void loadExtensions();});
-initNativeShell();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();updateVoiceHelp();
+document.addEventListener('visibilitychange',()=>{if(document.hidden){setVoiceVisible(false);if(voicePipeline||recording||microphoneOpening)cancelTurn(false,{preserveVoice:true});else{disableHandsFree();stopSpeech();}$('provider-key').value='';}else{void setVoiceVisible(true);void checkService();void refreshConversations({initialize:true,quiet:true});}});
+window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
+window.addEventListener('pageshow',event=>{if(!event.persisted)return;destroyed=false;setBusy(false);setState('idle');updateVoiceHelp();void setVoiceVisible(true);void checkService();void loadExtensions();});
+initNativeShell();initVoiceSession();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();updateVoiceHelp();
 void checkService();void loadExtensions();
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;renderFocus();if(jobs.some(job=>ACTIVE_JOBS.has(job.status))||currentView==='build')void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});},2000);
 setInterval(()=>{if(!document.hidden&&!destroyed&&!operationBusy&&!runtimeReconnectPromise)void refreshWorkspace().catch(error=>{$('connection-label').textContent=error.message;});},5000);
@@ -755,3 +857,6 @@ setInterval(()=>{if(!document.hidden&&!destroyed&&!turnBusy&&!recording&&!microp
 $('desktop-stop').addEventListener('click',()=>stopAllActivity(true));
 $('desktop-review-stop').addEventListener('click',()=>stopAllActivity(true));
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;if(currentView==='desktop'||$('desktop-review-dialog').open||desktopActions.some(action=>['pending','executing'].includes(action.status)))void refreshDesktop().catch(error=>{$('desktop-error').textContent=error.message;});},2500);
+
+setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;if(selectedConversationRunning()||localChatTurn)void refreshConversation({quiet:true});},2500);
+setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;void refreshConversations({initialize:true,quiet:true});},12000);
