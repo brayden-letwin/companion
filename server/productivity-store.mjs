@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import { randomUUID, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { builtinCatalog, validateWorkflowSteps } from './capability-registry.mjs';
+import { windowContextReference } from './window-context.mjs';
 
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const fail = (code, message, statusCode = 400) => Object.assign(new Error(message), { code, statusCode });
@@ -162,6 +163,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
   function dataCopy(value) { try { return JSON.parse(JSON.stringify(value, (key, entry) => key === 'rawContinuation' ? undefined : entry)); } catch { throw fail('invalid_input', 'Conversation outcomes must contain bounded JSON data.'); } }
   function minimalResult(source,depth=0){
     if(!source||typeof source!=='object'||depth>5)return{};const result={};
+    if(source.windowContext)result.windowContext=windowContextReference(source.windowContext);
     for(const key of ['task','note','workflow','featureJob','desktopAction','desktopReceipt'])if(source[key]&&typeof source[key]==='object')result[key]={id:source[key].id,...(source[key].status?{status:source[key].status}:{}),...(typeof source[key].outcomeUnknown==='boolean'?{outcomeUnknown:source[key].outcomeUnknown}:{}),...(key==='desktopAction'?{requiresFreshPreview:true}:{})};
     if(source.capability)result.capability={id:source.capability.id,name:source.capability.name,version:source.capability.version,hash:source.capability.hash};
     if(Array.isArray(source.hostActions))result.hostActions=source.hostActions.slice(0,12).map(action=>({id:action.id,tool:action.tool,status:action.status,result:minimalResult(action.result,depth+1)}));
@@ -173,6 +175,8 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
     return result;
   }
   function compact(value, size = 1024, depth = 0, key = '') {
+    if(key==='windowContext')return windowContextReference(value);
+    if(value?.sourceType==='selected_window_accessibility')return{...minimalResult(value),readable:value.readable===true,sourceType:'selected_window_accessibility',trust:'untrusted_source_data',sourceOmitted:true};
     if (typeof value === 'string') return value.length > size ? value.slice(0, size) + '… [details truncated]' : value;
     if(key==='hostActions'&&Array.isArray(value))return minimalResult({hostActions:value}).hostActions;
     if(key==='capability'&&value&&typeof value==='object')return minimalResult({capability:value}).capability;
@@ -184,6 +188,8 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
   }
   function boundedOutcome(value) {
     let result = dataCopy(value), encoded = JSON.stringify(result);
+    if(result.windowContext)result.windowContext=windowContextReference(result.windowContext);
+    encoded=JSON.stringify(result);
     if (Buffer.byteLength(encoded) <= limits.outcomeBytes) return { value: result, encoded };
     const originalActions = Array.isArray(result.actions) ? result.actions : [];
     result = { ...result, outcomeTruncated: true, ...(typeof result.text === 'string' ? { text: compact(result.text, Math.min(32000, Math.floor(limits.outcomeBytes / 16))) } : {}) };
@@ -260,7 +266,8 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
       if (saved.status !== 'running' || conversation.active_request_id !== requestId) throw fail('conversation_turn_finished', 'This turn is no longer running.', 409);
       const previous = saved.outcome_json ? JSON.parse(saved.outcome_json) : {};
       if ((previous.actions || []).length > actions.length || (previous.actions || []).some((action, index) => action.id !== actions[index]?.id || action.tool !== actions[index]?.tool || action.status !== actions[index]?.status)) throw fail('conversation_checkpoint_conflict', 'A newer action checkpoint is already retained. Earlier receipts cannot be removed.', 409);
-      const outcome = boundedOutcome({ actions, featureJob: value.featureJob ?? previous.featureJob ?? null });
+      const context=windowContextReference(actions.find(action=>action.tool==='window_context')?.result?.windowContext??value.windowContext??previous.windowContext);
+      const outcome = boundedOutcome({ actions, featureJob: value.featureJob ?? previous.featureJob ?? null,...(context?{windowContext:context}:{}) });
       db.prepare('UPDATE conversation_turns SET outcome_json=?,stored_bytes=?,reserved_bytes=? WHERE request_id=?').run(outcome.encoded, saved.base_bytes + Buffer.byteLength(outcome.encoded), 2 * limits.outcomeBytes - Buffer.byteLength(outcome.encoded), requestId);
       db.prepare('UPDATE conversations SET updated_at=? WHERE id=?').run(iso(now()), conversationId);
       return { conversation: getConversation(conversationId), receipt: receiptFor(requestId, digest) };
@@ -278,6 +285,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
       if (value.status === 'completed') text(source.text ?? '', 1024 * 1024, 'Reply', true);
       const wire = value.status === 'completed' ? { id: requestId, conversationId, conversationRevision, text: source.text ?? '', actions, featureJob, providerId: text(source.providerId ?? saved.provider_id, 100, 'Provider ID', true) }
         : { statusCode: Number.isInteger(source.statusCode) && source.statusCode >= 400 && source.statusCode <= 599 ? source.statusCode : value.status === 'cancelled' ? 499 : 500, code: text(source.code || 'request_failed', 100, 'Error code'), message: text(source.message || 'The request could not finish. Inspect any completed actions.', 2000, 'Error message'), actions, featureJob, conversationId, conversationRevision };
+      const context=windowContextReference(source.windowContext??partial.windowContext);if(context)wire.windowContext=context;
       const outcome = boundedOutcome(wire);
       if (saved.status !== 'running') {
         if (saved.status !== value.status || hash(JSON.parse(saved.outcome_json || '{}')) !== hash(outcome.value)) throw fail('request_conflict', 'That turn already has a different terminal outcome.', 409);
@@ -296,7 +304,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
   transaction(() => {
     db.exec("UPDATE execution_receipts SET state='interrupted' WHERE state='in_progress';");
     for (const saved of db.prepare("SELECT * FROM conversation_turns WHERE status='running'").all()) {
-      const partial = saved.outcome_json ? JSON.parse(saved.outcome_json) : {}, outcome = boundedOutcome({ statusCode: 409, code: 'request_interrupted', message: 'Companion restarted during this request. Any recorded actions remain; inspect the workspace and build history before starting another request.', actions: partial.actions || [], featureJob: partial.featureJob || null, conversationId: saved.conversation_id, conversationRevision: conversationRow(saved.conversation_id).revision + 1 });
+      const partial = saved.outcome_json ? JSON.parse(saved.outcome_json) : {}, context=windowContextReference(partial.windowContext), outcome = boundedOutcome({ statusCode: 409, code: 'request_interrupted', message: 'Companion restarted during this request. Any recorded actions remain; inspect the workspace and build history before starting another request.', actions: partial.actions || [], featureJob: partial.featureJob || null, ...(context?{windowContext:context}:{}), conversationId: saved.conversation_id, conversationRevision: conversationRow(saved.conversation_id).revision + 1 });
       const receipt = chatReceipt(saved.request_id, saved.digest); const at = iso(now());
       if (!receipt) db.prepare('INSERT INTO chat_receipts VALUES(?,?,?,?)').run(saved.request_id, saved.digest, 'failed', outcome.encoded);
       else db.prepare('UPDATE chat_receipts SET state=?,reply=? WHERE id=? AND hash=?').run('failed', outcome.encoded, saved.request_id, saved.digest);

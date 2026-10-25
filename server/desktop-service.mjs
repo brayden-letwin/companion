@@ -66,10 +66,11 @@ export async function createDesktopBridgeRunner({ root = ROOT, spawnImpl = spawn
 }
 
 /** Snapshot-bound Windows access. Approval methods are intentionally absent from model tools. */
-export async function createDesktopService({ root = ROOT, dataDirectory, runner, now = Date.now, platform = process.platform, snapshotMs = 60000, approvalMs = 45000 } = {}) {
+export async function createDesktopService({ root = ROOT, dataDirectory, runner, now = Date.now, platform = process.platform, snapshotMs = 60000, approvalMs = 45000, contextMs = 8 * 60 * 60 * 1000 } = {}) {
   if (!Number.isInteger(snapshotMs) || snapshotMs < 100 || snapshotMs > 120000 || !Number.isInteger(approvalMs) || approvalMs < 100 || approvalMs > snapshotMs) throw new TypeError('Use bounded desktop snapshot and approval lifetimes.');
+  if (!Number.isSafeInteger(contextMs) || contextMs < 100 || contextMs > 8 * 60 * 60 * 1000) throw new TypeError('Use a window context lifetime of at most eight hours.');
   const runBridge = runner || (platform === 'win32' ? await createDesktopBridgeRunner({ root }) : null);
-  const apps = new Map(), windows = new Map(), snapshots = new Map(), actions = new Map(), receipts = new Map(), active = new Set();
+  const apps = new Map(), windows = new Map(), snapshots = new Map(), actions = new Map(), receipts = new Map(), active = new Set(), contexts = new Map();
   let closed = false, effectBusy = false, health = null, healthPending = null, writes = Promise.resolve(), stopGeneration = 0;
   const companionPort = Number(process.env.COMPANION_SHARED_PORT || 4174);
   let metadataPath = null;
@@ -104,6 +105,25 @@ export async function createDesktopService({ root = ROOT, dataDirectory, runner,
   function targetWindow(id) { const value = windows.get(text(id, 100, 'window ID')); if (!value || value.expiresAt <= now()) throw fail('stale_window', 'List windows again to choose a fresh target.', 409); return value; }
   function publicWindow(saved) { return { id: saved.id, title: saved.identity.title, appName: saved.identity.appName, pid: saved.identity.pid }; }
   function registerWindow(native) { let saved = [...windows.values()].find(saved => digest(saved.identity) === digest(native)); if (!saved) saved = { id: randomUUID(), identity: native }; windows.delete(saved.id); windows.set(saved.id, saved); while (windows.size > 500) windows.delete(windows.keys().next().value); saved.expiresAt = now() + 120000; return saved; }
+  function contextId(value) { if (typeof value !== 'string' || !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(value)) throw fail('invalid_desktop_input', 'Choose an actual selected-window context.'); return value; }
+  // One-shot observations plus the UIA root ID catch observable replacement. Without a
+  // persistent destroy-event watcher, same-process/same-class HWND reuse is not universally identifiable.
+  function sameWindow(left, right) { return ['handle','pid','startTime','className','appName'].every(key => left[key] === right[key]); }
+  function protectedContext(native) { return /^(?:electron|companion)$/i.test(native.appName) || forbiddenApp.test(native.appName + ' ' + native.title) || sensitive.test(native.appName + ' ' + native.title); }
+  function releaseContext(id) { contextId(id); const saved = contexts.get(id); contexts.delete(id); for (const controller of saved?.reads || []) controller.abort(); return { released: true }; }
+  function expireContexts() { for (const [id, saved] of contexts) if (saved.expiresAt <= now()) releaseContext(id); }
+  function contextWindow(saved) { return { id: saved.windowId, title: saved.identity.title, appName: saved.identity.appName, pid: saved.identity.pid }; }
+  async function observeContext(expected, rootRuntimeId, includeText, signal) {
+    if (protectedContext(expected)) throw fail('window_context_protected', 'Companion, terminal and credential windows cannot be used as question context.', 403);
+    let result;
+    try { result = await run({ action: 'readContext', window: expected, rootRuntimeId, includeText, companionPort }, { signal }); }
+    catch (error) { if (error.code === 'protected_target') throw fail('window_context_protected', 'The selected window currently contains protected controls and cannot be read.', 403); if (error.code === 'stale_window') throw fail('window_context_stale', 'The selected window changed or closed. Choose its window again.', 409); throw error; }
+    const actual = identity(result?.window);
+    if (!sameWindow(expected, actual) || rootRuntimeId && result.rootRuntimeId !== rootRuntimeId) throw fail('window_context_stale', 'The selected window identity changed. Choose its window again.', 409);
+    if (protectedContext(actual) || result.protectedContext === true) throw fail('window_context_protected', 'The selected window currently contains protected controls and cannot be read.', 403);
+    if (result.protectedContext !== false || typeof result.rootRuntimeId !== 'string' || result.rootRuntimeId && !/^-?\d+(?:\.-?\d+){0,79}$/.test(result.rootRuntimeId) || typeof result.truncated !== 'boolean' || typeof result.text !== 'string' || result.text.length > 12000) throw fail('invalid_desktop_response', 'Windows returned an invalid selected-window context.', 502);
+    return { ...result, window: actual };
+  }
   function receipt(action, summary, target) { return { desktopReceipt: { id: randomUUID(), status: 'completed', action, summary, target, completedAt: new Date(now()).toISOString() } }; }
   async function executeOnce(name, args, context) {
     expire();
@@ -141,6 +161,33 @@ export async function createDesktopService({ root = ROOT, dataDirectory, runner,
   }
   return {
     definitions: DESKTOP_TOOL_DEFINITIONS,
+    // Human-facing APIs only. These are deliberately absent from execute() and model definitions.
+    async createContext(windowId, { signal } = {}) {
+      requireReady(); expireContexts(); const selected = targetWindow(windowId);
+      if (contexts.size >= 20) throw fail('window_context_limit', 'Clear an existing selected-window context before adding another.', 429);
+      const result = await observeContext(clone(selected.identity), '', false, signal);
+      if (signal?.aborted || closed) throw stopped();
+      expireContexts(); if (contexts.size >= 20) throw fail('window_context_limit', 'Clear an existing selected-window context before adding another.', 429);
+      const createdAt = now(), saved = { id: randomUUID(), windowId: selected.id, identity: result.window, rootRuntimeId: result.rootRuntimeId, createdAt, expiresAt: createdAt + contextMs, reads: new Set() };
+      contexts.set(saved.id, saved);
+      return { id: saved.id, window: contextWindow(saved), createdAt: new Date(saved.createdAt).toISOString(), expiresAt: new Date(saved.expiresAt).toISOString() };
+    },
+    async readContext(id, { signal } = {}) {
+      requireReady(); contextId(id); expireContexts(); const saved = contexts.get(id);
+      if (!saved) throw fail('window_context_stale', 'This selected-window context expired or was cleared. Choose a window again.', 409);
+      const controller = new AbortController(), abort = () => controller.abort(); signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) controller.abort(); saved.reads.add(controller);
+      try {
+        const result = await observeContext(clone(saved.identity), saved.rootRuntimeId, true, controller.signal);
+        if (contexts.get(id) !== saved || saved.expiresAt <= now() || closed) throw fail('window_context_stale', 'This selected-window context expired or was cleared. Choose a window again.', 409);
+        saved.identity = result.window; if (!saved.rootRuntimeId) saved.rootRuntimeId = result.rootRuntimeId;
+        const packet = { contextId: id, window: contextWindow(saved), readAt: new Date(now()).toISOString(), text: '', truncated: result.truncated };
+        const budget = 32 * 1024 - Buffer.byteLength(JSON.stringify(packet)); let used = 0;
+        for (const character of result.text) { const cost = Buffer.byteLength(JSON.stringify(character)) - 2; if (used + cost > budget) { packet.truncated = true; break; } packet.text += character; used += cost; }
+        return packet;
+      } catch (error) { if (['window_context_stale','window_context_protected'].includes(error.code)) releaseContext(id); throw error; }
+      finally { signal?.removeEventListener('abort', abort); saved.reads.delete(controller); }
+    },
+    releaseContext,
     async status() { expire(); if (platform === 'win32' && !closed && (!health || health.until <= now())) { if (!healthPending) healthPending = run({ action: 'health' }).then(result => { health = { available: result?.available === true, reason: result?.available === true ? null : 'Windows UI Automation is unavailable.', until: now() + 30000 }; }).catch(() => { health = { available: false, reason: 'The Windows desktop bridge is unavailable or busy.', until: now() + 3000 }; }).finally(() => { healthPending = null; }); await healthPending; } const available = !closed && platform === 'win32' && health?.available === true; return { available, platform, bridge: 'windows-uia', reason: available ? null : closed ? 'Desktop control is closed.' : health?.reason || 'Desktop control currently requires Windows.', capabilities: { installedApps: available, windows: available, read: available, open: available, reviewedInput: available }, busy: active.size > 0, pendingCount: [...actions.values()].filter(record => record.public.status === 'pending').length, activeCount: active.size }; },
     async execute(name, args = {}, context = {}) { requireReady(); const mutating = !['desktop_list_apps', 'desktop_list_windows', 'desktop_read_window'].includes(name); const key = mutating && context.requestId ? text(context.requestId, 500, 'request ID') : null; if (!key) return executeOnce(name, args, context); const hash = digest({ name, args }); const previous = receipts.get(key); if (previous) { if (previous.hash !== hash) throw fail('desktop_request_conflict', 'That desktop request ID was already used for different input.', 409); return clone(await previous.promise); } if (receipts.size >= 1000) throw fail('desktop_receipt_limit', 'The desktop request receipt limit has been reached.', 429); const pending = executeOnce(name, args, context); receipts.set(key, { hash, promise: pending }); return clone(await pending); },
     async listActions() { expire(); return [...actions.values()].map(record => clone(record.public)).reverse(); },
@@ -154,6 +201,6 @@ export async function createDesktopService({ root = ROOT, dataDirectory, runner,
     },
     async cancel(id) { const record = actions.get(id); if (!record) throw fail('desktop_action_not_found', 'That desktop action was not found.', 404); if (record.public.status === 'executing') throw fail('desktop_action_running', 'Use Stop to cancel active desktop input.', 409); if (record.public.status === 'pending') { record.token = null; record.public.status = 'cancelled'; record.public.error = 'Cancelled before approval.'; await persist(); } return clone(record.public); },
     async cancelAll() { stopGeneration += 1; for (const controller of active) controller.abort(); for (const record of actions.values()) if (record.public.status === 'pending') { record.token = null; record.public.status = 'cancelled'; record.public.error = 'Stopped before approval.'; } await persist(); return { stopped: true }; },
-    async close() { if (closed) return writes; closed = true; stopGeneration += 1; for (const controller of active) controller.abort(); for (const record of actions.values()) if (record.public.status === 'pending') { record.token = null; record.public.status = 'cancelled'; record.public.error = 'Desktop service closed before approval.'; } await persist(); await writes; },
+    async close() { if (closed) return writes; closed = true; stopGeneration += 1; for (const id of contexts.keys()) releaseContext(id); for (const controller of active) controller.abort(); for (const record of actions.values()) if (record.public.status === 'pending') { record.token = null; record.public.status = 'cancelled'; record.public.error = 'Desktop service closed before approval.'; } await persist(); await writes; },
   };
 }
