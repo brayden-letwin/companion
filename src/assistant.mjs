@@ -1,5 +1,6 @@
 import { createVoiceSession } from './voice-session.mjs';
 import { createProjectFilesUI } from './project-files.mjs';
+import {createBuildContinuationUI} from './build-continuation.mjs';
 const $ = id => document.getElementById(id);
 const shellCandidate = window.companionShell;
 const nativeShell = shellCandidate?.desktop===true&&['corner','workspace'].includes(shellCandidate.mode)
@@ -23,6 +24,7 @@ let desktopExecutionGeneration=0, activeDesktopRequest=null, desktopStopPromise=
 let desktopReviewGeneration=0;
 let selectedWindowContext=null,windowContextGeneration=0,windowContextRenderKey='';
 let projectFilesUI=null,selectedProject=null,projectSelectionGeneration=0,projectAccessPending=null,projectRestored=false;
+let buildContinuationUI=null,continuationBuildId=null,continuationSelectionGeneration=0;
 let voiceDialogOverride=false;
 let voiceSession=null,voiceSessionState={enabled:false,optedIn:false,visible:true,status:'off'},voiceCaptureContext=null,voiceFirstContext=null,activeVoiceSegment=null,voiceOwnershipRequest=null,voiceOwnsCapture=false;
 let chatOpen=false,memoryBusy=false;
@@ -201,12 +203,13 @@ $('voice-home').addEventListener('click',()=>setChatOpen(false));
 function showView(view) {
   if(!['today','tasks','notes','workflows','build','settings','desktop','work','files'].includes(view)&&!extensions.has(view))return;
   currentView=view;document.body.classList.toggle('tools-open',view!=='today');$('voice-home').setAttribute('aria-pressed',String(view==='today'&&!chatOpen));
+  syncBuildContinuation();
   document.querySelectorAll('.view-panel').forEach(panel=>panel.hidden=panel.id!==view+'-view');
   document.querySelectorAll('[data-view]').forEach(item=>{item.classList.toggle('active',item.dataset.view===view);item.setAttribute('aria-current',item.dataset.view===view?'page':'false');});
   $('view-title').textContent=extensions.get(view)?.title||({today:'Chat',tasks:'Tasks',notes:'Notes',workflows:'Workflows',build:'Build a feature',settings:'Settings',desktop:'Computer',work:'Work',files:'Files'})[view];
   $('content-scroll').scrollTop=0;
   if(view==='settings'){renderMemory();renderProviders();renderRuntime();if(!mcpConfiguration)void loadIntegrations();void refreshDesktop().catch(error=>{$('desktop-settings-status').textContent=error.message;});}
-  if(view==='build'){renderJobs();refreshJobsSafely();}
+  if(view==='build'){renderJobs();refreshJobsSafely();void buildContinuationUI?.refresh();}
   if(view==='files')void projectFilesUI?.refresh();
   if(view==='workflows')void refreshToolCatalog({quiet:true});
   if(view==='work'){ensureCornerExpanded();$('tools-menu').open=false;renderWork();void refreshWork({quiet:true});}
@@ -223,7 +226,7 @@ async function api(path,options={}) {
   try{response=await fetch('/api/assistant/'+path,{...rest,headers,credentials:'same-origin',cache:'no-store',redirect:'error',signal});}
   catch(error){if(error.name==='AbortError')throw error;throw new Error('Companion’s service could not be reached. Double-click Start Companion.cmd, then check again.');}
   let data;try{data=await response.json();}catch{throw new Error('The service returned an unreadable response. Check the connection and try again.');}
-  if(!response.ok){const error=new Error(data?.error?.message||'This request could not be completed.');error.code=data?.error?.code;error.status=response.status;error.workspace=data?.workspace;error.actions=data?.actions;error.conversation=data?.conversation;error.conversationId=data?.conversationId;error.hostActions=data?.hostActions;error.capability=data?.capability;error.workJob=data?.workJob;error.projectFileEdit=data?.projectFileEdit;error.projectContext=data?.projectContext;throw error;}
+  if(!response.ok){const error=new Error(data?.error?.message||'This request could not be completed.');error.code=data?.error?.code;error.status=response.status;error.workspace=data?.workspace;error.actions=data?.actions;error.conversation=data?.conversation;error.conversationId=data?.conversationId;error.hostActions=data?.hostActions;error.capability=data?.capability;error.workJob=data?.workJob;error.projectFileEdit=data?.projectFileEdit;error.projectContext=data?.projectContext;error.continuation=data?.continuation;throw error;}
   return data;
 }
 async function boundedApi(path,options={},milliseconds=15000){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),milliseconds);try{return await api(path,{...options,signal:controller.signal});}catch(error){if(error.name==='AbortError')throw new Error('This request took too long. Check the connection and try again.');throw error;}finally{clearTimeout(timeout);}}
@@ -263,6 +266,20 @@ async function selectProject(value){
 function initProjectFiles(){
   projectFilesUI=createProjectFilesUI({container:$('project-files-container'),api:projectFilesApi,onSelect:selectProject,onRevoke:async binding=>{if(selectedProject?.projectId===binding.projectId)await selectProject(null);},notify:toast});
   $('project-context-files').addEventListener('click',()=>showView('files'));$('project-context-leave').addEventListener('click',()=>void selectProject(null));
+}
+function captureBuildContinuationContext(){return{buildId:currentView==='build'?selectedJobId:null,generation:continuationSelectionGeneration};}
+function currentBuildContinuationContext(context){return!!context&&currentView==='build'&&context.buildId===selectedJobId&&context.generation===continuationSelectionGeneration;}
+function syncBuildContinuation(){const id=currentView==='build'?selectedJobId:null;if(id!==continuationBuildId){continuationBuildId=id;continuationSelectionGeneration++;buildContinuationUI?.setBuild(id);if(id)void buildContinuationUI?.refresh();}}
+async function continuationApi(path,options={},milliseconds=20000){
+  if(runtimeReconnectPromise||runtimeRestartSubmitting)throw new Error('Companion is reconnecting. Check the original request after it is ready.');
+  const controller=new AbortController(),abort=()=>controller.abort();options.signal?.addEventListener('abort',abort,{once:true});if(options.signal?.aborted)controller.abort();const timeout=setTimeout(abort,milliseconds);
+  try{return await api(path,{...options,signal:controller.signal});}finally{clearTimeout(timeout);options.signal?.removeEventListener('abort',abort);}
+}
+function initBuildContinuationUI(){buildContinuationUI=createBuildContinuationUI({container:$('build-continuation-container'),api:continuationApi,openWork:id=>openWork(id),notify:toast});}
+async function continueBuildOriginal(context){
+  if(!context?.buildId||!currentBuildContinuationContext(context))throw new Error('Open the original build, then say “continue original request” for that selection.');
+  await buildContinuationUI.refresh();if(!currentBuildContinuationContext(context))throw new Error('The selected build changed. Repeat the command for the intended original request.');
+  const result=await buildContinuationUI.continueOriginal(context.buildId);if(!result)throw new Error('The continuation response is unconfirmed. Use Check continuation before sending it again.');return result;
 }
 function activeProvider(){return providers.find(provider=>provider.id===activeProviderId);}
 function applyProviders(value){if(!Array.isArray(value?.providers))throw new Error('AI connections could not be read.');providers=value.providers;activeProviderId=value.activeProviderId||value.defaultProviderId||'';renderProviders();renderService();}
@@ -868,6 +885,7 @@ async function ensureJobDetail(id){
 function jobStatus(job){const label=element('span','job-status'+(['failed','conflict','interrupted','recovery_required'].includes(job.status)?' error':job.status==='review_required'?' review':ACTIVE_JOBS.has(job.status)?' active':''),JOB_LABELS[job.status]||job.status);return label;}
 function conciseBuildTitle(job,limit=84){const source=typeof job.summary==='string'&&job.summary.trim()?job.summary:typeof job.prompt==='string'?job.prompt:'Feature build';const firstLine=source.trim().split(/\r?\n/,1)[0].replace(/\s+/g,' ').trim()||'Feature build';if(firstLine.length<=limit)return firstLine;const clipped=firstLine.slice(0,limit-1),space=clipped.lastIndexOf(' ');return (space>limit/2?clipped.slice(0,space):clipped).trimEnd()+'…';}
 function renderJobs(){
+  syncBuildContinuation();
   if(selectedJobId)void ensureJobDetail(selectedJobId);
   const cached=jobDetails.get(selectedJobId);const key=JSON.stringify([selectedJobId,jobs,cached?.updatedAt]);if(key===featureRenderKey)return;featureRenderKey=key;
   const openFiles=new Set([...document.querySelectorAll('.change-file[open]')].map(node=>node.dataset.path));
@@ -889,7 +907,7 @@ function renderJobs(){
   if(job.status==='applied'){actions.append(button('Reload interface ↻','secondary-button',()=>location.reload()),button('Roll back changes','quiet-button',()=>void jobAction(job,'rollback')));if(job.files?.some(file=>file.path.startsWith('electron/'))){detail.append(element('p','review-note',desktopUpdateNotice()));if(nativeSourceRuntime===true&&typeof nativeShell?.restart==='function')actions.append(button('Restart desktop ↻','secondary-button',restartNativeDesktop));}}
   if(['queued','generating','validating'].includes(job.status)){const cancel=button('Cancel build','quiet-button',()=>void jobAction(job,'cancel'));cancel.disabled=featureBusy;actions.append(cancel);}
   if(actions.childNodes.length)detail.append(actions);appendInstalledFeatureReady(detail,job);
-  if(typeof job.prompt==='string'&&job.prompt.trim()){const request=element('details','change-file job-original-request');request.dataset.jobId=job.id;request.open=openRequests.has(job.id);const text=element('p','job-summary',job.prompt);text.style.padding='12px';request.append(element('summary','','Original request'),text);detail.append(request);}
+  if(typeof job.prompt==='string'&&job.prompt.trim()){const request=element('details','change-file job-original-request');request.dataset.jobId=job.id;request.open=openRequests.has(job.id);const text=element('p','job-summary',job.prompt);text.style.padding='12px';request.append(element('summary','','Build instructions'),text);detail.append(request);}
   if(!fresh)detail.append(element('p','form-hint','Loading the actual file changes and check results…'));
   if(job.files?.length){detail.append(element('h3','checks-heading','Changes'));for(const file of job.files){const section=element('details','change-file');section.dataset.path=file.path;section.open=openFiles.has(file.path);const summary=element('summary');summary.append(element('span','',file.path),element('span','change-count',`+${file.added||0} −${file.removed||0}`));section.append(summary,element('pre','file-diff',typeof file.diff==='string'?file.diff:JSON.stringify(file.diff,null,2)));detail.append(section);}}
   const checks=job.verification?.checks||[];if(checks.length){detail.append(element('h3','checks-heading','Checks'));for(const check of checks){const row=element('div','verification-check'+(check.passed?'':' failed'));row.append(element('strong','',(check.passed?'✓ ':'× ')+check.name));if(check.output)row.append(element('pre','',check.output));detail.append(row);}}
@@ -1049,7 +1067,8 @@ function renderActionReceipts(container,actions,{historical=false,nested=false}=
   if(!container||!Array.isArray(actions))return;
   const labels={manage_work:'Work',create_task:'Task saved',update_task:'Task updated',complete_task:'Task completed',save_note:'Note saved',list_tasks:'Tasks checked',read_task:'Task opened',summarize_tasks:'Tasks counted',window_context:'Window read',list_notes:'Notes checked',search_notes:'Notes searched',read_note:'Note opened',start_focus:'Focus started',stop_focus:'Focus ended',save_workflow:'Workflow saved',run_workflow:'Workflow run',build_feature:'Feature build',list_feature_builds:'Builds checked',inspect_feature_build:'Build checked',list_capabilities:'Tools checked',run_capability:'Tool run',get_time:'Current time'};
   for(const action of actions){let result=action.result||{};if(historical&&result.desktopAction){const current=desktopActions.find(item=>item.id===result.desktopAction.id);if(current)result={...result,desktopAction:current};}const failed=action.status==='failed'||!!action.error||!!result.error;let text;
-    if(result.projectFileEdit){const edit=result.projectFileEdit;const label=edit.status==='applied'?(edit.receiptPending?'File changed · receipt needs checking':'File saved'):edit.status==='recovery_required'?'File edit needs recovery review':edit.status==='interrupted'?'File edit interrupted':'File edit failed';text=label+(edit.path?' · '+edit.path:'');}
+    if(result.continuationReuse)text='Already completed earlier · '+(result.note?.title||result.task?.title||labels[action.tool]||action.tool||'Saved action');
+    else if(result.projectFileEdit){const edit=result.projectFileEdit;const label=edit.status==='applied'?(edit.receiptPending?'File changed · receipt needs checking':'File saved'):edit.status==='recovery_required'?'File edit needs recovery review':edit.status==='interrupted'?'File edit interrupted':'File edit failed';text=label+(edit.path?' · '+edit.path:'');}
     else if(result.projectFileRead||result.sourceTrust==='untrusted_project_file'){const read=result.projectFileRead||result;text='File read'+(read.path?' · '+read.path:'')+(read.hasMore?' · partial page':'')+(historical?' · saved read':'');}
     else if(failed){const error=result.error||action.error;text=(labels[action.tool]||toolLabel(action.arguments?.name||action.tool)||'Action')+' · could not finish: '+(typeof error==='string'?error:error?.message||'Unknown error');}
     else if(result.desktopAction){if(!historical)ingestDesktopResult(result);text=(desktopPending(result.desktopAction)?(historical?'Prepared desktop action · ':'Needs your review · '):DESKTOP_LABELS[result.desktopAction.status]+' · ')+result.desktopAction.summary;}
@@ -1163,7 +1182,7 @@ async function ownVoice(action){
   }).catch(error=>{if(voiceOwnershipRequest===entry){releaseVoiceOwnership();$('question-error').textContent=error.message;}});
   return entry.ready;
 }
-function makeVoiceContext(){conversationInitialized=true;return {providerId:activeProviderId,conversationContext:clone(captureConversationContext()),windowContext:clone(captureWindowContext()),projectContext:clone(captureProjectContext()),approvalContext:clone(captureDesktopApprovalContext())};}
+function makeVoiceContext(){conversationInitialized=true;return {providerId:activeProviderId,conversationContext:clone(captureConversationContext()),windowContext:clone(captureWindowContext()),projectContext:clone(captureProjectContext()),buildContinuationContext:clone(captureBuildContinuationContext()),approvalContext:clone(captureDesktopApprovalContext())};}
 function initVoiceSession(){
   voiceSession=createVoiceSession({mediaDevices:navigator.mediaDevices,permissions:navigator.permissions,MediaRecorder:window.MediaRecorder,AudioContext:window.AudioContext||window.webkitAudioContext,now:()=>performance.now(),requestFrame:requestAnimationFrame,cancelFrame:cancelAnimationFrame,setTimer:setTimeout,clearTimer:clearTimeout,readOptIn:()=>readStored('voiceEnabled',false)===true,writeOptIn:value=>store('voiceEnabled',value),
     captureContext:()=>{const context=voiceFirstContext||makeVoiceContext();voiceFirstContext=null;voiceCaptureContext=clone(context);return context;},
@@ -1200,12 +1219,13 @@ async function processVoiceSegment({blob,context,signal}){
   const entry={};activeVoiceSegment=entry;const turn=++generation;voicePipeline=true;setBusy(true);setState('transcribing','Microphone off while Companion works.');
   const abort=()=>{if(activeVoiceSegment===entry)cancelTurn(false,{preserveVoice:true});};signal.addEventListener('abort',abort,{once:true});
   try{const result=await requestWithTurn('transcribe',blob,{raw:true,headers:{'Content-Type':blob.type}},turn);if(signal.aborted||turn!==generation||destroyed)return;if(typeof result.text!=='string'||!result.text.trim())throw new Error('No words were detected. Please try again.');
-    $('question').value=result.text.slice(0,4000);setBusy(false);await runCommand($('question').value,{voice:true,providerId:context?.providerId,conversationContext:context?.conversationContext,windowContext:context?.windowContext,projectContext:context?.projectContext,approvalContext:context?.approvalContext});
+    $('question').value=result.text.slice(0,4000);setBusy(false);await runCommand($('question').value,{voice:true,providerId:context?.providerId,conversationContext:context?.conversationContext,windowContext:context?.windowContext,projectContext:context?.projectContext,buildContinuationContext:context?.buildContinuationContext,approvalContext:context?.approvalContext});
   }catch(error){if(!signal.aborted&&activeVoiceSegment===entry){$('question-error').textContent=error.message;voiceSession.disable({remember:false});}}
   finally{signal.removeEventListener('abort',abort);if(activeVoiceSegment===entry){activeVoiceSegment=null;voicePipeline=false;setBusy(false);if(!recording&&!microphoneOpening)setState('idle');maybeResume();}}
 }
 async function localVoiceCommand(message,options={}){
   if(!options.voice)return false;const phrase=message.trim().toLowerCase().replace(/[.!?]+$/,'');
+  if(phrase==='continue original request'){try{await continueBuildOriginal(options.buildContinuationContext);}catch(error){$('question-error').textContent=error.message;voiceSession?.disable({remember:false});}if($('question').value.trim()===message.trim())$('question').value='';return true;}
   if(['stop listening','microphone off','mic off','turn voice off','disable voice'].includes(phrase)){voiceSession?.disable();stopSpeech();$('question').value='';return true;}
   if(['stop','cancel','stop current work','cancel current work','stop everything'].includes(phrase)){void stopAllActivity(true,{global:true});$('question').value='';return true;}
   const views={'show work':'work','open work':'work','show tasks':'tasks','open tasks':'tasks','show notes':'notes','open notes':'notes','show workflows':'workflows','open workflows':'workflows','show computer':'desktop','open computer':'desktop','show settings':'settings','open settings':'settings','show memory':'settings','open memory':'settings','show build':'build','open build':'build','build a feature':'build','show files':'files','open files':'files'};
@@ -1232,11 +1252,11 @@ $('hands-free').addEventListener('change',()=>{if($('hands-free').checked)void s
 $('settings-read-aloud').addEventListener('change',()=>{$('read-aloud').checked=$('settings-read-aloud').checked;$('read-aloud').dispatchEvent(new Event('change'));});
 $('read-aloud').addEventListener('change',()=>{$('settings-read-aloud').checked=$('read-aloud').checked;});
 document.addEventListener('visibilitychange',()=>{if(document.hidden){setVoiceVisible(false);if(voicePipeline||recording||microphoneOpening)cancelTurn(false,{preserveVoice:true});else{disableHandsFree();stopSpeech();}$('provider-key').value='';}else{void setVoiceVisible(true);void checkService();void refreshConversations({initialize:true,quiet:true});}});
-window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;projectFilesUI?.close();for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
+window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;projectFilesUI?.close();buildContinuationUI?.close();for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
 window.addEventListener('pageshow',event=>{if(!event.persisted)return;destroyed=false;setBusy(false);setState('idle');updateVoiceHelp();void setVoiceVisible(true);void checkService();void loadExtensions();});
-initProjectFiles();initNativeShell();initVoiceSession();renderWindowContext();renderProjectContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
+initProjectFiles();initBuildContinuationUI();initNativeShell();initVoiceSession();renderWindowContext();renderProjectContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
 void checkService();void loadExtensions();
-setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;renderFocus();if(jobs.some(job=>ACTIVE_JOBS.has(job.status))||currentView==='build')void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});},2000);
+setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;renderFocus();if(currentView==='build')void buildContinuationUI?.refresh();if(jobs.some(job=>ACTIVE_JOBS.has(job.status))||currentView==='build')void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});},2000);
 setInterval(()=>{if(!document.hidden&&!destroyed&&!operationBusy&&!runtimeReconnectPromise)void refreshWorkspace().catch(error=>{$('connection-label').textContent=error.message;});},5000);
 setInterval(()=>{if(!document.hidden&&!destroyed&&!turnBusy&&!recording&&!microphoneOpening&&!runtimeReconnectPromise)void checkService();},30000);
 
