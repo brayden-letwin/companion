@@ -2,7 +2,8 @@ param(
     [string]$NodePath = '',
     [string]$DataDirectory = (Join-Path $PSScriptRoot '..\..\..\work\companion-shared'),
     [ValidateRange(1024,65535)][int]$Port = 4174,
-    [switch]$NoOpen
+    [switch]$NoOpen,
+    [ValidateSet('room','assistant')][string]$View = 'room'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -69,8 +70,10 @@ if (-not $ready) {
     }
 }
 if (-not $ready) { throw 'The shared room did not become ready.' }
-Write-Output "Companion is ready: $origin/room.html"
-Write-Output 'First visit: choose a group name, your name, and a password.'
-Write-Output 'Next visit: double-click Start Companion.cmd and sign in.'
-Write-Output 'Your discussions stay saved when you close the browser. This room runs on this PC.'
-if (-not $NoOpen) { Start-Process "$origin/room.html" | Out-Null }
+$entryPath = if ($View -eq 'assistant') { 'assistant.html' } else { 'room.html' }
+Write-Output "Companion is ready: $origin/$entryPath"
+if ($View -eq 'room') {
+    Write-Output 'First visit: choose a group name, your name, and a password.'
+    Write-Output 'Your discussions stay saved when you close the browser. This room runs on this PC.'
+}
+if (-not $NoOpen) { Start-Process "$origin/$entryPath" | Out-Null }

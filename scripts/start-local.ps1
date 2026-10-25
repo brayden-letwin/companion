@@ -1,8 +1,9 @@
 param(
     [Parameter(Mandatory=$true)][string]$RuntimeRoot,
     [string]$SpeechRuntimeRoot = (Join-Path $PSScriptRoot '..\..\..\work'),
-    [string]$AppPath = (Join-Path $PSScriptRoot '..\release\Companion-0.4.0\Companion.exe'),
-    [switch]$SkipSpeech
+    [string]$AppPath = (Join-Path $PSScriptRoot '..\release\Companion-0.5.0\Companion.exe'),
+    [switch]$SkipSpeech,
+    [switch]$ServicesOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,12 +11,12 @@ $RuntimeRoot = [IO.Path]::GetFullPath($RuntimeRoot)
 $AppPath = [IO.Path]::GetFullPath($AppPath)
 $ollamaPath = Join-Path $RuntimeRoot 'runtime\ollama.exe'
 if (-not (Test-Path -LiteralPath $ollamaPath -PathType Leaf)) { throw "Local Ollama runtime missing: $ollamaPath. See README local setup." }
-if (-not (Test-Path -LiteralPath $AppPath -PathType Leaf)) { throw "Companion build missing: $AppPath. Package Companion-0.4.0 first." }
+if (-not $ServicesOnly -and -not (Test-Path -LiteralPath $AppPath -PathType Leaf)) { throw "Companion build missing: $AppPath. Package Companion-0.5.0 first." }
 $developmentElectron = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\node_modules\electron\dist\electron.exe'))
 $existing = Get-Process -Name Companion,electron -ErrorAction SilentlyContinue | Where-Object {
     $_.ProcessName -eq 'Companion' -or $_.Path -eq $developmentElectron
 }
-if ($existing) { throw 'Companion is already open. Focus its small corner and press Alt+F4, then run this launcher again so local mode takes effect.' }
+if ($existing -and -not $ServicesOnly) { throw 'Companion is already open. Focus its small corner and press Alt+F4, then run this launcher again so local mode takes effect.' }
 $logRoot = Join-Path $RuntimeRoot 'logs'
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 
@@ -59,8 +60,11 @@ try {
         try { & (Join-Path $PSScriptRoot 'start-speech.ps1') -RuntimeRoot $SpeechRuntimeRoot }
         catch { Write-Warning "Voice is unavailable; typed local questions still work. $($_.Exception.Message)" }
     }
-    Start-Process -FilePath $AppPath -WorkingDirectory ([IO.Path]::GetDirectoryName($AppPath)) | Out-Null
-    Write-Output 'Companion started with local AI. No API key is needed.'
+    if ($ServicesOnly) { Write-Output 'Local math AI is ready. No API key is needed.' }
+    else {
+        Start-Process -FilePath $AppPath -WorkingDirectory ([IO.Path]::GetDirectoryName($AppPath)) | Out-Null
+        Write-Output 'Companion started with local AI. No API key is needed.'
+    }
 } finally {
     foreach ($name in $previous.Keys) {
         [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process')
