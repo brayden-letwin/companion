@@ -21,6 +21,10 @@ COMPANION — START HERE
    This development PC has a working Codex / ChatGPT sign-in.
    Settings can connect GPT API, Claude API, a compatible API, or local Ollama.
    Enter API keys only in the app's password field, never in chat.
+   Save, then choose Test connection to send a small message without your chats
+   or files. Or say "test connection" with Settings open and that AI selected.
+   Signed in/Model found/Configured is separate from an actual passed test.
+   A lost response offers Check test; it reads the original ID without resending.
 
 VOICE
 Enable voice starts an opt-in speech session with a visible listening state.

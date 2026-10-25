@@ -26,6 +26,7 @@ Companion's current direction is a minimal general productivity assistant in the
 - [x] Codex integration uses the existing CLI sign-in and configured model.
 - [x] GPT API, Claude API, compatible API, and local Ollama adapters with model/provider selection.
 - [x] Redacted provider metadata; Windows DPAPI-protected keys outside source; no keys in browser storage.
+- [x] Explicit context-free completion checks with durable IDs, dated configuration-bound proof, key-change revisions, cancellation/Stop and GET-only uncertain-response recovery. Settings and its exact voice command keep availability separate from a successful completion.
 - [x] Separate local transcription, bounded toggle-to-talk, opt-in pause-to-send, cancellation, and offline read-aloud.
 - [x] Feature requests create persisted coding jobs with actual status events, source candidates, hashes, diffs, and check output.
 - [x] Voice/chat can inspect selected build diagnostics and page through the complete stored request before requesting a focused correction.

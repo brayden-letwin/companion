@@ -97,7 +97,9 @@ The model has no approval tool. Companion controls, credential fields, terminals
 | **Other · compatible API** | Enter an API key, model, and compatible base URL. Remote endpoints require HTTPS; loopback HTTP is supported. |
 | **Local · Ollama** | Select an installed model and local endpoint. Model availability and support for tools affect which requests succeed. |
 
-**Configured is different from live-tested.** Codex sign-in, real task/note actions, and a generated feature running in an isolated copy have been confirmed on the development PC. Claude, OpenAI API, and custom-provider protocols have automated transport checks, but no user API-key account has been used to validate those connections. The UI reports configured API connections as not yet tested. A failed provider does not silently switch to another.
+**Configured is different from live-tested.** Settings separates sign-in, an installed local model and saved API settings from an actual answer. Choose **Test connection** to send one small fixed message, without your chats or files. It records the actual result and time for that saved configuration. Changing the key/model/endpoint prevents an old success from verifying the new settings. A lost response offers **Check test** for the original ID; reload and Save never resend it. You can also say exactly “test connection” while Settings is open with the intended saved AI selected. [AI connection checks](docs/AI_CONNECTIONS.md) explains cancellation, history and scope.
+
+Real GPT/Codex and the installed local model have passed the fixed probe on the development PC. Claude, OpenAI API and compatible-provider protocols have automated checks, but no user API-key account was used for this release. A completion test proves that message exchange; voice, tools and feature-generation have separate outcomes. A failed provider does not silently switch to another.
 
 Windows API keys are encrypted with **DPAPI for the current Windows user**, bound to their provider and endpoint. The browser receives redacted metadata such as whether a key exists; keys are never saved in browser storage or returned by the provider list. Changing a provider or endpoint requires re-entering its saved key. On other operating systems, this implementation keeps keys in server memory, so they must be entered again after a restart.
 
@@ -153,7 +155,9 @@ npm test
 npm run check
 ```
 
-The 0.17 update passed **656 Node tests** and **64 source syntax checks**. In an isolated app, a seeded failing duration tool received one real GPT correction, passed its unchanged acceptance cases, ran through GPT after reviewed activation, and rolled back to all 156 original source files. The first failure remains inspectable. The primary app now serves 0.17 with its saved workspace unchanged. [QA.md](QA.md) records the live evidence and remaining physical-voice, native-shell and account checks.
+The 0.18 update passed **713 Node tests** and **66 source syntax checks**. Real GPT and local Ollama completion tests passed through Settings in an isolated app; reload and service restart preserved their original results without another model request. The desktop corner and its own restart control were inspected, and narrow connection cards now put actions below readable details. The primary app serves 0.18 with its saved workspace unchanged. [QA.md](QA.md) records the live evidence and remaining human-voice and API-key-account checks.
+
+The 0.17 update passed **656 Node tests** and **64 source syntax checks**. In an isolated app, a seeded failing duration tool received one real GPT correction, passed its unchanged acceptance cases, ran through GPT after reviewed activation, and rolled back to all 156 original source files. The first failure remains inspectable.
 
 The 0.16 update passed **623 Node tests** and **62 source syntax checks**. In a separate test app, real GPT built a missing Task fit tool, its reviewed activation loaded a fresh service, and **Continue original request** ran that tool and saved the exact result. Retrying and restarting preserved one completed Work job and single notes.
 
