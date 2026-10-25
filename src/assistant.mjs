@@ -19,6 +19,7 @@ let runtimeNotice = null, runtimeRetry = null, mcpConfiguration = '', integratio
 let desktopStatus=null, desktopActions=[], desktopRefreshPromise=null, desktopEpoch=0, desktopToolBusy=false, desktopMutationBusy=false;
 let desktopExecutionGeneration=0, activeDesktopRequest=null, desktopStopPromise=null, desktopSnapshot=null, desktopReview=null, desktopInputTarget=null;
 let desktopReviewGeneration=0;
+let selectedWindowContext=null,windowContextGeneration=0,windowContextRenderKey='';
 let voiceDialogOverride=false;
 let voiceSession=null,voiceSessionState={enabled:false,optedIn:false,visible:true,status:'off'},voiceCaptureContext=null,voiceFirstContext=null,activeVoiceSegment=null,voiceOwnershipRequest=null,voiceOwnsCapture=false;
 let chatOpen=false,memoryBusy=false;
@@ -73,9 +74,10 @@ function renderConversationControls(){
   $('conversation-status').textContent=conversationLoading?'Opening saved conversation…':uncertain?'Check the saved request before sending again. Use Refresh.':busy&&localChatTurn?'Working on this request. Cancel before switching conversations.':busy?'Finish recording or use Cancel before switching conversations.':running?'A saved request is running. You can open another conversation.':last?.status==='interrupted'?'Interrupted. Completed actions stay saved. Send a new message to continue.':conversationId?'Saved on this PC.':'Saved on this PC after you send.';
   $('conversation-error').textContent=conversationError;
   $('conversation-earlier').hidden=!conversationHasEarlier;$('conversation-load-earlier').disabled=!!conversationEarlierRequest||!!runtimeReconnectPromise;$('conversation-load-earlier').textContent=conversationEarlierRequest?'Loading…':'Load earlier';
-  const cannotSend=turnBusy||!!runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||conversationLoading||running||!!uncertain;
+  const contextBlocked=!!selectedWindowContext&&selectedWindowContext.status!=='ready';
+  const cannotSend=turnBusy||!!runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||conversationLoading||running||!!uncertain||contextBlocked;
   $('send-question').disabled=cannotSend;
-  if(running||uncertain||conversationLoading)$('mic-button').disabled=true;
+  if(running||uncertain||conversationLoading||contextBlocked)$('mic-button').disabled=true;
   else if(!runtimeReconnectPromise&&!desktopToolBusy&&!desktopMutationBusy)$('mic-button').disabled=false;
 }
 function summarizeConversation(detail){return {id:detail.id,title:detail.title,revision:detail.revision,createdAt:detail.createdAt,updatedAt:detail.updatedAt,activeRequestId:detail.activeRequestId,turnCount:detail.totalTurns??detail.turns.length,lastStatus:detail.turns.at(-1)?.status||null};}
@@ -100,8 +102,8 @@ function renderSavedConversation(){
   const labels={running:'Working…',failed:'Could not finish',cancelled:'Stopped',interrupted:'Interrupted'};
   for(const turn of turns){
     const user=addMessage('user',typeof turn.message==='string'?turn.message:'');user.dataset.turnId=turn.id;
-    if(turn.reply&&typeof turn.reply.text==='string'){const provider=providers.find(item=>item.id===(turn.reply.providerId||turn.providerId));const answer=addMessage('assistant',turn.reply.text,'Companion'+(provider?' · '+provider.label:''));renderActionReceipts(answer,turn.reply.actions,{historical:true});attachSavedFeatureLink(answer,turn.reply.featureJob);}
-    else if(turn.status!=='completed'){const fallback=turn.status==='interrupted'?'Companion restarted before this request finished. Check completed actions before sending a new request.':turn.status==='cancelled'?'Stopped. Actions already completed remain saved.':turn.status==='failed'?'This request did not finish. Completed actions remain saved.':'This request is saved and running.';user.append(element('p','saved-turn-status status-'+turn.status,labels[turn.status]||turn.status),element('p','saved-turn-detail',turn.error?.message||fallback));renderActionReceipts(user,turn.error?.actions,{historical:true});}
+    if(turn.reply&&typeof turn.reply.text==='string'){const provider=providers.find(item=>item.id===(turn.reply.providerId||turn.providerId));const answer=addMessage('assistant',turn.reply.text,'Companion'+(provider?' · '+provider.label:''));renderActionReceipts(answer,turn.reply.actions,{historical:true});appendWindowContextProvenance(answer,turn.reply.windowContext);attachSavedFeatureLink(answer,turn.reply.featureJob);}
+    else if(turn.status!=='completed'){const fallback=turn.status==='interrupted'?'Companion restarted before this request finished. Check completed actions before sending a new request.':turn.status==='cancelled'?'Stopped. Actions already completed remain saved.':turn.status==='failed'?'This request did not finish. Completed actions remain saved.':'This request is saved and running.';user.append(element('p','saved-turn-status status-'+turn.status,labels[turn.status]||turn.status),element('p','saved-turn-detail',turn.error?.message||fallback));renderActionReceipts(user,turn.error?.actions,{historical:true});appendWindowContextProvenance(user,turn.error?.windowContext);}
   }
   updateCornerPreview(turns.at(-1)?.reply?.text||turns.at(-1)?.message||'');renderCorner();
   if(!nearBottom&&!localChatTurn)scroll.scrollTop=previousTop;
@@ -256,7 +258,8 @@ function renderService(){
 }
 function applyRuntime(value){
   if(!value||typeof value.managed!=='boolean'||!Number.isInteger(value.workerPid)||value.workerPid<1)throw new Error('Companion’s runtime status could not be read.');
-  const previous=runtimeInfo;runtimeInfo={managed:value.managed,restarting:value.restarting===true,workerPid:value.workerPid,hostPid:value.hostPid};
+  const previous=runtimeInfo;if(previous&&previous.workerPid!==value.workerPid&&selectedWindowContext){windowContextGeneration++;markWindowContextUnavailable('Companion restarted. Select the window again.');cancelTurn(false);}
+  runtimeInfo={managed:value.managed,restarting:value.restarting===true,workerPid:value.workerPid,hostPid:value.hostPid};
   if(previous&&previous.workerPid!==runtimeInfo.workerPid&&!runtimeReconnectPromise){runtimeNotice={phase:'ready',message:'Companion reconnected to its new server.'};void loadExtensions();}
   renderRuntime();
 }
@@ -381,6 +384,35 @@ async function loadIntegrations(){
 }
 $('mcp-load').addEventListener('click',()=>void loadIntegrations());
 $('mcp-copy').addEventListener('click',async()=>{if(!mcpConfiguration)return;try{if(!navigator.clipboard?.writeText)throw new Error('Select and copy the configuration below.');await navigator.clipboard.writeText(mcpConfiguration);toast('Configuration copied. Paste it into your AI client’s MCP settings.');}catch(error){$('mcp-config').focus();$('mcp-config').select();$('mcp-error').textContent=error.message||'Select and copy the configuration below.';}});
+function contextWindowTitle(window){return window?.title||window?.appName||'Selected window';}
+function windowContextButton(window){const control=button('Use as context','quiet-button',()=>void selectWindowContext(window));control.setAttribute('aria-label','Use as context: '+contextWindowTitle(window));return control;}
+function checkWindowContextExpiry(){if(selectedWindowContext?.status==='ready'&&Date.parse(selectedWindowContext.expiresAt)<=Date.now()){selectedWindowContext.status='unavailable';selectedWindowContext.reason='This window context expired. Select the window again.';return true;}return false;}
+function captureWindowContext(){windowContextReady();return {id:selectedWindowContext?.id||null,generation:windowContextGeneration};}
+function currentWindowContext(context){return !!context&&context.generation===windowContextGeneration&&context.id===(selectedWindowContext?.id||null);}
+function windowContextReady(){if(checkWindowContextExpiry())renderWindowContext();return !selectedWindowContext||selectedWindowContext.status==='ready';}
+function renderWindowContext(){
+  checkWindowContextExpiry();const current=selectedWindowContext,pill=$('selected-window-context');pill.hidden=!current;
+  const key=JSON.stringify(current);if(key===windowContextRenderKey)return;windowContextRenderKey=key;
+  if(current){const title=contextWindowTitle(current.window);pill.setAttribute('aria-label','Selected window context: '+title);$('window-context-label').textContent='Context: '+title;$('window-context-status').textContent=current.status==='selecting'?'Selecting window…':current.status==='unavailable'?current.reason||'This window context is unavailable. Clear it or select the window again.':'Current text goes to your chosen AI with each question.';pill.classList.toggle('context-unavailable',current.status==='unavailable');}
+  renderConversationControls();renderVoiceControls();
+}
+function markWindowContextUnavailable(reason){if(!selectedWindowContext)return;selectedWindowContext.status='unavailable';selectedWindowContext.reason=reason;renderWindowContext();}
+async function releaseWindowContext(id){if(typeof id!=='string'||!id)return;return boundedApi('context/'+encodeURIComponent(id)+'/clear',{method:'POST',body:JSON.stringify({})},5000);}
+function validWindowContext(context){return !!context&&typeof context.id==='string'&&/^[a-zA-Z0-9_-]{1,128}$/.test(context.id)&&context.window&&typeof context.window.id==='string'&&typeof context.createdAt==='string'&&Number.isFinite(Date.parse(context.createdAt))&&typeof context.expiresAt==='string'&&Number.isFinite(Date.parse(context.expiresAt));}
+async function selectWindowContext(window){
+  if(!window||typeof window.id!=='string'||runtimeReconnectPromise)return;
+  const previous=selectedWindowContext?.id,selection=++windowContextGeneration;cancelTurn(false);selectedWindowContext={id:null,window:clone(window),status:'selecting'};renderWindowContext();
+  if(previous)void releaseWindowContext(previous).catch(()=>{});
+  try{const value=await boundedApi('context',{method:'POST',body:JSON.stringify({windowId:window.id})});const context=value.context;
+    if(selection!==windowContextGeneration){if(context?.id)void releaseWindowContext(context.id).catch(()=>{});return;}
+    if(!validWindowContext(context)){if(context?.id)void releaseWindowContext(context.id).catch(()=>{});throw new Error('This window context could not be confirmed. Select the window again.');}
+    selectedWindowContext={...clone(context),status:'ready'};renderWindowContext();
+  }catch(error){if(selection!==windowContextGeneration)return;selectedWindowContext={id:null,window:clone(window),status:'unavailable',reason:error.message};renderWindowContext();}
+}
+async function clearWindowContext(){const previous=selectedWindowContext?.id;windowContextGeneration++;cancelTurn(false);selectedWindowContext=null;renderWindowContext();if(previous)try{await releaseWindowContext(previous);}catch{toast('Context is cleared here. Its release could not be confirmed by the service.');}}
+function appendWindowContextProvenance(container,context){if(!context||typeof context.contextId!=='string')return;const title=context.title||context.appName||'Selected window',completed=typeof context.readAt==='string'&&Number.isFinite(Date.parse(context.readAt));const row=element('p','window-context-source',(completed?'Window source: ':'Selected source: ')+title+(context.appName&&context.appName!==title?' · '+context.appName:'')+(completed?' · Read '+timeLabel(context.readAt)+'.':' · No completed read recorded.'));if(completed&&(context.sourceTruncated||context.formatterTruncated||context.truncated))row.append(element('span','',' Some window text was omitted.'));container.append(row);}
+$('window-context-clear').addEventListener('click',()=>{void clearWindowContext();});
+$('desktop-context-use').addEventListener('click',()=>{if(desktopSnapshot?.window&&!desktopSnapshot.protectedInput)void selectWindowContext(desktopSnapshot.window);});
 const DESKTOP_LABELS={pending:'Needs review',executing:'Sending input',completed:'Completed',failed:'Could not finish',cancelled:'Cancelled',expired:'Preview expired'};
 function desktopPending(action){return action?.status==='pending'&&(!action.expiresAt||Date.parse(action.expiresAt)>Date.now());}
 function desktopSignature(action){return JSON.stringify({id:action.id,target:action.target,preview:action.preview,expiresAt:action.expiresAt});}
@@ -449,11 +481,11 @@ async function runDesktopTool(tool,args={}){
   finally{clearTimeout(timeout);if(activeDesktopRequest?.turn===turn)activeDesktopRequest=null;if(turn===desktopExecutionGeneration){desktopToolBusy=false;setState('idle');renderDesktopStatus();renderRuntime();maybeResume();}}
 }
 $('desktop-app-form').addEventListener('submit',async event=>{event.preventDefault();$('desktop-error').textContent='';try{const result=await runDesktopTool('desktop_list_apps',{query:$('desktop-app-query').value.trim()});const list=$('desktop-app-results');list.replaceChildren();if(!Array.isArray(result.apps))throw new Error('Installed apps could not be read.');if(!result.apps.length)list.append(element('p','desktop-hint','No matching installed apps were found.'));for(const app of result.apps){const row=element('div','desktop-app-row');row.append(element('span','',app.name),button('Open ↗','quiet-button',async()=>{try{const opened=await runDesktopTool('desktop_open_app',{appId:app.id});if(opened.desktopReceipt?.status==='completed')toast(opened.desktopReceipt.summary);}catch(error){$('desktop-error').textContent=error.message;}}));list.append(row);}if(result.truncated)list.append(element('p','form-hint','More apps match. Narrow your search.'));}catch(error){$('desktop-error').textContent=error.message;}});
-$('desktop-window-list').addEventListener('click',async()=>{$('desktop-error').textContent='';try{const result=await runDesktopTool('desktop_list_windows',{});const list=$('desktop-window-results');list.replaceChildren();if(!Array.isArray(result.windows))throw new Error('Open windows could not be read.');if(!result.windows.length)list.append(element('p','desktop-hint','No available windows were found.'));for(const window of result.windows){const row=element('div','desktop-window-row'),info=element('div');info.append(element('strong','',window.title||'Untitled window'),element('span','',window.appName));const actions=element('div','desktop-window-actions');actions.append(button('Focus','quiet-button',async()=>{try{const result=await runDesktopTool('desktop_focus_window',{windowId:window.id});if(result.desktopReceipt?.status==='completed')toast(result.desktopReceipt.summary);}catch(error){$('desktop-error').textContent=error.message;}}),button('Read window','quiet-button',()=>void readDesktopWindow(window.id)));row.append(info,actions);list.append(row);}if(result.truncated)list.append(element('p','form-hint','The window list is truncated.'));}catch(error){$('desktop-error').textContent=error.message;}});
+$('desktop-window-list').addEventListener('click',async()=>{$('desktop-error').textContent='';try{const result=await runDesktopTool('desktop_list_windows',{});const list=$('desktop-window-results');list.replaceChildren();if(!Array.isArray(result.windows))throw new Error('Open windows could not be read.');if(!result.windows.length)list.append(element('p','desktop-hint','No available windows were found.'));for(const window of result.windows){const row=element('div','desktop-window-row'),info=element('div');info.append(element('strong','',window.title||'Untitled window'),element('span','',window.appName));const actions=element('div','desktop-window-actions');actions.append(button('Focus','quiet-button',async()=>{try{const result=await runDesktopTool('desktop_focus_window',{windowId:window.id});if(result.desktopReceipt?.status==='completed')toast(result.desktopReceipt.summary);}catch(error){$('desktop-error').textContent=error.message;}}),button('Read window','quiet-button',()=>void readDesktopWindow(window.id)),windowContextButton(window));row.append(info,actions);list.append(row);}if(result.truncated)list.append(element('p','form-hint','The window list is truncated.'));}catch(error){$('desktop-error').textContent=error.message;}});
 async function readDesktopWindow(windowId){$('desktop-error').textContent='';try{const result=await runDesktopTool('desktop_read_window',{windowId});const snapshot=result.snapshot;if(!snapshot?.id||!Array.isArray(snapshot.elements))throw new Error('The selected window could not be read.');desktopSnapshot=clone(snapshot);renderDesktopSnapshot();}catch(error){$('desktop-error').textContent=error.message;}}
 function renderDesktopSnapshot(){
   const snapshot=desktopSnapshot;$('desktop-snapshot-panel').hidden=!snapshot;if(!snapshot)return;
-  $('desktop-snapshot-title').textContent=snapshot.window?.title||snapshot.window?.appName||'Selected window';$('desktop-snapshot-expiry').textContent=snapshot.truncated?'Some controls were omitted':'';
+  $('desktop-snapshot-title').textContent=snapshot.window?.title||snapshot.window?.appName||'Selected window';$('desktop-context-use').disabled=!!snapshot.protectedInput||!snapshot.window?.id;$('desktop-context-use').setAttribute('aria-label','Use as context: '+contextWindowTitle(snapshot.window));$('desktop-snapshot-expiry').textContent=snapshot.truncated?'Some controls were omitted':'';
   $('desktop-snapshot-note').textContent=snapshot.protectedInput?'This is Companion. Use its controls directly; computer input cannot approve or operate Companion’s own controls.':'This is the text and controls read from that window. Preparing input creates a separate preview for your review.';
   const list=$('desktop-snapshot-elements');list.replaceChildren();
   if(!snapshot.elements.length)list.append(element('p','desktop-hint','No readable controls were returned.'));
@@ -853,7 +885,7 @@ function addMessage(role,text,label=role==='user'?'You':'Companion'){
 }
 function renderActionReceipts(container,actions,{historical=false,nested=false}={}){
   if(!container||!Array.isArray(actions))return;
-  const labels={create_task:'Task saved',update_task:'Task updated',complete_task:'Task completed',save_note:'Note saved',list_tasks:'Tasks checked',list_notes:'Notes checked',search_notes:'Notes searched',read_note:'Note opened',start_focus:'Focus started',stop_focus:'Focus ended',save_workflow:'Workflow saved',run_workflow:'Workflow run',build_feature:'Feature build',list_feature_builds:'Builds checked',get_time:'Current time'};
+  const labels={create_task:'Task saved',update_task:'Task updated',complete_task:'Task completed',save_note:'Note saved',list_tasks:'Tasks checked',read_task:'Task opened',summarize_tasks:'Tasks counted',window_context:'Window read',list_notes:'Notes checked',search_notes:'Notes searched',read_note:'Note opened',start_focus:'Focus started',stop_focus:'Focus ended',save_workflow:'Workflow saved',run_workflow:'Workflow run',build_feature:'Feature build',list_feature_builds:'Builds checked',inspect_feature_build:'Build checked',list_capabilities:'Tools checked',run_capability:'Tool run',get_time:'Current time'};
   for(const action of actions){let result=action.result||{};if(historical&&result.desktopAction){const current=desktopActions.find(item=>item.id===result.desktopAction.id);if(current)result={...result,desktopAction:current};}const failed=action.status==='failed'||!!action.error||!!result.error;let text;
     if(failed){const error=result.error||action.error;text=(labels[action.tool]||toolLabel(action.arguments?.name||action.tool)||'Action')+' · could not finish: '+(typeof error==='string'?error:error?.message||'Unknown error');}
     else if(result.desktopAction){if(!historical)ingestDesktopResult(result);text=(desktopPending(result.desktopAction)?(historical?'Prepared desktop action · ':'Needs your review · '):DESKTOP_LABELS[result.desktopAction.status]+' · ')+result.desktopAction.summary;}
@@ -879,6 +911,7 @@ $('cancel-turn').addEventListener('click',()=>{if(desktopToolBusy||desktopMutati
 async function runCommand(value,options={}){
   const message=value.trim();if(!message)return;if(await localDesktopApproval(message,options))return;if(await localVoiceCommand(message,options))return;if(options.voice&&options.approvalContext){$('desktop-review-error').textContent='Say “approve desktop action” or “cancel desktop action” for this preview. These words have not approved any input.';return;}
   if(turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||conversationLoading)return;$('question-error').textContent='';
+  const sourceContext=Object.hasOwn(options,'windowContext')?options.windowContext:captureWindowContext();if(!currentWindowContext(sourceContext)||!windowContextReady()){renderWindowContext();$('question-error').textContent='The selected window context changed or is unavailable. Clear it or select the window again before sending.';if(options.voice)voiceSession?.disable({remember:false});return;}
   const context=Object.hasOwn(options,'conversationContext')?options.conversationContext:captureConversationContext();if(!currentConversationContext(context)){$('question-error').textContent='The conversation changed. Review your words and send them in the intended conversation.';if(options.voice)voiceSession?.disable({remember:false});return;}
   if(conversationId&&conversationUncertain.has(conversationId)){$('question-error').textContent='Refresh this saved conversation before sending another request.';if(options.voice)voiceSession?.disable({remember:false});return;}
   if(!options.voice)ensureCornerExpanded();if(!options.voice&&(recording||microphoneOpening)){disableHandsFree();stopRecording(false);}
@@ -886,20 +919,22 @@ async function runCommand(value,options={}){
   if(!provider?.ready){$('question-error').textContent=provider?.unavailableReason||'Choose an AI connection in Settings first. Your message stays here.';if(options.voice)voiceSession?.disable({remember:false});return;}
   conversationInitialized=true;const turn=++generation,requestId=crypto.randomUUID();setBusy(true);setState('thinking','Opening your saved conversation…');let targetId=context.id;
   try{
-    const detail=await ensureConversation(context);if(turn!==generation||destroyed||!currentConversationContext(context))return;
+    const detail=await ensureConversation(context);if(turn!==generation||destroyed||!currentConversationContext(context)||!currentWindowContext(sourceContext))return;if(!windowContextReady())throw new Error('The selected window context is unavailable. Clear it or select the window again.');
     if(!context.id){conversationDrafts.set(detail.id,$('question').value);conversationDrafts.delete('new');conversationId=detail.id;context.id=detail.id;targetId=detail.id;newConversationRequest=null;store('conversationId',detail.id);}
     adoptConversation(detail,context);conversationInitialized=true;conversationError='';
     if(detail.activeRequestId||detail.turns.some(item=>item.status==='running'))throw new Error('A request is already running in this conversation. Wait, refresh, or open another conversation. Your draft is still here.');
     localChatTurn={id:requestId,conversationId:detail.id,message,providerId,status:'running',startedAt:new Date().toISOString()};renderSavedConversation();showView('today');setState('thinking',provider.label+' is working on your request.');
-    const result=await requestWithTurn('chat',{message,providerId,conversationId:detail.id,expectedRevision:detail.revision},{requestId},turn);
+    const result=await requestWithTurn('chat',{message,providerId,conversationId:detail.id,expectedRevision:detail.revision,...(sourceContext.id?{contextId:sourceContext.id}:{})},{requestId},turn);
     if(turn!==generation||destroyed||!currentConversationContext(context))return;if(typeof result.text!=='string')throw new Error('The AI returned an unreadable reply.');
+    if(sourceContext.id&&result.windowContext?.contextId!==sourceContext.id)throw Object.assign(new Error('The selected window source could not be confirmed. Select the window again.'),{code:'window_context_unavailable'});
+    if(result.windowContext&&selectedWindowContext?.id===result.windowContext.contextId){selectedWindowContext.window={...selectedWindowContext.window,title:result.windowContext.title||selectedWindowContext.window.title,appName:result.windowContext.appName||selectedWindowContext.window.appName};renderWindowContext();}
     clearAcceptedDraft(localChatTurn);if(result.workspace)applyWorkspace(result.workspace);else void refreshWorkspace().catch(error=>toast(error.message));
     for(const action of result.actions||[])ingestDesktopResult(action.result);
     if(result.featureJob){const job=result.featureJob.job||result.featureJob;rememberJob(job);if(job.id){jobs=[job,...jobs.filter(item=>item.id!==job.id)];selectedJobId=job.id;renderJobs();}else refreshJobsSafely();}
     await refreshConversation();if(turn!==generation||!currentConversationContext(context))return;await speakText(result.text,turn);
   }catch(error){
     if(turn===generation&&currentConversationContext(context)&&error.name!=='AbortError'){
-      $('question-error').textContent=error.message;
+      $('question-error').textContent=error.message;if(['window_context_unavailable','window_context_empty'].includes(error.code))markWindowContextUnavailable(error.message);
       if(error.conversation?.id===conversationId)adoptConversation(error.conversation,context);
       if(targetId){if(!error.status)conversationUncertain.set(targetId,{requestId,message});await refreshConversation({quiet:true});}
       void refreshWorkspace().catch(()=>{});if(options.voice)voiceSession?.disable({remember:false});
@@ -939,7 +974,7 @@ $('read-aloud').addEventListener('change', () => {
 window.speechSynthesis?.addEventListener('voiceschanged', updateVoiceHelp);
 function disableHandsFree(){$('hands-free').checked=false;updateVoiceHelp();}
 function renderVoiceControls(){
-  $('voice-enable').textContent=voiceSessionState.enabled?'Turn voice off':'Enable voice';$('voice-enable').setAttribute('aria-pressed',String(voiceSessionState.enabled));$('voice-enable').disabled=!!runtimeReconnectPromise&&!voiceSessionState.enabled;
+  $('voice-enable').textContent=voiceSessionState.enabled?'Turn voice off':'Enable voice';$('voice-enable').setAttribute('aria-pressed',String(voiceSessionState.enabled));$('voice-enable').disabled=(!!runtimeReconnectPromise||!!selectedWindowContext&&selectedWindowContext.status!=='ready')&&!voiceSessionState.enabled;
   document.body.classList.toggle('voice-enabled',voiceSessionState.enabled);document.body.classList.toggle('voice-listening',['listening','speech'].includes(voiceSessionState.status));updateVoiceHelp();
 }
 function releaseVoiceOwnership(){const entry=voiceOwnershipRequest;voiceOwnershipRequest=null;voiceOwnsCapture=false;entry?.release?.();entry?.resolve?.(false);}
@@ -957,7 +992,7 @@ async function ownVoice(action){
   }).catch(error=>{if(voiceOwnershipRequest===entry){releaseVoiceOwnership();$('question-error').textContent=error.message;}});
   return entry.ready;
 }
-function makeVoiceContext(){conversationInitialized=true;return {providerId:activeProviderId,conversationContext:clone(captureConversationContext()),approvalContext:clone(captureDesktopApprovalContext())};}
+function makeVoiceContext(){conversationInitialized=true;return {providerId:activeProviderId,conversationContext:clone(captureConversationContext()),windowContext:clone(captureWindowContext()),approvalContext:clone(captureDesktopApprovalContext())};}
 function initVoiceSession(){
   voiceSession=createVoiceSession({mediaDevices:navigator.mediaDevices,permissions:navigator.permissions,MediaRecorder:window.MediaRecorder,AudioContext:window.AudioContext||window.webkitAudioContext,now:()=>performance.now(),requestFrame:requestAnimationFrame,cancelFrame:cancelAnimationFrame,setTimer:setTimeout,clearTimer:clearTimeout,readOptIn:()=>readStored('voiceEnabled',false)===true,writeOptIn:value=>store('voiceEnabled',value),
     captureContext:()=>{const context=voiceFirstContext||makeVoiceContext();voiceFirstContext=null;voiceCaptureContext=clone(context);return context;},
@@ -970,7 +1005,7 @@ function initVoiceSession(){
   if(document.hidden||nativeWindowVisible===false)void voiceSession.setVisible(false);renderVoiceControls();
 }
 async function restoreVoiceIfAllowed(){
-  if(!voiceSession||destroyed||document.hidden||nativeWindowVisible===false||!service.transcriptionReady||runtimeReconnectPromise||readStored('voiceEnabled',false)!==true||(voiceSessionState.enabled&&voiceOwnsCapture))return;
+  if(!voiceSession||destroyed||document.hidden||nativeWindowVisible===false||!service.transcriptionReady||runtimeReconnectPromise||readStored('voiceEnabled',false)!==true||!windowContextReady()||(voiceSessionState.enabled&&voiceOwnsCapture))return;
   await ownVoice(async()=>{await voiceSession.setVisible(true);if(voiceSessionState.enabled)await voiceSession.resume();else await voiceSession.restore();});
 }
 function setVoiceVisible(visible){
@@ -981,7 +1016,7 @@ function setVoiceVisible(visible){
 function maybeResume(){if(!voiceSession||document.hidden||nativeWindowVisible===false||destroyed||turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||!voiceOwnsCapture||(document.querySelector('dialog[open]')&&!voiceDialogOverride))return;void voiceSession.resume();}
 async function startRecording(){
   if(!voiceSession||microphoneOpening||turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||document.hidden||nativeWindowVisible===false||destroyed)return;
-  $('question-error').textContent='';voiceDialogOverride=!!document.querySelector('dialog[open]');if(!service.transcriptionReady){$('question-error').textContent='Voice is not ready. Open Settings to check the speech service, or use Chat.';return;}
+  $('question-error').textContent='';voiceDialogOverride=!!document.querySelector('dialog[open]');if(!windowContextReady()&&!captureDesktopApprovalContext()){renderWindowContext();$('question-error').textContent='Clear this unavailable window context or select the window again before recording.';return;}if(!service.transcriptionReady){$('question-error').textContent='Voice is not ready. Open Settings to check the speech service, or use Chat.';return;}
   if(voiceSessionState.enabled&&recording){voiceSession.finish();return;}
   if(voiceSessionState.enabled){const frozen=makeVoiceContext();await ownVoice(async()=>{voiceFirstContext=clone(frozen);await voiceSession.enable();});return;}
   const saved=readStored('preferences',{});if(!Object.hasOwn(saved||{},'readAloud')&&localVoice()){$('read-aloud').checked=true;$('settings-read-aloud').checked=true;store('preferences',{...saved,readAloud:true});}
@@ -994,7 +1029,7 @@ async function processVoiceSegment({blob,context,signal}){
   const entry={};activeVoiceSegment=entry;const turn=++generation;voicePipeline=true;setBusy(true);setState('transcribing','Microphone off while Companion works.');
   const abort=()=>{if(activeVoiceSegment===entry)cancelTurn(false,{preserveVoice:true});};signal.addEventListener('abort',abort,{once:true});
   try{const result=await requestWithTurn('transcribe',blob,{raw:true,headers:{'Content-Type':blob.type}},turn);if(signal.aborted||turn!==generation||destroyed)return;if(typeof result.text!=='string'||!result.text.trim())throw new Error('No words were detected. Please try again.');
-    $('question').value=result.text.slice(0,4000);setBusy(false);await runCommand($('question').value,{voice:true,providerId:context?.providerId,conversationContext:context?.conversationContext,approvalContext:context?.approvalContext});
+    $('question').value=result.text.slice(0,4000);setBusy(false);await runCommand($('question').value,{voice:true,providerId:context?.providerId,conversationContext:context?.conversationContext,windowContext:context?.windowContext,approvalContext:context?.approvalContext});
   }catch(error){if(!signal.aborted&&activeVoiceSegment===entry){$('question-error').textContent=error.message;voiceSession.disable({remember:false});}}
   finally{signal.removeEventListener('abort',abort);if(activeVoiceSegment===entry){activeVoiceSegment=null;voicePipeline=false;setBusy(false);if(!recording&&!microphoneOpening)setState('idle');maybeResume();}}
 }
@@ -1026,7 +1061,7 @@ $('read-aloud').addEventListener('change',()=>{$('settings-read-aloud').checked=
 document.addEventListener('visibilitychange',()=>{if(document.hidden){setVoiceVisible(false);if(voicePipeline||recording||microphoneOpening)cancelTurn(false,{preserveVoice:true});else{disableHandsFree();stopSpeech();}$('provider-key').value='';}else{void setVoiceVisible(true);void checkService();void refreshConversations({initialize:true,quiet:true});}});
 window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
 window.addEventListener('pageshow',event=>{if(!event.persisted)return;destroyed=false;setBusy(false);setState('idle');updateVoiceHelp();void setVoiceVisible(true);void checkService();void loadExtensions();});
-initNativeShell();initVoiceSession();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();updateVoiceHelp();
+initNativeShell();initVoiceSession();renderWindowContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();updateVoiceHelp();
 void checkService();void loadExtensions();
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;renderFocus();if(jobs.some(job=>ACTIVE_JOBS.has(job.status))||currentView==='build')void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});},2000);
 setInterval(()=>{if(!document.hidden&&!destroyed&&!operationBusy&&!runtimeReconnectPromise)void refreshWorkspace().catch(error=>{$('connection-label').textContent=error.message;});},5000);
@@ -1038,3 +1073,5 @@ setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;i
 
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;if(selectedConversationRunning()||localChatTurn)void refreshConversation({quiet:true});},2500);
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;void refreshConversations({initialize:true,quiet:true});},12000);
+
+setInterval(()=>{if(destroyed||!selectedWindowContext)return;if(checkWindowContextExpiry()){cancelTurn(false);renderWindowContext();}},1000);
