@@ -12,6 +12,8 @@ COMPANION — START HERE
         Save a note: the next meeting needs an agenda.
         Start 25 minutes of focus time.
    You can also edit Tasks and Notes directly.
+   Tasks > Edit sets a calendar date or precise time with its displayed zone.
+   Today, Overdue, Upcoming and No deadline narrow the full task list.
    Workflows saves reusable routines. Ask to edit, rename, pause or enable one;
    Companion keeps its existing ID. Saving or enabling does not run it.
    A fresh Run starts at step one and can repeat earlier completed actions.

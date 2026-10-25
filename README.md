@@ -44,7 +44,7 @@ When a chat or voice task needs a missing tool, its linked build keeps **Your re
 | View | What works now |
 | --- | --- |
 | **Chat** | Saved conversations, actual action receipts, and a typing/manual-microphone fallback. |
-| **Tasks** | Search the full list, filter projects, sort by priority or due date, read complete instructions, and load more results. Create, edit, complete, and reopen persistent tasks. |
+| **Tasks** | Search the full list, filter projects and Today/Overdue/Upcoming/No deadline, sort by priority or deadline, and read complete instructions. Edit calendar dates or precise times with explicit zone/clock-change choices; complete and reopen saved tasks. |
 | **Notes** | Save, search, edit, and archive persistent notes. Keeping an AI reply is an explicit action. |
 | **Files** | Choose a local project folder; read/edit text files, inspect saved changes and Undo. |
 | **Workflows** | Save a sequence of supported local actions and run it with actual step results. |
@@ -54,6 +54,8 @@ When a chat or voice task needs a missing tool, its linked build keeps **Your re
 | **Settings** | Select or configure AI connections and optional offline read-aloud. |
 
 Workflows currently use registered Companion actions such as creating tasks, saving notes, and starting focus time. They do not send email or operate other applications. A focus session is an in-app timer; it does not block applications or guarantee a system notification.
+
+Ask for a calendar deadline when you mean a day, or specify a time and place for an exact deadline. **Tasks → Edit** exposes the same choices. Dates keep their calendar day; precise deadlines show their civil time and offset using the workspace server's timezone data. [Task deadlines](docs/TASK_DEADLINES.md) explains clock changes, filters, clearing, legacy values and save recovery.
 
 Changes persist on the local server. If a concurrent edit changes the workspace, your draft remains available for an explicit retry. If a save response is lost, **Confirm last change** resends the original operation receipt rather than creating a duplicate.
 
@@ -157,7 +159,9 @@ npm test
 npm run check
 ```
 
-The 0.19 update passed **745 Node tests** and **67 source syntax checks**. Real GPT edited one existing paused routine without duplicating or running it. The actual browser renamed, enabled, ran and disabled it; a service restart preserved its exact state and single note. The primary app serves 0.19 with all eight original productivity tables unchanged from its backup. [QA.md](QA.md) records live evidence separately from human-voice and account checks still open.
+The 0.20 update passed **806 Node tests** and **69 source syntax checks**. Real GPT saved a calendar deadline and an explicitly chosen precise time. Browser checks verified dates, named-zone display, repeated-hour choice, clearing and filter counts; restart preserved all five isolated test tasks. The primary app serves 0.20 with all nine original productivity tables unchanged from its backup. [QA.md](QA.md) records live evidence separately from human-voice and account checks still open.
+
+The 0.19 update passed **745 Node tests** and **67 source syntax checks**. Real GPT edited one existing paused routine without duplicating or running it. The actual browser renamed, enabled, ran and disabled it; a service restart preserved its exact state and single note. Its rollout preserved all eight original productivity tables.
 
 The 0.18 update passed **713 Node tests** and **66 source syntax checks**. Real GPT and local Ollama completion tests passed through Settings in an isolated app; reload and service restart preserved their original results without another model request. The desktop corner and its own restart control were inspected, and narrow connection cards now put actions below readable details.
 
