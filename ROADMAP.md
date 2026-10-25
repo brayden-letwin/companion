@@ -45,7 +45,8 @@ The app can edit its own application source. It does not instantly acquire arbit
 - [x] Verify managed worker PID changes and live UI reconnection with workspace data preserved.
 - [ ] Validate Claude with a real user-owned Anthropic API account.
 - [ ] Validate OpenAI API and a custom compatible endpoint with real account access.
-- [ ] Test the MCP facade from real external Codex and Claude clients; verify their action receipts and source-change lifecycle.
+- [x] Real external Codex CLI used exact source pages and MCP patch submission; its corrected panel passed checks, ran in the browser, and rolled back to the complete isolated baseline.
+- [ ] Test a real external Claude client and verify its action receipts and source-change lifecycle.
 - [x] User reported basic voice success; this does not independently verify native relaunch or spoken approval.
 - [x] Real MCP-to-app saved conversation continuity through GPT, reload, and managed restart; real GPT preference save plus Memory archive/restore.
 - [ ] Check the new automatic speech-detection mode with human speech; old manual-flow success does not establish it.

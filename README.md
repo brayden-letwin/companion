@@ -145,7 +145,9 @@ npm test
 npm run check
 ```
 
-The 0.12 update passed 431 Node tests and 46 JavaScript syntax checks. Real GPT ran two note-saving jobs while a separate foreground chat remained usable. A real MCP client handed off another job, and browser checks exercised handoff, job Stop, saved conversation access and progress. Exact retries and a managed restart preserved results without duplicate effects. [QA.md](QA.md) separates these checks from mocks, earlier selected-window/task evidence, and hardware checks still outstanding.
+The 0.13 update passed 442 Node tests and 47 JavaScript syntax checks. A real external Codex client used Companion's MCP tools to read exact source pages and submit a working Checklist panel in an isolated test app. An initial failed check stopped activation; a corrected build passed, ran through actual browser controls, and rolled back to the complete original source. The primary app now serves the new source reader with its saved workspace preserved. [QA.md](QA.md) distinguishes this live proof from automated, hardware and account checks still outstanding.
+
+The 0.12 update passed 431 Node tests and 46 JavaScript syntax checks. Real GPT ran two note-saving jobs while a separate foreground chat remained usable. A real MCP client handed off another job, and browser checks exercised handoff, job Stop, saved conversation access and progress. Exact retries and a managed restart preserved results without duplicate effects.
 
 The 0.9.1 checkpoint passed 320 Node tests and 39 JavaScript syntax checks. Real GPT inspected a retained failed build, read its complete original request through paged inspection, and generated a Project board candidate that passed its nine builder checks plus four independent fixture checks. It remains awaiting protected-code activation in the isolated test app. Source planning now fits complete reference files within measured fixed context limits, with one bounded re-selection. Build headings stay concise while the full request remains expandable. See QA.md for live outcomes and remaining generated-feature checks.
 
