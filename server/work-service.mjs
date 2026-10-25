@@ -1,4 +1,5 @@
 import { formatWorkOutcome } from './work-output.mjs';
+import { normalizeProjectBinding } from './project-files-context.mjs';
 
 const TERMINAL=new Set(['completed','waiting_for_review','failed','cancelled','interrupted']);
 const MAX_BYTES=128*1024;
@@ -31,7 +32,7 @@ export function createWorkService({store,runTurn,concurrency=2}={}){
     const {job,controller}=entry;
     try{
       if(controller.signal.aborted||closed)throw abortError();
-      await runTurn({jobId:job.id,requestId:job.requestId,message:job.prompt,providerId:job.providerId,conversationId:job.conversationId,...(job.contextId?{contextId:job.contextId}:{}),...(job.windowContext?{windowContext:structuredClone(job.windowContext)}:{}),signal:controller.signal,scope:entry.scope,allowDelegation:false,expectedProvider:structuredClone(job.provider),onProgress:update=>{
+      await runTurn({jobId:job.id,requestId:job.requestId,message:job.prompt,providerId:job.providerId,conversationId:job.conversationId,...(job.contextId?{contextId:job.contextId}:{}),...(job.windowContext?{windowContext:structuredClone(job.windowContext)}:{}),...(job.project?{project:structuredClone(job.project)}:{}),signal:controller.signal,scope:entry.scope,allowDelegation:false,expectedProvider:structuredClone(job.provider),onProgress:update=>{
         if(closed||controller.signal.aborted||active.get(job.id)!==entry)return;
         const stage=progressStage(update);if(!stage)return;
         try{store.progressWorkJob(job.id,stage);}catch{/* Optional progress cannot change the actual durable effect receipt. */}
@@ -104,11 +105,17 @@ export function createWorkService({store,runTurn,concurrency=2}={}){
     for(;;){const page=store.listWorkJobs({offset,limit:20});for(const job of page.jobs)if(!TERMINAL.has(job.status))jobs.push(cancel(job.id));if(!page.hasMore)break;offset=page.nextOffset;}
     return{stopped:true,jobs};
   }
+  function cancelProject(value){
+    const binding=normalizeProjectBinding(value);if(!binding)throw fail('invalid_project_binding','Choose the revoked project binding.');
+    const jobs=[];let offset=0;
+    for(;;){const page=store.listWorkJobs({offset,limit:20});for(const job of page.jobs)if(!TERMINAL.has(job.status)&&job.project?.projectId===binding.projectId&&job.project?.grantEpoch===binding.grantEpoch)jobs.push(cancel(job.id));if(!page.hasMore)break;offset=page.nextOffset;}
+    return{stopped:true,jobs};
+  }
   function close(){
     if(closePromise)return closePromise;closed=true;clearInterval(timer);
     for(const id of pending.keys())store.finishWorkJob(id,{status:'interrupted',error:{code:'work_interrupted',message:'The application closed before this queued job ran. It was not resumed automatically.'}});
     pending.clear();for(const entry of active.values())entry.controller.abort();
     closePromise=Promise.allSettled([...active.values()].map(entry=>entry.promise)).then(()=>undefined);return closePromise;
   }
-  return{create,list,get,cancel,stopAll,cancelAll:stopAll,close};
+  return{create,list,get,cancel,stopAll,cancelAll:stopAll,cancelProject,close};
 }

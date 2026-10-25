@@ -29,6 +29,7 @@ const ASSETS = new Map([
   ['/src/features/manifest.json', ['src/features/manifest.json', 'application/json; charset=utf-8']],
   ['/src/assistant.mjs', ['src/assistant.mjs', 'text/javascript; charset=utf-8']],
   ['/src/voice-session.mjs', ['src/voice-session.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/project-files.mjs', ['src/project-files.mjs', 'text/javascript; charset=utf-8']],
   ['/src/assistant.css', ['src/assistant.css', 'text/css; charset=utf-8']],
   ['/src/core/assistant.mjs', ['src/core/assistant.mjs', 'text/javascript; charset=utf-8']],
   ['/src/core/discussion.mjs', ['src/core/discussion.mjs', 'text/javascript; charset=utf-8']],

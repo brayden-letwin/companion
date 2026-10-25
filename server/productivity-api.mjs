@@ -11,6 +11,8 @@ import { windowContextReference } from './window-context.mjs';
 import { normalizeAssistantBody, runAssistantTurn } from './assistant-turn.mjs';
 import { createWorkService } from './work-service.mjs';
 import { validateSourceReadOptions } from './source-read.mjs';
+import { createProjectFileService } from './project-files-service.mjs';
+import { normalizeProjectBinding, projectReference, projectEditReference } from './project-files-context.mjs';
 
 const OWNER = 'local-workspace';
 const BASE = '/api/assistant';
@@ -20,6 +22,7 @@ function fields(body, allowed) { if (!body || typeof body !== 'object' || Array.
 function text(value, limit, label, empty = false) { if (typeof value !== 'string' || value.length > limit || (!empty && !value.trim())) throw fail(400, 'invalid_input', `${label} must contain ${empty ? '0' : '1'}–${limit} characters.`); return value.trim(); }
 function workQuery(req,detail=false){const query=new URL(req.url,'http://localhost').searchParams,allowed=detail?['textOffset','textLimit','actionOffset','actionLimit']:['offset','limit'],result={};for(const key of query.keys()){const value=query.get(key);if(!allowed.includes(key)||query.getAll(key).length!==1||!/^\d{1,7}$/.test(value))throw fail(400,'invalid_work_query','Use the returned work paging offsets and bounded limits.');result[key]=Number(value);}return result;}
 function sourceFileQuery(req){const query=new URL(req.url,'http://localhost').searchParams,result={};for(const key of query.keys()){const value=query.get(key);if(!['path','expectedHash','offset','limit'].includes(key)||query.getAll(key).length!==1)throw fail(400,'invalid_source_query','Use one source path and its returned paging fields.');if(['offset','limit'].includes(key)){if(!/^\d{1,6}$/.test(value))throw fail(400,'invalid_source_query','Use bounded source paging integers.');result[key]=Number(value);}else result[key]=value;}return validateSourceReadOptions(result);}
+function projectQuery(req,allowed){const query=new URL(req.url,'http://localhost').searchParams,result={};for(const key of query.keys()){const value=query.get(key);if(!allowed.includes(key)||query.getAll(key).length!==1)throw fail(400,'invalid_project_query','Use one project binding and the returned paging fields.');if(['grantEpoch','offset','limit'].includes(key)){if(!/^\d{1,16}$/.test(value)||!Number.isSafeInteger(Number(value)))throw fail(400,'invalid_project_query','Use bounded integer project paging fields.');result[key]=Number(value);}else result[key]=value;}return result;}
 function conversationPage(conversation, before) {
   let end = conversation.turns.length;
   if (before !== undefined) {
@@ -45,13 +48,16 @@ async function readJson(req, limit = 2 * 1024 * 1024) {
   let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw fail(400, 'invalid_json', 'Provide a JSON object.'); }
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw fail(400, 'invalid_json', 'Provide a JSON object.'); return body;
 }
-const routeMatches = route => ['/chat','/work','/context','/conversations','/providers','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
+const routeMatches = route => ['/chat','/work','/context','/projects','/projects/choose','/conversations','/providers','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
+  || /^\/api\/assistant\/projects\/[a-f\d-]+(?:\/(?:files|file|history|edit|revoke|edits\/[a-f\d-]+))?$/i.test(route)
   || /^\/api\/assistant\/(?:work\/[a-f\d-]+(?:\/cancel)?|context\/[a-f\d-]+\/clear|conversations\/[a-f\d-]+|features\/[a-f\d-]+(?:\/(?:apply|rollback|cancel))?|workspace\/workflows\/[a-f\d-]+\/run|desktop\/actions\/[a-f\d-]+\/(?:approve|cancel))$/i.test(route);
 
 /** Lazy initialization keeps the legacy reader and protocol tests independent. */
 export function createProductivityApi({ root, dataDirectory, createRuntime } = {}) {
   let runtimePromise = null, closed = false;
-  const active = new Map(), contextPins = new Map(), contextRequests = new Map();
+  const active = new Map(), contextPins = new Map(), contextRequests = new Map(), projectRequests=new Map();
+  const projectKey=project=>project.projectId+':'+project.grantEpoch;
+  function trackProject(project,controller){if(!project)return()=>{};const key=projectKey(project),readers=projectRequests.get(key)||new Set();readers.add(controller);projectRequests.set(key,readers);return()=>{readers.delete(controller);if(!readers.size)projectRequests.delete(key);};}
   function ownedContext(contextId,scope){
     const pin=contextPins.get(contextId);
     if(!pin||pin.scope!==scope||Date.parse(pin.context.expiresAt)<=Date.now())throw fail(409,'window_context_unavailable','The selected window context is unavailable. Clear it or choose the window again.');
@@ -78,6 +84,7 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
     const prompt=text(input.prompt,12000,'Work request');if(input.title!==undefined)text(input.title,80,'Work title');
     if(input.providerId!==undefined)text(input.providerId,100,'Provider ID');
     if(input.contextId!==undefined&&(typeof input.contextId!=='string'||!UUID.test(input.contextId)))throw fail(400,'invalid_context','Choose a valid window context.');
+    const selectedProject=normalizeProjectBinding(input.project);
     let existing;try{existing=await services.work.get(input.id);}catch(error){if((error.statusCode||error.status)!==404)throw error;}
     check();
     const status=existing?null:await services.router.getStatus(),providerId=input.providerId||existing?.providerId||status?.defaultProviderId;
@@ -85,17 +92,24 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
     if(!existing&&(!provider||provider.ready!==true))throw fail(409,'provider_unavailable','Choose a ready AI connection before handing off work.');
     let windowContext=existing?.windowContext;
     if(!existing&&input.contextId){const pin=ownedContext(input.contextId,input.scope);windowContext=windowContextReference({contextId:pin.context.id,windowId:pin.context.window.id,title:pin.context.window.title,appName:pin.context.window.appName});}
+    let project;
+    if(selectedProject){
+      if(existing)project={...selectedProject,...(existing.project?.label?{label:existing.project.label}:{})};
+      else{if(typeof services.projectFiles?.validateBinding!=='function')throw fail(503,'project_files_unavailable','Project folders are unavailable.');project=projectReference(await services.projectFiles.validateBinding(selectedProject));if(!project||project.projectId!==selectedProject.projectId||project.grantEpoch!==selectedProject.grantEpoch)throw fail(409,'project_binding_changed','The chosen project could not be matched.');}
+    }
     check();
-    return services.work.create({...input,prompt,providerId,provider:provider&&{id:provider.id,label:provider.label||provider.id,type:provider.type,model:provider.model??'',...(provider.baseUrl?{baseUrl:provider.baseUrl}:{})},...(windowContext?{windowContext}:{})});
+    return services.work.create({...input,prompt,providerId,provider:provider&&{id:provider.id,label:provider.label||provider.id,type:provider.type,model:provider.model??'',...(provider.baseUrl?{baseUrl:provider.baseUrl}:{})},...(windowContext?{windowContext}:{}),...(project?{project}:{})});
   }
   async function attachWorkRuntime(services){
     services.work=await createWorkService({store:services.store,runTurn:async input=>{
       const controller=new AbortController(),abort=()=>controller.abort();input.signal?.addEventListener('abort',abort,{once:true});if(input.signal?.aborted)controller.abort();
+      const untrack=trackProject(input.project,controller);
       const timer=setTimeout(()=>controller.abort(),240000);timer.unref?.();
-      try{return await runAssistantTurn({body:{id:input.requestId,message:input.message??input.prompt,providerId:input.providerId,conversationId:input.conversationId,expectedRevision:0,...(input.contextId?{contextId:input.contextId}:{})},services,signal:controller.signal,scope:input.scope,allowDelegation:false,expectedProvider:input.expectedProvider||input.provider,onProgress:input.onProgress,readContext:(id,options)=>{if(input.windowContext)options.onSelected?.(input.windowContext);return readSelectedContext(services,id,input.scope,controller,options);}});}
-      finally{clearTimeout(timer);input.signal?.removeEventListener('abort',abort);removeContextReader(input.contextId,controller);}
+      try{return await runAssistantTurn({body:{id:input.requestId,message:input.message??input.prompt,providerId:input.providerId,conversationId:input.conversationId,expectedRevision:0,...(input.contextId?{contextId:input.contextId}:{}),...(input.project?{project:normalizeProjectBinding({projectId:input.project.projectId,grantEpoch:input.project.grantEpoch})}:{})},services,signal:controller.signal,scope:input.scope,allowDelegation:false,expectedProvider:input.expectedProvider||input.provider,onProgress:input.onProgress,readContext:(id,options)=>{if(input.windowContext)options.onSelected?.(input.windowContext);return readSelectedContext(services,id,input.scope,controller,options);}});}
+      finally{clearTimeout(timer);input.signal?.removeEventListener('abort',abort);removeContextReader(input.contextId,controller);untrack();}
     }});
     services.tools.setWorkService?.({create:(input,options)=>acceptWork(input,services,options),list:options=>services.work.list(options),get:(id,options)=>services.work.get(id,options),cancel:id=>services.work.cancel(id)});
+    services.projectFiles?.onRevoke?.(project=>{for(const controller of projectRequests.get(projectKey(project))||[])controller.abort();return services.work.cancelProject(project);});
     return services;
   }
   async function selectContext(req,res,body,session,services){
@@ -129,11 +143,17 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
       const store = await createProductivityStore({ dataDirectory });
       const builder = await createFeatureBuilder({ root, dataDirectory: path.join(dataDirectory, 'feature-builds'), complete: options => router.complete(options) });
       const desktop = await createDesktopService({ root, dataDirectory: path.join(dataDirectory, 'desktop') });
+      let projectFiles;
+      try{projectFiles=await createProjectFileService({root,dataDirectory});}
+      catch{
+        const unavailable=()=>{throw fail(503,'project_files_unavailable','Project files could not open. Other workspace tools remain available; retain the project recovery data for review.');};
+        projectFiles={projects:unavailable,choose:unavailable,validateBinding:unavailable,revoke:unavailable,execute:unavailable,getEdit:unavailable,onRevoke:()=>()=>{},close:async()=>{}};
+      }
       let capabilities = [], capabilityStatus = { ready: true };
       try { capabilities = await loadCapabilities({ root }); }
       catch { capabilityStatus = { ready: false, code: 'capability_registry_unavailable', message: 'Installed capabilities could not load. Their workflows are unavailable; use build history to inspect or roll back the source change.' }; }
-      const tools = createProductivityTools({ store, builder, desktop, root, capabilities, capabilityStatus, owner: OWNER });
-      return { router, store, builder, tools, desktop, capabilityStatus };
+      const tools = createProductivityTools({ store, builder, desktop, root, projectFiles, capabilities, capabilityStatus, owner: OWNER });
+      return { router, store, builder, tools, desktop, projectFiles, capabilityStatus };
     })().then(attachWorkRuntime).catch(error => { runtimePromise = null; throw error; });
     return runtimePromise;
   }
@@ -144,18 +164,19 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
     if (available) res.once('finish', () => {try{requestRuntimeRestart({...((jobId)?{jobId}:{}),scope:restartScope});}catch{/* Only changed public process identities can confirm a completed restart. */}});
     return { ...status,restartScope,restartRequested:available,requiresManualRestart:!available };
   }
-  async function guardedRequest(req, res, session, id, run) {
+  async function guardedRequest(req, res, session, id, run, project) {
     const key = `${session.scope}:direct:${id}`;
     if (active.has(key)) throw fail(409, 'request_active', 'This direct action is already running. Inspect its result before retrying.');
     if (active.size >= 3) throw fail(429, 'assistant_busy', 'Companion is working on three requests. Stop one or try again shortly.');
     const controller = new AbortController(), disconnected = () => { if (!res.writableEnded) controller.abort(); };
+    const untrack=trackProject(project,controller);
     active.set(key,controller);res.once('close',disconnected);req.once('aborted',disconnected);
     if (req.aborted || res.destroyed) controller.abort();
     const timeout = setTimeout(()=>controller.abort(),240000);timeout.unref?.();
     try {
       if (controller.signal.aborted) throw Object.assign(fail(499,'request_cancelled','Stopped before this action could begin.'),{name:'AbortError'});
       return await run(controller.signal);
-    } finally { clearTimeout(timeout);res.off('close',disconnected);req.off('aborted',disconnected);if(active.get(key)===controller)active.delete(key); }
+    } finally { clearTimeout(timeout);res.off('close',disconnected);req.off('aborted',disconnected);if(active.get(key)===controller)active.delete(key);untrack(); }
   }
   function directOperationId(body) {
     if (body.operationId !== undefined && (typeof body.operationId !== 'string' || !UUID.test(body.operationId))) throw fail(400,'invalid_id','Use a stable UUID for an explicit action retry.');
@@ -166,10 +187,11 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
     if(active.has(key))throw fail(409,'request_active','That request is already running.');
     if(active.size>=3)throw fail(429,'assistant_busy','Companion is working on three foreground requests. Stop one or try again shortly.');
     const controller=new AbortController(),disconnected=()=>{if(!res.writableEnded)controller.abort();};
+    const untrack=trackProject(normalized.project,controller);
     active.set(key,controller);res.once('close',disconnected);req.once('aborted',disconnected);if(req.aborted||res.destroyed)controller.abort();
     const timer=setTimeout(()=>controller.abort(),240000);timer.unref?.();
     try{json(res,200,await runAssistantTurn({body,services,scope:session.scope,signal:controller.signal,readContext:(id,options)=>readSelectedContext(services,id,session.scope,controller,options)}));}
-    finally{clearTimeout(timer);res.off('close',disconnected);req.off('aborted',disconnected);if(active.get(key)===controller)active.delete(key);removeContextReader(body.contextId,controller);}
+    finally{clearTimeout(timer);res.off('close',disconnected);req.off('aborted',disconnected);if(active.get(key)===controller)active.delete(key);removeContextReader(body.contextId,controller);untrack();}
   }
   return {
     async handle(req, res, route, session) {
@@ -181,6 +203,19 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         session.windows?.set('productivity', window);
         const services = await runtime();
         if (req.method === 'GET') {
+          if(route===BASE+'/projects'){projectQuery(req,[]);if(!services.projectFiles)throw fail(503,'project_files_unavailable','Project folders are unavailable.');json(res,200,await services.projectFiles.projects({includeLocalPaths:true}));return true;}
+          const projectRoute=/^\/api\/assistant\/projects\/([a-f\d-]+)(?:\/(files|file|history|edits\/([a-f\d-]+)))?$/i.exec(route);
+          if(projectRoute){
+            if(!services.projectFiles)throw fail(503,'project_files_unavailable','Project folders are unavailable.');
+            const kind=projectRoute[2],allowed=kind==='files'?['grantEpoch','path','offset','limit','expectedDirectoryHash']:kind==='file'?['grantEpoch','path','offset','limit','expectedHash']:kind==='history'?['grantEpoch','offset','limit']:kind?.startsWith('edits/')?['grantEpoch','part','offset','limit','expectedHash']:['grantEpoch'];
+            const query=projectQuery(req,allowed),project=normalizeProjectBinding({projectId:projectRoute[1],grantEpoch:query.grantEpoch}),{grantEpoch,...paging}=query;
+            const result=await guardedRequest(req,res,session,randomUUID(),async signal=>{
+              if(!kind){const validated=await services.projectFiles.validateBinding(project);const current=projectReference(validated);if(!current||current.projectId!==project.projectId||current.grantEpoch!==project.grantEpoch)throw fail(409,'project_binding_changed','This project access changed. Choose it again.');return{project:{...current,available:true,mode:'read_write'}};}
+              if(kind.startsWith('edits/'))return services.projectFiles.getEdit(projectRoute[3],{binding:project,...paging});
+              return services.projectFiles.execute({action:kind==='files'?'list':kind==='file'?'read':'history',...project,...paging},{binding:project,operationId:randomUUID(),signal});
+            },project);
+            json(res,200,result);return true;
+          }
           if(route===BASE+'/work'){json(res,200,await services.work.list(workQuery(req)));return true;}
           const work=/^\/api\/assistant\/work\/([a-f\d-]+)$/i.exec(route);
           if(work){json(res,200,{job:await services.work.get(work[1],workQuery(req,true))});return true;}
@@ -202,7 +237,19 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         }
         if (req.method !== 'POST') throw fail(405, 'method_not_allowed', 'Use GET or POST.');
         const body = await readJson(req);
-        if(route===BASE+'/work'){fields(body,['id','prompt','title','providerId','contextId']);text(body.providerId,100,'Provider ID');if(typeof body.id!=='string'||!UUID.test(body.id))throw fail(400,'invalid_work','Use a stable work job UUID.');json(res,202,await guardedRequest(req,res,session,body.id,signal=>acceptWork({...body,scope:session.scope},services,{signal})));return true;}
+        if(route===BASE+'/projects/choose'){fields(body,[]);if(!services.projectFiles)throw fail(503,'project_files_unavailable','Project folders are unavailable.');json(res,200,await guardedRequest(req,res,session,randomUUID(),signal=>services.projectFiles.choose({signal})));return true;}
+        const projectAction=/^\/api\/assistant\/projects\/([a-f\d-]+)\/(edit|revoke)$/i.exec(route);
+        if(projectAction){
+          if(!services.projectFiles)throw fail(503,'project_files_unavailable','Project folders are unavailable.');
+          const project=normalizeProjectBinding({projectId:projectAction[1],grantEpoch:body.grantEpoch});
+          if(projectAction[2]==='revoke'){fields(body,['grantEpoch']);json(res,200,await guardedRequest(req,res,session,randomUUID(),()=>services.projectFiles.revoke(project)));return true;}
+          fields(body,['grantEpoch','operationId','action','path','content','expectedHash','oldText','newText','changeId']);
+          if(typeof body.operationId!=='string'||!UUID.test(body.operationId))throw fail(400,'invalid_id','File edits need a caller-stable operation UUID.');
+          if(!['write','replace','undo'].includes(body.action))throw fail(400,'invalid_project_arguments','Choose a file write, literal replacement or Undo.');
+          const {grantEpoch,operationId,...argumentsValue}=body;
+          json(res,200,await guardedRequest(req,res,session,operationId,signal=>services.projectFiles.execute({...argumentsValue,...project},{binding:project,operationId,signal}),project));return true;
+        }
+        if(route===BASE+'/work'){fields(body,['id','prompt','title','providerId','contextId','project']);const project=normalizeProjectBinding(body.project);text(body.providerId,100,'Provider ID');if(typeof body.id!=='string'||!UUID.test(body.id))throw fail(400,'invalid_work','Use a stable work job UUID.');json(res,202,await guardedRequest(req,res,session,body.id,signal=>acceptWork({...body,scope:session.scope},services,{signal}),project));return true;}
         const workCancel=/^\/api\/assistant\/work\/([a-f\d-]+)\/cancel$/i.exec(route);
         if(workCancel){fields(body,[]);json(res,200,{job:await services.work.cancel(workCancel[1])});return true;}
         if(route===BASE+'/context'){await selectContext(req,res,body,session,services);return true;}
@@ -256,8 +303,8 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         if (route === BASE + '/providers/select') { fields(body, ['id']); await services.router.select(body.id); json(res, 200, await providerStatus(services.router)); return true; }
         if (route === BASE + '/providers/remove') { fields(body, ['id']); await services.router.remove(body.id); json(res, 200, await providerStatus(services.router)); return true; }
         if (route === BASE + '/tools/run') {
-          fields(body, ['tool','arguments','operationId']); const requestId = directOperationId(body);
-          const result = await guardedRequest(req,res,session,requestId,signal=>services.tools.execute(body.tool, body.arguments || {}, { requestId: `${OWNER}:${requestId}`, callId: 'direct', signal,scope:session.scope }));
+          fields(body, ['tool','arguments','operationId','project']); const requestId = directOperationId(body),project=normalizeProjectBinding(body.project);
+          const result = await guardedRequest(req,res,session,requestId,signal=>services.tools.execute(body.tool, body.arguments || {}, { requestId: `${OWNER}:${requestId}`, callId: 'direct', signal,scope:session.scope,...(project?{project}:{}) }),project);
           json(res, 200, { tool: body.tool, result, requestId, workspace: services.store.snapshot() }); return true;
         }
         const workflow = /^\/api\/assistant\/workspace\/workflows\/([a-f\d-]+)\/run$/i.exec(route);
@@ -277,14 +324,14 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         throw fail(404, 'not_found', 'That action was not found.');
       } catch (error) {
         const status = error.statusCode || error.status || 500;
-        json(res, Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500, { error: { code: error.code || 'productivity_error', message: error.statusCode || error.status ? error.message : 'Companion could not complete this action. Check its connection and try again.' }, ...(error.workspace ? { workspace: error.workspace } : {}), ...(error.actions ? { actions: error.actions } : {}), ...(error.windowContext ? {windowContext:windowContextReference(error.windowContext)} : {}), ...(Array.isArray(error.hostActions) ? { hostActions: error.hostActions } : {}), ...(error.capability ? { capability: error.capability } : {}), ...(error.conversation ? { conversation: conversationPage(error.conversation) } : {}), ...(error.conversationId ? { conversationId: error.conversationId } : {}) });
+        json(res, Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500, { error: { code: error.code || 'productivity_error', message: error.statusCode || error.status ? error.message : 'Companion could not complete this action. Check its connection and try again.' }, ...(error.workspace ? { workspace: error.workspace } : {}), ...(error.actions ? { actions: error.actions } : {}), ...(error.windowContext ? {windowContext:windowContextReference(error.windowContext)} : {}),...(error.projectFileEdit?{projectFileEdit:projectEditReference(error.projectFileEdit)}:{}),...(error.projectContext?{projectContext:projectReference(error.projectContext)}:{}), ...(Array.isArray(error.hostActions) ? { hostActions: error.hostActions } : {}), ...(error.capability ? { capability: error.capability } : {}), ...(error.conversation ? { conversation: conversationPage(error.conversation) } : {}), ...(error.conversationId ? { conversationId: error.conversationId } : {}) });
       }
       return true;
     },
     cancel(scope, id) { active.get(`${scope}:${id}`)?.abort(); },
     async close() {
-      closed = true; for (const controller of active.values()) controller.abort(); active.clear();contextPins.clear();contextRequests.clear();
-      if (runtimePromise) { const services = await runtimePromise.catch(() => null);await services?.work?.close?.(); await services?.desktop?.close?.(); await services?.builder.close?.(); services?.store.close(); }
+      closed = true; for (const controller of active.values()) controller.abort(); active.clear();contextPins.clear();contextRequests.clear();projectRequests.clear();
+      if (runtimePromise) { const services = await runtimePromise.catch(() => null);await services?.work?.close?.();await services?.projectFiles?.close?.(); await services?.desktop?.close?.(); await services?.builder.close?.(); services?.store.close(); }
     },
   };
 }

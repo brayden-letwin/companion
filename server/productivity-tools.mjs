@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import { BUILTIN_TOOL_DEFINITIONS, builtinCatalog, validateToolArguments, capabilityHash, validateWorkflowSteps } from './capability-registry.mjs';
 import { listTasks, readTask, summarizeTasks } from './task-queries.mjs';
+import { PROJECT_FILES_TOOL_NAME, projectFilesCatalogEntry } from './project-files-tool.mjs';
 const defaultExecuteCapability=async options=>(await import('./capability-runtime.mjs')).executeCapability(options);
 export const TOOL_DEFINITIONS = BUILTIN_TOOL_DEFINITIONS;
 const fail = (message, code = 'invalid_tool') => Object.assign(new Error(message), { code, statusCode: 400 });
@@ -106,22 +107,23 @@ function inspectFeatureBuild(job, requestedId, requestOffset = 0) {
   return report;
 }
 
-export function createProductivityTools({ store, builder, desktop, root, work, capabilities = [], capabilityStatus = {ready:true}, executeCapability = defaultExecuteCapability, owner = 'local-workspace', now = Date.now } = {}) {
+export function createProductivityTools({ store, builder, desktop, root, work, projectFiles, capabilities = [], capabilityStatus = {ready:true}, executeCapability = defaultExecuteCapability, owner = 'local-workspace', now = Date.now } = {}) {
   if (!store) throw new Error('The productivity store is required.');
   const definitions = [...TOOL_DEFINITIONS, ...(desktop?.definitions || [])];
   const registry = new Map(definitions.map(tool => [tool.name, tool]));
   if (registry.size !== definitions.length) throw new Error('Tool names must be unique.');
   if(definitions.length>32)throw new Error('Keep provider tool definitions bounded.');
-  const custom=new Map();for(const capability of capabilities){if(!capability?.tool?.name||registry.has(capability.tool.name)||custom.has(capability.tool.name))throw new Error('Capability tool names must be unique.');custom.set(capability.tool.name,structuredClone(capability));}
+  const custom=new Map();for(const capability of capabilities){if(!capability?.tool?.name||capability.tool.name===PROJECT_FILES_TOOL_NAME||registry.has(capability.tool.name)||custom.has(capability.tool.name))throw new Error('Capability tool names must be unique and cannot replace trusted host actions.');custom.set(capability.tool.name,structuredClone(capability));}
   const desktopNames = new Set((desktop?.definitions || []).map(tool => tool.name));
   const desktopReads = new Set(['desktop_list_apps','desktop_list_windows','desktop_read_window']);
-  const catalog = () => [...builtinCatalog(),...(desktop?.definitions||[]).map(item=>({...structuredClone(item),title:item.name.replaceAll('_',' '),kind:'desktop',version:1,workflowAllowed:false,effectPolicy:desktopReads.has(item.name)?'pure':'desktop'})),...[...custom.values()].map(capability=>({name:capability.tool.name,title:capability.title,description:capability.tool.description,parameters:structuredClone(capability.tool.parameters),kind:'capability',capabilityId:capability.id,version:capability.version,hash:capability.hash,workflowAllowed:capability.workflowAllowed,effectPolicy:capability.effectPolicy,...(capability.featureId?{featureId:capability.featureId}:{})}))];
+  const catalog = () => [...builtinCatalog(),...(desktop?.definitions||[]).map(item=>({...structuredClone(item),title:item.name.replaceAll('_',' '),kind:'desktop',version:1,workflowAllowed:false,effectPolicy:desktopReads.has(item.name)?'pure':'desktop'})),...(projectFiles?[projectFilesCatalogEntry()]:[]),...[...custom.values()].map(capability=>({name:capability.tool.name,title:capability.title,description:capability.tool.description,parameters:structuredClone(capability.tool.parameters),kind:'capability',capabilityId:capability.id,version:capability.version,hash:capability.hash,workflowAllowed:capability.workflowAllowed,effectPolicy:capability.effectPolicy,...(capability.featureId?{featureId:capability.featureId}:{})}))];
   store.configureWorkflowTools?.(catalog());
   const brokerNames=new Set(builtinCatalog().filter(item=>item.workflowAllowed).map(item=>item.name));
   const execute = async (name, raw = {}, context = {}) => {
     const { requestId, callId, providerId, signal } = context;
     if (signal?.aborted) throw Object.assign(new Error('Request stopped.'), { name: 'AbortError' });
     const budget=executionBudget(context);if(!budget.remaining)throw fail('This request reached its shared action budget. Completed actions are retained.','execution_budget_exceeded');budget.remaining-=1;
+    if(name===PROJECT_FILES_TOOL_NAME)return executeProjectFiles(raw,context);
     if(typeof name==='string'&&name.startsWith('cap_'))return runCapability(name,raw,context);
     const args = validateArguments(name, raw, registry);
     if(name==='manage_work'){
@@ -136,7 +138,7 @@ export function createProductivityTools({ store, builder, desktop, root, work, c
         return args.action==='read'?{workJob:await work.get(args.jobId,{modelView:true,promptOffset:args.promptOffset,textOffset:args.textOffset,actionOffset:args.actionOffset})}:{workJob:await work.cancel(args.jobId)};
       }
       if(!args.prompt)throw fail('Describe the independent task to hand off.');
-      const created=await work.create({id:operationId(requestId||'local',callId||JSON.stringify([name,args])),prompt:args.prompt,...(args.title?{title:args.title}:{}),providerId,...(context.conversationId?{originConversationId:context.conversationId}:{}),...(context.currentRequestId?{originRequestId:context.currentRequestId}:{}),...(context.contextId?{contextId:context.contextId}:{}),scope:context.scope},{signal});
+      const created=await work.create({id:operationId(requestId||'local',callId||JSON.stringify([name,args])),prompt:args.prompt,...(args.title?{title:args.title}:{}),providerId,...(context.conversationId?{originConversationId:context.conversationId}:{}),...(context.currentRequestId?{originRequestId:context.currentRequestId}:{}),...(context.contextId?{contextId:context.contextId}:{}),...(context.project?{project:structuredClone(context.project)}:{}),scope:context.scope},{signal});
       return{workJob:created.job||created,message:'Work was handed off to its own conversation. Accepted does not mean completed; inspect this job for its actual outcome.'};
     }
     if (desktopNames.has(name)) {
@@ -169,7 +171,7 @@ export function createProductivityTools({ store, builder, desktop, root, work, c
       return { ...result, entityId };
     };
     switch (name) {
-      case 'list_capabilities': return {capabilities:catalog().filter(item=>item.kind==='capability'),ready:capabilityStatus.ready!==false,...(capabilityStatus.ready===false?{unavailableReason:capabilityStatus.unavailableReason||capabilityStatus.message||'The capability registry could not be loaded.'}:{})};
+      case 'list_capabilities': return {capabilities:catalog().filter(item=>item.kind==='capability'||item.name===PROJECT_FILES_TOOL_NAME),ready:capabilityStatus.ready!==false,...(capabilityStatus.ready===false?{unavailableReason:capabilityStatus.unavailableReason||capabilityStatus.message||'The capability registry could not be loaded.'}:{})};
       case 'run_capability': return runCapability(args.name,args.arguments,context);
       case 'list_tasks': return listTasks(state,args);
       case 'read_task': return readTask(state,args);
@@ -228,7 +230,12 @@ export function createProductivityTools({ store, builder, desktop, root, work, c
     if(saved.state==='failed'){const error=saved.result;throw Object.assign(fail(error.error,error.code),{statusCode:error.statusCode||500,hostActions:error.hostActions||[],capability:error.capability,...(error.code==='capability_cancelled'?{name:'AbortError'}:{})});}
     return {...saved.result,replayed:true};
   }
+  async function executeProjectFiles(args,context={}){
+    if(!projectFiles)throw Object.assign(fail('Project files are unavailable in this runtime.','project_files_unavailable'),{statusCode:503});
+    return projectFiles.execute(args,{binding:context.project,operationId:operationId(context.requestId||'local',context.callId||JSON.stringify([PROJECT_FILES_TOOL_NAME,args])),signal:context.signal});
+  }
   async function runCapability(name,args,context={}){
+    if(name===PROJECT_FILES_TOOL_NAME)return executeProjectFiles(args,context);
     if(typeof name!=='string'||!/^cap_[a-z][a-z0-9_]{0,59}$/.test(name)||!args||typeof args!=='object'||Array.isArray(args)||Buffer.byteLength(JSON.stringify(args))>80000)throw fail('Choose a registered capability and bounded arguments.');
     const receiptId=`capability:${operationId(context.requestId||randomUUID(),context.callId||'capability')}`,digest=capabilityHash({name,arguments:args});
     const prior=store.executionReceipt(receiptId,digest);if(prior)return replayCapability(prior);
