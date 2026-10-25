@@ -100,6 +100,12 @@ test('microphone-session source changes require review before they can affect ca
   assert.equal(job.status,'review_required'); assert.equal(job.files[0].protected,true); await absent(path.join(f.root,'src/voice-session.mjs'));
 });
 
+test('workspace recovery controls require review before generated code can affect imports',async t=>{
+ const file='src/workspace-backups.mjs',f=await fixture(t,{complete:async()=>({summary:'Prepare reviewed recovery UI.',files:[{path:file,content:'export const recoveryPolicy = "review required";\n'}],tests:[]})});
+ const job=await finished(f.builder,(await f.builder.request({prompt:'Prepare changes to workspace import controls.',providerId:'synthetic',autoApply:true},OWNER)).id);
+ assert.equal(job.status,'review_required');assert.equal(job.files[0].protected,true);await absent(path.join(f.root,file));
+});
+
 function executablePatch(code='export function execute(args){return {total:args.value*2};}') {
   const capability={id:'double-value',title:'Double value',module:'./double-value.mjs',version:1,tool:{name:'cap_double_value',description:'Double one number.',parameters:{type:'object',properties:{value:{type:'integer'}},required:['value'],additionalProperties:false}},workflowAllowed:true,effectPolicy:'pure',acceptance:[{name:'Known result',arguments:{value:3},expected:{total:6}}]};
   return {summary:'Add one executable registered capability.',files:[{path:'server/capabilities/manifest.json',content:JSON.stringify({version:1,capabilities:[capability]})},{path:'server/capabilities/double-value.mjs',content:code}],tests:[]};

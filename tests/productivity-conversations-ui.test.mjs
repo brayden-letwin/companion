@@ -9,11 +9,13 @@ import { taskDeadlineView, formatDeadlineInstant } from '../server/task-deadline
 
 const root = new URL('../', import.meta.url);
 const html = readFileSync(new URL('assistant.html', root), 'utf8');
+const workspaceBackupsSource=readFileSync(new URL('src/workspace-backups.mjs',root),'utf8').replace('export function createWorkspaceBackupsUI','function createWorkspaceBackupsUI');
 const providerChecksSource=readFileSync(new URL('src/provider-checks.mjs',root),'utf8').replaceAll('export function ','function ');
 const buildAttemptsSource=readFileSync(new URL('src/build-attempts.mjs',root),'utf8').replace('export function createBuildAttemptsUI','function createBuildAttemptsUI');
 const buildContinuationSource=readFileSync(new URL('src/build-continuation.mjs',root),'utf8').replace('export function createBuildContinuationUI','function createBuildContinuationUI');
 const projectFilesSource=readFileSync(new URL('src/project-files.mjs',root),'utf8').replace('export function createProjectFilesUI','function createProjectFilesUI');
 const source = readFileSync(new URL('src/assistant.mjs', root), 'utf8')
+  .replace(/^import \{ createWorkspaceBackupsUI \} from '\.\/workspace-backups\.mjs';\r?\n/, '')
   .replace(/^import \{ normalizeDeadline \} from '\.\/core\/productivity-deadlines\.mjs';\r?\n/, '')
   .replace(/^import \{ createVoiceSession \} from '\.\/voice-session\.mjs';\r?\n/, '')
   .replace(/^import \{ createProjectFilesUI \} from '\.\/project-files\.mjs';\r?\n/, '')
@@ -156,6 +158,7 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
   const window = { MediaRecorder: Recorder, AudioContext, addEventListener() {} };
   const ClockDate = runtimeClock ? class extends Date { static now() { return runtimeClock.value; } } : Date;
   const context = vm.createContext({ Date: ClockDate, normalizeDeadline, createVoiceSession, window, document, navigator: { locks, permissions: { query: async () => ({ state: 'granted' }) }, mediaDevices: { getUserMedia: () => { permission = deferred(); return permission.promise; } } }, MediaRecorder: Recorder, fetch: fetchMock, Headers, AbortController, TextEncoder, Blob, URL, URLSearchParams, DOMException, crypto: webcrypto, structuredClone, performance, console, localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) }, location: { search: '', reload() {}, assign() {} }, Event: class {}, setTimeout: (callback, milliseconds) => { const timer = setTimeout(callback, milliseconds); timer.unref(); timers.add(timer); return timer; }, clearTimeout, setInterval: callback => { intervals.push(callback); return intervals.length; }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} });
+  context.createWorkspaceBackupsUI=vm.runInContext('(function(){'+workspaceBackupsSource+'\nreturn createWorkspaceBackupsUI;})()',context);
   const providerChecksModule=vm.runInContext('(function(){'+providerChecksSource+'\nreturn {createProviderChecksUI,providerAvailabilityText,providerCheckSummary};})()',context);Object.assign(context,providerChecksModule);
   context.createBuildAttemptsUI=vm.runInContext('(function(){'+buildAttemptsSource+'\nreturn createBuildAttemptsUI;})()',context);
   context.createBuildContinuationUI=vm.runInContext('(function(){'+buildContinuationSource+'\nreturn createBuildContinuationUI;})()',context);
@@ -1479,4 +1482,8 @@ test('confirming an original task receipt never presents a later different deadl
 test('explicit None after a historical-versus-current deadline conflict clears the exact task without remaining blocked',async()=>{
   const task=taskFixture(1,{dueDate:'2026-10-25'}),app=await createUI({workspaceTasks:[task]});
   try{await openTaskDates(app,task);app.nodes.get('edit-name').value='Keep my title';let accepted,saved;app.setIntercept((url,options,{workspace})=>{if(!url.endsWith('/workspace/operations'))return null;const body=JSON.parse(options.body);if(!accepted){accepted=body;saved={...workspace.tasks[0],title:body.title};workspace.tasks[0]={...saved,dueDate:'2026-12-31'};workspace.revision=2;throw new Error('Original acknowledgement lost before a later date change');}if(body.operationId===accepted.operationId)return response({workspace,task:saved,appliedRevision:1,replayed:true});return null;});await app.nodes.get('edit-form').dispatch('submit',{preventDefault(){}});await app.nodes.get('retry-workspace-change').dispatch('click');assert.equal(app.ui.get().editorDeadline.concurrent,true);assert.equal(app.nodes.get('edit-deadline-current').hidden,false);await chooseDeadline(app,'none');assert.equal(app.ui.get().editorDeadline.concurrent,false);await app.nodes.get('edit-form').dispatch('submit',{preventDefault(){}});const body=taskChanges(app).at(-1);assert.equal(body.taskId,task.id);assert.equal(body.dueDate,null);assert.equal(Object.hasOwn(body,'dueAt'),false);assert.equal(body.expectedRevision,2);assert.notEqual(body.operationId,accepted.operationId);assert.equal(app.ui.get().workspace.tasks[0].dueDate,null);assert.equal(app.ui.get().workspace.tasks[0].dueAt,null);assert.equal(app.ui.get().workspace.tasks[0].title,'Keep my title');assert.equal(app.nodes.get('edit-dialog').open,false);}finally{app.close();}
+});
+
+test('Backup and recovery stays collapsed in Settings and never exports, previews or imports on construction or ordinary navigation',async()=>{
+  const app=await createUI({workspaceTasks:[taskFixture(1,{title:'A private saved task'})]});try{const section=descendants(app.nodes.get('workspace-backups-container')).find(node=>node.tagName==='details');assert.ok(section);assert.equal(section.open,false);assert.match(section.textContent,/does not include chats, build history, AI keys, permissions, app source or project files/);assert.equal(app.requests.some(item=>/\/backups|backup-recovery/.test(item.url)),false);app.ui.showView('settings');app.ui.showView('today');assert.equal(section.open,false);assert.equal(app.requests.some(item=>/\/backups|backup-recovery/.test(item.url)),false);assert.equal(app.ui.get().chatOpen,false);assert.equal(app.nodes.get('new-task').value,'');}finally{app.close();}
 });
