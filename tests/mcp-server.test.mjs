@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { setImmediate as turn } from 'node:timers/promises';
@@ -9,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { createMcpServer } from '../server/mcp-server.mjs';
 
 const TOKEN = 'S'.repeat(43), CSRF = 'C'.repeat(43), ORIGIN = 'http://127.0.0.1:4174';
+const APP_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const response = (value, status = 200, headers = {}) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json', ...headers } });
 const init = { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic-test-client', version: '1.0' } };
 const tool = (name, args = {}) => ({ name, arguments: args });
@@ -35,6 +37,7 @@ test('MCP lifecycle negotiates tools, requires initialized, and keeps stdout pro
   const f = await fixture(t); assert.equal((await f.request('ping')).result.constructor, Object);
   assert.equal((await f.request('tools/list')).error.code, -32002);
   const initialized = await f.request('initialize', { ...init, protocolVersion: '2024-11-05' }); assert.equal(initialized.result.protocolVersion, '2025-11-25'); assert.deepEqual(initialized.result.capabilities, { tools: { listChanged: false } });
+  assert.equal(initialized.result.serverInfo.version, APP_VERSION);
   assert.equal((await f.request('tools/list')).error.code, -32002); f.notify('notifications/initialized');
   const listed = await f.request('tools/list'); assert.equal(listed.result.tools.length, 12); assert.equal(listed.result.tools.find(item => item.name === 'companion_workspace').annotations.readOnlyHint, true); assert.equal(listed.result.tools.find(item => item.name === 'companion_apply_build').annotations.destructiveHint, true);
   assert.equal(f.calls.length, 0); assert.equal(f.errorText(), ''); for (const line of f.outputText().trim().split('\n')) assert.equal(JSON.parse(line).jsonrpc, '2.0');
