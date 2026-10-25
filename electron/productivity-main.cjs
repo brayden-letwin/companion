@@ -178,7 +178,7 @@ function showCorner() {
   if (!corner || corner.isDestroyed()) {
     corner = new BrowserWindow({ title: 'Companion', ...cornerBounds(), frame: false, alwaysOnTop: true,
       skipTaskbar: true, movable: true, resizable: false, maximizable: false, fullscreenable: false,
-      backgroundColor: '#101010', show: false, webPreferences: preferences('corner') });
+      backgroundColor: '#ffffff', show: false, webPreferences: preferences('corner') });
     configure(corner, 'corner');
     corner.on('move', () => { clearTimeout(clampTimer); clampTimer = setTimeout(() => clampCorner(), 120); });
     void corner.loadURL(urlFor('corner')).catch(() => {});
@@ -189,7 +189,7 @@ function toggleCorner() { if (corner && !corner.isDestroyed() && corner.isVisibl
 function openWorkspace() {
   if (!workspace || workspace.isDestroyed()) {
     workspace = new BrowserWindow({ title: 'Companion — Workspace', width: 1180, height: 840, minWidth: 760, minHeight: 560,
-      backgroundColor: '#101010', show: false, webPreferences: preferences('workspace') });
+      backgroundColor: '#ffffff', show: false, webPreferences: preferences('workspace') });
     configure(workspace, 'workspace');
     void workspace.loadURL(urlFor('workspace')).catch(() => {});
   }
