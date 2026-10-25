@@ -15,6 +15,7 @@ const JOB_LABELS = {queued:'Queued',generating:'Building',validating:'Checking c
 let workspace = null, providers = [], activeProviderId = '', jobs = [], selectedJobId = null;
 let service = { transcriptionReady:false }, csrfToken = '', serviceError = '', checkingService = null;
 let serviceCheckGeneration = 0, runtimeInfo = null, runtimeReconnectPromise = null, runtimeReconnectGeneration = 0;
+let runtimeRestartSubmitting=false;
 let runtimeNotice = null, runtimeRetry = null, mcpConfiguration = '', integrationsPending = false;
 let desktopStatus=null, desktopActions=[], desktopRefreshPromise=null, desktopEpoch=0, desktopToolBusy=false, desktopMutationBusy=false;
 let desktopExecutionGeneration=0, activeDesktopRequest=null, desktopStopPromise=null, desktopSnapshot=null, desktopReview=null, desktopInputTarget=null;
@@ -71,7 +72,7 @@ function conversationLocallyBusy(){return turnBusy||!!recording||microphoneOpeni
 function saveConversationDraft(){conversationDrafts.set(conversationId||'new',$('question').value);}
 function selectedConversationRunning(){return !!conversationDetail?.activeRequestId||conversationDetail?.turns?.some(turn=>turn.status==='running');}
 function renderConversationControls(){
-  const busy=conversationLocallyBusy()||conversationLoading||!!runtimeReconnectPromise;
+  const busy=conversationLocallyBusy()||conversationLoading||!!runtimeReconnectPromise||runtimeRestartSubmitting;
   const listKey=JSON.stringify(conversations.map(item=>[item.id,item.title,item.lastStatus]));
   if(listKey!==conversationOptionsKey){conversationOptionsKey=listKey;const options=[element('option','','New conversation')];options[0].value='';for(const item of conversations){const option=element('option','',item.title||'Conversation');option.value=item.id;options.push(option);}$('conversation-select').replaceChildren(...options);}
   $('conversation-select').value=conversationId||'';$('conversation-select').disabled=busy;$('conversation-new').disabled=busy;$('conversation-refresh').disabled=!!conversationListPending||!!conversationDetailRequest||!!runtimeReconnectPromise;
@@ -81,7 +82,7 @@ function renderConversationControls(){
   $('conversation-error').textContent=conversationError;
   $('conversation-earlier').hidden=!conversationHasEarlier;$('conversation-load-earlier').disabled=!!conversationEarlierRequest||!!runtimeReconnectPromise;$('conversation-load-earlier').textContent=conversationEarlierRequest?'Loading…':'Load earlier';
   const contextBlocked=!!selectedWindowContext&&selectedWindowContext.status!=='ready';
-  const cannotSend=turnBusy||!!runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||conversationLoading||running||!!uncertain||contextBlocked;
+  const cannotSend=turnBusy||!!runtimeReconnectPromise||runtimeRestartSubmitting||desktopToolBusy||desktopMutationBusy||conversationLoading||running||!!uncertain||contextBlocked;
   $('send-question').disabled=cannotSend;
   for(const open of $('work-detail').querySelectorAll('.work-conversation-open'))open.disabled=busy;
   if(running||uncertain||conversationLoading||contextBlocked)$('mic-button').disabled=true;
@@ -115,17 +116,17 @@ function renderSavedConversation(){
   updateCornerPreview(turns.at(-1)?.reply?.text||turns.at(-1)?.message||'');renderCorner();
   if(!nearBottom&&!localChatTurn)scroll.scrollTop=previousTop;
 }
-async function refreshConversation({quiet=false}={}){
-  const context=captureConversationContext();if(!context.id||destroyed||runtimeReconnectPromise)return null;
+async function refreshConversation({quiet=false,reconnecting=false}={}){
+  const context=captureConversationContext();if(!context.id||destroyed||(runtimeReconnectPromise&&!reconnecting))return null;
   if(conversationDetailRequest?.id===context.id&&conversationDetailRequest.selection===context.selection)return conversationDetailRequest.promise;
   const request={...context,promise:null};conversationDetailRequest=request;renderConversationControls();
   request.promise=(async()=>{try{const detail=validateConversation(await boundedApi('conversations/'+encodeURIComponent(context.id)),context.id);if(adoptConversation(detail,context)){conversationError='';renderConversationControls();}return detail;}catch(error){if(currentConversationContext(context)){conversationError=error.message;renderConversationControls();}if(!quiet)throw error;return null;}finally{if(conversationDetailRequest===request){conversationDetailRequest=null;renderConversationControls();}}})();return request.promise;
 }
-async function refreshConversations({initialize=false,quiet=false}={}){
+async function refreshConversations({initialize=false,quiet=false,reconnecting=false}={}){
   if(conversationListPending)return conversationListPending;
   conversationListPending=(async()=>{try{const value=await boundedApi('conversations');if(!Array.isArray(value.conversations))throw new Error('Saved conversations could not be read.');conversations=value.conversations.filter(item=>item&&CONVERSATION_ID.test(item.id));if(conversationDetail?.id===conversationId&&!conversations.some(item=>item.id===conversationId))conversations.unshift(summarizeConversation(conversationDetail));conversationError='';
     if(initialize&&!conversationInitialized){conversationInitialized=true;const desired=conversations.some(item=>item.id===conversationId)?conversationId:conversations[0]?.id||null;conversationId=desired;if(desired)store('conversationId',desired);}
-    renderConversationControls();if(conversationId)await refreshConversation({quiet});else renderSavedConversation();
+    renderConversationControls();if(conversationId)await refreshConversation({quiet,reconnecting});else renderSavedConversation();
   }catch(error){conversationError=error.message;renderConversationControls();if(!quiet)throw error;}finally{conversationListPending=null;renderConversationControls();}})();return conversationListPending;
 }
 async function selectConversation(id,{allowVoiceCommand=false}={}){
@@ -244,7 +245,7 @@ async function checkService({reconnecting=false,force=false,deadline=Infinity}={
       if(results[4].status==='fulfilled')applyRuntime(results[4].value);
       if(results[5].status==='fulfilled')applyDesktopStatus(results[5].value);
       void refreshConversations({initialize:true,quiet:true});void refreshToolCatalog({quiet:true});void refreshWork({quiet:true});
-      return {workspaceReady:results[2].status==='fulfilled',jobsReady:results[3].status==='fulfilled',runtimeReady:results[4].status==='fulfilled'};
+      return {workspaceReady:results[2].status==='fulfilled',jobsReady:results[3].status==='fulfilled',runtimeReady:results[4].status==='fulfilled',runtime:results[4].status==='fulfilled'?clone(runtimeInfo):null};
     }catch(error){if(check===serviceCheckGeneration){serviceError=error.message;providers=[];activeProviderId='';service={transcriptionReady:false};}return {workspaceReady:false,jobsReady:false,runtimeReady:false};}
     finally{if(check===serviceCheckGeneration){renderProviders();renderService();renderRuntime();$('connection-refresh').disabled=!!runtimeReconnectPromise;$('retry-service').disabled=!!runtimeReconnectPromise;checkingService=null;}}
   })();return checkingService;
@@ -264,23 +265,39 @@ function renderService(){
   if(!turnBusy&&!voicePipeline&&!recording&&!microphoneOpening)setState('idle');updateVoiceHelp();void restoreVoiceIfAllowed();
   renderRuntime();
 }
-function applyRuntime(value){
+function runtimeSnapshot(value){
   if(!value||typeof value.managed!=='boolean'||!Number.isInteger(value.workerPid)||value.workerPid<1)throw new Error('Companion’s runtime status could not be read.');
-  const previous=runtimeInfo;if(previous&&previous.workerPid!==value.workerPid&&selectedWindowContext){windowContextGeneration++;markWindowContextUnavailable('Companion restarted. Select the window again.');cancelTurn(false);}
-  runtimeInfo={managed:value.managed,restarting:value.restarting===true,workerPid:value.workerPid,hostPid:value.hostPid};
-  if(previous&&previous.workerPid!==runtimeInfo.workerPid&&!runtimeReconnectPromise){runtimeNotice={phase:'ready',message:'Companion reconnected to its new server.'};void loadExtensions();}
+  const result={managed:value.managed,restarting:value.restarting===true,workerPid:value.workerPid,hostRestartAvailable:value.hostRestartAvailable===true};
+  for(const field of ['hostPid','supervisorPid'])if(value[field]!=null){if(!Number.isInteger(value[field])||value[field]<1)throw new Error('Companion’s service identity could not be read.');result[field]=value[field];}
+  for(const field of ['hostInstanceId','workerInstanceId','supervisorInstanceId'])if(value[field]!=null){if(typeof value[field]!=='string'||!CONVERSATION_ID.test(value[field]))throw new Error('Companion’s service identity could not be read.');result[field]=value[field];}
+  return result;
+}
+function runtimeChanged(previous,current){return !!previous&&(previous.workerPid!==current.workerPid||(previous.hostPid&&current.hostPid&&previous.hostPid!==current.hostPid)||['hostInstanceId','workerInstanceId','supervisorInstanceId'].some(field=>previous[field]&&current[field]&&previous[field]!==current[field]));}
+function runtimeRestartConfirmed(current,baseline,scope){
+  if(!current?.managed||current.restarting)return false;
+  const workerPidChanged=current.workerPid!==baseline.workerPid,hostPidChanged=Number.isInteger(baseline.hostPid)&&Number.isInteger(current.hostPid)&&current.hostPid!==baseline.hostPid;
+  const workerIdChanged=!!current.workerInstanceId&&!!baseline.workerInstanceId&&current.workerInstanceId!==baseline.workerInstanceId,hostIdChanged=!!current.hostInstanceId&&!!baseline.hostInstanceId&&current.hostInstanceId!==baseline.hostInstanceId;
+  if(scope==='host')return workerPidChanged&&hostPidChanged&&workerIdChanged&&hostIdChanged;
+  if(scope==='launcher'){const supervisorChanged=!!current.supervisorInstanceId&&(!baseline.supervisorInstanceId||current.supervisorInstanceId!==baseline.supervisorInstanceId)&&Number.isInteger(current.supervisorPid)&&(!baseline.supervisorPid||current.supervisorPid!==baseline.supervisorPid);return supervisorChanged&&workerPidChanged&&hostPidChanged&&(baseline.workerInstanceId?workerIdChanged:true)&&(baseline.hostInstanceId?hostIdChanged:true);}
+  return workerPidChanged&&(!baseline.workerInstanceId||workerIdChanged);
+}
+function applyRuntime(value){
+  const current=runtimeSnapshot(value),previous=runtimeInfo;
+  if(runtimeChanged(previous,current)&&selectedWindowContext){windowContextGeneration++;markWindowContextUnavailable('Companion restarted. Select the window again.');cancelTurn(false);}
+  runtimeInfo=current;
+  if(runtimeChanged(previous,current)&&!runtimeReconnectPromise&&!runtimeRestartSubmitting){runtimeNotice={phase:'ready',message:'Companion reconnected to its service.'};void loadExtensions();}
   renderRuntime();
 }
 function renderRuntime(){
-  const busy=!!runtimeReconnectPromise;
-  $('runtime-summary').textContent=busy?'Companion is restarting and reconnecting. Your drafts stay here.':runtimeInfo===null?'Service information is unavailable. Check the connection before restarting.':runtimeInfo.managed?'Companion is managed by its launcher. Server updates can restart and reconnect here.':'This is a development server. Server updates need it to be stopped, then opened with Start Companion.cmd.';
+  const busy=!!runtimeReconnectPromise||runtimeRestartSubmitting;
+  $('runtime-summary').textContent=busy?'Companion is restarting and reconnecting. Your drafts stay here.':runtimeInfo===null?'Service information is unavailable. Check the connection before restarting.':runtimeInfo.managed?(runtimeInfo.hostRestartAvailable?'The Companion service can restart here to load server updates. Saved work stays on this PC.':'This launcher can restart its worker. Full service changes need the owning launcher stopped and reopened.'):'This is a development server. Stop it, then open Start Companion.cmd to load service changes.';
   $('restart-runtime').disabled=busy||!runtimeInfo?.managed;
   $('connection-refresh').disabled=busy||!!checkingService;
   $('retry-service').disabled=busy||!!checkingService;
   $('desktop-refresh').disabled=busy||!!desktopRefreshPromise;
   $('desktop-settings-refresh').disabled=busy||!!desktopRefreshPromise;
   $('runtime-banner').hidden=!runtimeNotice;
-  $('runtime-banner').className='runtime-banner'+(runtimeNotice?` runtime-${runtimeNotice.phase}`:'');
+  $('runtime-banner').className='runtime-banner'+(runtimeNotice?` runtime-${runtimeNotice.phase}`: '');
   $('runtime-message').textContent=runtimeNotice?.message||'';
   $('runtime-retry').hidden=!runtimeRetry||busy||!['failed','manual'].includes(runtimeNotice?.phase);
   $('runtime-retry').disabled=busy;
@@ -292,15 +309,16 @@ function renderRuntime(){
   renderConversationControls();renderVoiceControls();renderWork();
   if(busy||desktopToolBusy||desktopMutationBusy)$('hands-free').disabled=true;if(busy){$('connection-label').textContent='Reconnecting to Companion…';$('connection-dot').className='status-dot offline';}
 }
-async function reconnectAfterRestart(metadata,{jobId=null,action='restart'}={}){
+async function reconnectAfterRestart(metadata,{jobId=null,action='restart',baseline=null,scope=null,observeOnly=false,acknowledgementUncertain=false}={}){
   if(runtimeReconnectPromise)return runtimeReconnectPromise;
-  ensureCornerExpanded();
-  const baselinePid=metadata?.workerPid||runtimeInfo?.workerPid;
-  if(!Number.isInteger(baselinePid)||baselinePid<1)throw new Error('The previous server could not be identified. Check the connection before restarting.');
-  runtimeRetry={baselinePid,jobId,action};
-  if(metadata.requiresManualRestart||metadata.managed===false){runtimeNotice={phase:'manual',message:'Source changes are saved. Stop this development server, then double-click Start Companion.cmd. Choose Check again after it opens.'};renderRuntime();return {confirmed:false,manual:true};}
+  const frozen=runtimeSnapshot(baseline||runtimeInfo||metadata),restartScope=metadata?.restartScope==='launcher'?'launcher':scope||metadata?.restartScope||'worker';
+  if(!['worker','host','launcher'].includes(restartScope))throw new Error('The service restart type could not be read.');
+  runtimeRetry={baseline:clone(frozen),scope:restartScope,jobId,action};
+  if(!observeOnly&&(restartScope==='launcher'||metadata?.requiresManualRestart||metadata?.managed===false)){
+    runtimeNotice={phase:'manual',message:restartScope==='launcher'?'Service control code changed. Stop the owning Companion launcher, then open Start Companion.cmd. A worker or service-only restart cannot load these changes. Choose Check again after it opens.':'Source changes are saved. Stop this development server, then open Start Companion.cmd. Choose Check again after it opens.'};renderRuntime();return {confirmed:false,manual:true};
+  }
   const token=++runtimeReconnectGeneration;
-  runtimeNotice={phase:'waiting',message:'Restarting Companion. Reconnecting your workspace…'};
+  runtimeNotice={phase:'waiting',message:acknowledgementUncertain?'The restart acknowledgement was not confirmed. Checking the original service identity…':restartScope==='host'?'Restarting Companion’s service. Reconnecting your workspace…':restartScope==='launcher'?'Checking the relaunched Companion launcher…':'Restarting Companion’s worker. Reconnecting your workspace…'};
   runtimeReconnectPromise=Promise.resolve().then(async()=>{
     cancelTurn(false);serviceCheckGeneration+=1;checkingService=null;
     const deadline=Date.now()+60000;let delay=300,lastError='';
@@ -309,30 +327,42 @@ async function reconnectAfterRestart(metadata,{jobId=null,action='restart'}={}){
         const budget=()=>Math.max(1,Math.min(4000,deadline-Date.now()));
         const session=await boundedApi('session',{},budget());
         if(typeof session.csrfToken!=='string')throw new Error('The new session is not ready.');csrfToken=session.csrfToken;
-        const current=await boundedApi('runtime',{},budget());applyRuntime(current);
-        if(current.workerPid!==baselinePid&&!current.restarting){
-          runtimeNotice={phase:'waiting',message:'The new server is running. Restoring your workspace…'};renderRuntime();
+        const current=runtimeSnapshot(await boundedApi('runtime',{},budget()));applyRuntime(current);
+        if(runtimeRestartConfirmed(current,frozen,restartScope)){
+          runtimeNotice={phase:'waiting',message:'The new service is running. Restoring your workspace…'};renderRuntime();
           const refreshed=await checkService({reconnecting:true,force:true,deadline});
-          if(!refreshed?.workspaceReady||!refreshed.jobsReady||!refreshed.runtimeReady)throw new Error('The new server is running, but the workspace is not ready yet.');
+          if(!refreshed?.workspaceReady||!refreshed.jobsReady||!refreshed.runtimeReady||!runtimeRestartConfirmed(refreshed.runtime,frozen,restartScope))throw new Error('The requested service is not ready with its saved workspace yet.');
           let job=null;
-          if(jobId){job=await boundedApi(`features/${encodeURIComponent(jobId)}`,{},budget());job=job.job||job;if(job.id!==jobId)throw new Error('The build status could not be matched.');rememberJob(job);jobs=jobs.map(item=>item.id===job.id?job:item);featureRenderKey='';renderJobs();}
+          if(jobId){job=await boundedApi('features/'+encodeURIComponent(jobId),{},budget());job=job.job||job;if(job.id!==jobId)throw new Error('The build status could not be matched.');rememberJob(job);jobs=jobs.map(item=>item.id===job.id?job:item);featureRenderKey='';renderJobs();}
           if(token!==runtimeReconnectGeneration||destroyed)return {confirmed:false};
+          await Promise.allSettled([refreshConversations({quiet:true,reconnecting:true}),refreshWork({quiet:true,reconnecting:true})]);
           if(job?.status==='rolled_back'&&action==='apply'){runtimeNotice={phase:'rolled-back',message:'The update could not start. Companion restored the previous version and reconnected.'};toast('The update was rolled back. Your previous version is running.');}
           else if(job&&['failed','conflict','interrupted','recovery_required'].includes(job.status)){runtimeNotice={phase:'failed',message:job.error||'Companion reconnected, but this build needs attention. Check its status below.'};}
-          else{const message=action==='rollback'?'Changes rolled back. Companion restarted and reconnected.':action==='apply'&&job?.status==='applied'?'Feature activated. Companion restarted and reconnected.':'Companion restarted and reconnected.';runtimeNotice={phase:'ready',message};toast(message);}
+          else{const restarted=restartScope==='host'?'Companion service restarted and reconnected.':restartScope==='launcher'?'Companion launcher restarted and reconnected.':'Companion worker restarted and reconnected.',message=(action==='rollback'?'Changes rolled back. ':action==='apply'&&job?.status==='applied'?'Feature activated. ':'')+restarted;runtimeNotice={phase:'ready',message};toast(message);}
           runtimeRetry=null;void loadExtensions();return {confirmed:true,job};
         }
       }catch(error){lastError=error.message;}
       const remaining=deadline-Date.now();if(remaining<=0)break;
       await new Promise(resolve=>setTimeout(resolve,Math.min(delay,remaining)));delay=Math.min(4000,Math.ceil(delay*1.6));
     }
-    if(token===runtimeReconnectGeneration&&!destroyed){runtimeNotice={phase:'failed',message:'Companion has not confirmed a new server within 60 seconds. Double-click Start Companion.cmd, then choose Check again.'};if(lastError)$('build-error').textContent=lastError;}
+    if(token===runtimeReconnectGeneration&&!destroyed){const target=restartScope==='host'?'a new service host and worker':restartScope==='launcher'?'a new launcher, service host and worker':'a new worker';runtimeNotice={phase:'failed',message:'Companion has not confirmed '+target+' within 60 seconds. Open Start Companion.cmd if needed, then choose Check again.'};if(lastError)$('build-error').textContent=lastError;}
     return {confirmed:false};
   }).finally(()=>{if(token===runtimeReconnectGeneration){runtimeReconnectPromise=null;renderProviders();renderService();renderRuntime();featureRenderKey='';renderJobs();}});
   renderRuntime();return runtimeReconnectPromise;
 }
-$('runtime-retry').addEventListener('click',()=>{if(!runtimeRetry||runtimeReconnectPromise)return;const retry={...runtimeRetry};void reconnectAfterRestart({managed:true,restartRequested:true,workerPid:retry.baselinePid},retry).catch(error=>toast(error.message));});
-$('restart-runtime').addEventListener('click',async()=>{if(runtimeReconnectPromise||!runtimeInfo?.managed)return;$('restart-runtime').disabled=true;try{const value=await boundedApi('runtime/restart',{method:'POST',body:JSON.stringify({})},15000);await reconnectAfterRestart(value);}catch(error){toast(error.message);}finally{renderRuntime();}});
+async function restartCompanionService(){
+  if(runtimeReconnectPromise||runtimeRestartSubmitting||!runtimeInfo?.managed)return;
+  runtimeRestartSubmitting=true;cancelTurn(false);renderRuntime();
+  try{
+    const session=await boundedApi('session');if(typeof session.csrfToken!=='string')throw new Error('Companion’s session could not be opened.');csrfToken=session.csrfToken;
+    const baseline=runtimeSnapshot(await boundedApi('runtime')),scope=baseline.hostRestartAvailable?'host':'worker';applyRuntime(baseline);
+    let metadata,uncertain=false;try{metadata=await boundedApi('runtime/restart',{method:'POST',body:JSON.stringify({scope})},15000);uncertain=['hostPid','workerPid','hostInstanceId','workerInstanceId','supervisorInstanceId'].some(field=>baseline[field]!=null&&metadata[field]!=null&&baseline[field]!==metadata[field]);}
+    catch(error){if(error.status)throw error;metadata={...baseline,restartScope:scope,restartRequested:false};uncertain=true;}
+    return await reconnectAfterRestart(metadata,{baseline,scope,acknowledgementUncertain:uncertain});
+  }catch(error){toast(error.message);return {confirmed:false};}finally{runtimeRestartSubmitting=false;renderService();}
+}
+$('runtime-retry').addEventListener('click',()=>{if(!runtimeRetry||runtimeReconnectPromise)return;const retry=clone(runtimeRetry);void reconnectAfterRestart({...retry.baseline,restartScope:retry.scope,restartRequested:false},{...retry,observeOnly:true}).catch(error=>toast(error.message));});
+$('restart-runtime').addEventListener('click',()=>void restartCompanionService());
 function humanLabel(value){return String(value||'').replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/[_-]+/g,' ').replace(/^./,letter=>letter.toUpperCase());}
 function toolLabel(name){const meta=toolCatalog.find(item=>item.name===name);return meta?.title||humanLabel(name);}
 function applyToolCatalog(value){
@@ -825,14 +855,15 @@ function renderJobs(){
   if(job.events?.length){const events=element('div','job-events');for(const event of [...job.events].slice(-12).reverse()){const row=element('div','job-event');row.append(element('time','',timeLabel(event.at)),element('span','',event.message||event.type));events.append(row);}detail.append(events);}
 }
 async function jobAction(job,action){
-  if(featureBusy||runtimeReconnectPromise)return;featureBusy=true;$('build-error').textContent='';
+  if(featureBusy||runtimeReconnectPromise)return;let baseline=runtimeInfo?runtimeSnapshot(runtimeInfo):null;featureBusy=true;$('build-error').textContent='';
   try{
+    if(['apply','rollback'].includes(action))baseline=runtimeSnapshot(await boundedApi('runtime'));
     const value=await boundedApi(`features/${encodeURIComponent(job.id)}/${action}`,{method:'POST',body:JSON.stringify({})},90000);
     const changed=value.job||value;rememberJob(changed);
     if(changed?.id){jobs=jobs.map(item=>item.id===changed.id?changed:item);selectedJobId=changed.id;featureRenderKey='';renderJobs();}
-    if(changed.runtime&&['apply','rollback'].includes(action))await reconnectAfterRestart(changed.runtime,{jobId:job.id,action});
+    if(changed.runtime&&['apply','rollback'].includes(action))await reconnectAfterRestart(changed.runtime,{jobId:job.id,action,baseline});
     else{await refreshJobs();if(action==='apply'||action==='rollback')void loadExtensions();const latest=jobDetails.get(job.id)||changed;toast(latest.status==='rolled_back'?'Changes rolled back.':action==='apply'&&latest.status==='applied'?'Feature activated.':action==='cancel'?'Build cancelled.':'Build status updated.');}
-    const latest=jobDetails.get(job.id)||changed;if(latest.status==='applied'&&latest.files?.some(file=>file.path.startsWith('electron/'))){runtimeNotice={phase:'manual',message:desktopUpdateNotice()};runtimeRetry=null;renderRuntime();toast(nativeSourceRuntime===false?'Desktop source changed. Rebuild the desktop app to load it.':'Desktop source changed. Relaunch from the updated source to load it.');}
+    const latest=jobDetails.get(job.id)||changed;if(latest.status==='applied'&&latest.files?.some(file=>file.path.startsWith('electron/'))){const serviceInstruction=runtimeNotice?.phase==='manual'&&runtimeRetry?runtimeNotice.message:'';runtimeNotice={phase:'manual',message:(serviceInstruction?serviceInstruction+' ':'')+desktopUpdateNotice()};if(!serviceInstruction)runtimeRetry=null;renderRuntime();toast(nativeSourceRuntime===false?'Desktop source changed. Rebuild the desktop app to load it.':'Desktop source changed. Relaunch from the updated source to load it.');}
   }catch(error){$('build-error').textContent=error.message;refreshJobsSafely();}
   finally{featureBusy=false;featureRenderKey='';renderJobs();renderRuntime();}
 }
@@ -915,8 +946,8 @@ function renderWork(){
   if(typeof job.prompt==='string'){const original=element('details','work-original');original.dataset.jobId=job.id;original.open=originalOpen;original.append(element('summary','','Original request'),element('p','',job.prompt));detail.append(original);}else if(workDetailPending.has(job.id))detail.append(element('p','form-hint','Loading the original request and saved result…'));
   if(job.progress?.events?.length){const events=element('details','work-events work-progress');events.dataset.jobId=job.id;events.open=progressOpen;events.append(element('summary','','Progress'));for(const event of job.progress.events.slice(-12).reverse())events.append(element('p','',(timeLabel(event.at)?timeLabel(event.at)+' · ':'')+(event.message||event.type||'')));detail.append(events);}
 }
-async function refreshWork({more=false,quiet=false}={}){
-  if(workListPending||destroyed||runtimeReconnectPromise)return workListPending;const offset=more?workNextOffset:0;if(more&&(!workHasMore||!Number.isSafeInteger(offset)))return;
+async function refreshWork({more=false,quiet=false,reconnecting=false}={}){
+  if(workListPending||destroyed||(runtimeReconnectPromise&&!reconnecting))return workListPending;const offset=more?workNextOffset:0;if(more&&(!workHasMore||!Number.isSafeInteger(offset)))return;
   workListPending=(async()=>{try{const value=await boundedApi('work?offset='+offset+'&limit=20');if(!Array.isArray(value.jobs)||!Number.isSafeInteger(value.total))throw new Error('Saved work could not be read.');for(const job of value.jobs)rememberWorkJob(job);workTotal=value.total;if(more||workNextOffset===null){workNextOffset=value.nextOffset;workHasMore=value.hasMore===true;}else{workHasMore=workJobs.length<workTotal;if(!workHasMore)workNextOffset=null;}if(!selectedWorkId&&workJobs.length){selectedWorkId=workJobs[0].id;workSelectionGeneration++;}workError='';if(selectedWorkId)await refreshWorkDetail(selectedWorkId,{quiet:true});}
     catch(error){workError=error.message;if(!quiet)throw error;}finally{workListPending=null;renderWork();}})();renderWork();return workListPending;
 }
@@ -992,7 +1023,7 @@ function cancelTurn(announce=true,{preserveVoice=false}={}){if(preserveVoice)voi
 $('cancel-turn').addEventListener('click',()=>{if(desktopToolBusy||desktopMutationBusy)stopAllActivity(true);else cancelTurn();});
 async function runCommand(value,options={}){
   const message=value.trim();if(!message)return;if(await localDesktopApproval(message,options))return;if(await localVoiceCommand(message,options))return;if(options.voice&&options.approvalContext){$('desktop-review-error').textContent='Say “approve desktop action” or “cancel desktop action” for this preview. These words have not approved any input.';return;}
-  if(turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||conversationLoading)return;$('question-error').textContent='';
+  if(turnBusy||runtimeReconnectPromise||runtimeRestartSubmitting||desktopToolBusy||desktopMutationBusy||conversationLoading)return;$('question-error').textContent='';
   const sourceContext=Object.hasOwn(options,'windowContext')?options.windowContext:captureWindowContext();if(!currentWindowContext(sourceContext)||!windowContextReady()){renderWindowContext();$('question-error').textContent='The selected window context changed or is unavailable. Clear it or select the window again before sending.';if(options.voice)voiceSession?.disable({remember:false});return;}
   const context=Object.hasOwn(options,'conversationContext')?options.conversationContext:captureConversationContext();if(!currentConversationContext(context)){$('question-error').textContent='The conversation changed. Review your words and send them in the intended conversation.';if(options.voice)voiceSession?.disable({remember:false});return;}
   if(conversationId&&conversationUncertain.has(conversationId)){$('question-error').textContent='Refresh this saved conversation before sending another request.';if(options.voice)voiceSession?.disable({remember:false});return;}
@@ -1099,7 +1130,7 @@ function setVoiceVisible(visible){
 }
 function maybeResume(){if(!voiceSession||document.hidden||nativeWindowVisible===false||destroyed||turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||!voiceOwnsCapture||(document.querySelector('dialog[open]')&&!voiceDialogOverride))return;void voiceSession.resume();}
 async function startRecording(){
-  if(!voiceSession||microphoneOpening||turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||document.hidden||nativeWindowVisible===false||destroyed)return;
+  if(!voiceSession||microphoneOpening||turnBusy||runtimeReconnectPromise||runtimeRestartSubmitting||desktopToolBusy||desktopMutationBusy||document.hidden||nativeWindowVisible===false||destroyed)return;
   $('question-error').textContent='';voiceDialogOverride=!!document.querySelector('dialog[open]');if(!windowContextReady()&&!captureDesktopApprovalContext()){renderWindowContext();$('question-error').textContent='Clear this unavailable window context or select the window again before recording.';return;}if(!service.transcriptionReady){$('question-error').textContent='Voice is not ready. Open Settings to check the speech service, or use Chat.';return;}
   if(voiceSessionState.enabled&&recording){voiceSession.finish();return;}
   if(voiceSessionState.enabled){const frozen=makeVoiceContext();await ownVoice(async()=>{voiceFirstContext=clone(frozen);await voiceSession.enable();});return;}
