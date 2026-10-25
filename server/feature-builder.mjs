@@ -18,6 +18,7 @@ const SOURCE_DIRS = new Set(['src', 'server', 'electron', 'scripts', 'tests', 'd
 const SOURCE_TYPES = new Set(['.mjs', '.cjs', '.js', '.css', '.html', '.json', '.md', '.ps1', '.cmd', '.txt']);
 const ROOT_DOCS = new Set(['README.md', 'DESIGN.md', 'CONTRIBUTING.md', 'ROADMAP.md', 'DISCUSSION_FLOW.md', 'QA.md', 'START_HERE.txt', 'AGENTS.md', 'Start Companion.cmd', 'Start Desktop Companion.cmd', 'Stop Companion.cmd', 'mcp.example.json', 'package.json']);
 const TRUSTED_TESTS = ['math.test.mjs', 'tutor.test.mjs', 'discussion.test.mjs', 'shared-discussion.test.mjs', 'assistant.test.mjs', 'provider.test.cjs', 'local-provider.test.cjs', 'training-data.test.mjs', 'productivity-store.test.mjs', 'task-queries.test.mjs', 'task-deadlines.test.mjs', 'task-deadline-view.test.mjs', 'workflow-queries.test.mjs','workflow-runs.test.mjs','workflow-history-ui.test.mjs', 'productivity-conversations-ui.test.mjs', 'voice-session.test.mjs','assistant-turn.test.mjs','completion-queue.test.mjs','work-output.test.mjs','work-service.test.mjs','codex-runner.test.mjs','model-router.test.mjs','window-context.test.mjs','source-read.test.mjs','project-files-store.test.mjs','project-files-service.test.mjs','project-files-ui.test.mjs','continuation-store.test.mjs','continuation-service.test.mjs','build-continuation-ui.test.mjs','build-attempts-ui.test.mjs','provider-checks-ui.test.mjs','workspace-backups.test.mjs','workspace-backups-ui.test.mjs'];
+const TRUSTED_SUPPORT = ['tests/support/assistant-ui-fixture.mjs'];
 const LIMITS = Object.freeze({ files: 24, fileBytes: 250000, patchBytes: 1000000, snapshotBytes: 4000000, sourceFiles: 300, jobs: 100, prompt: 12000, output: 64000, verificationMs: 30000 });
 // Full diffs include both bounded old/new source, JSON escaping and a line prefix.
 // Check output is bounded in JS characters; allow its worst JSON escaping too.
@@ -49,7 +50,7 @@ function validPath(value) {
 function protectedPath(file) {
   const lower = file.toLowerCase();
   return /^(?:server|electron|scripts|tests)\//.test(lower) || ['package.json', 'agents.md', 'start companion.cmd', 'start desktop companion.cmd', 'stop companion.cmd', 'mcp.example.json'].includes(lower)
-    || ['src/assistant.mjs','src/voice-session.mjs','src/project-files.mjs','src/build-continuation.mjs','src/build-attempts.mjs','src/provider-checks.mjs','src/workspace-backups.mjs','src/workflow-history.mjs'].includes(lower) || /^src\/core\/(?:productivity|feature|provider|credential|auth|security)/i.test(file)
+    || ['src/assistant.mjs','src/voice-session.mjs','src/project-files.mjs','src/build-continuation.mjs','src/build-attempts.mjs','src/provider-checks.mjs','src/workspace-backups.mjs','src/workflow-history.mjs','src/workflow-editor.mjs'].includes(lower) || /^src\/core\/(?:productivity|feature|provider|credential|auth|security)/i.test(file)
     || /(?:credential|auth|security|builder|model-router)/i.test(file);
 }
 function string(value, max, label) {
@@ -373,6 +374,11 @@ export async function createFeatureBuilder({ root, dataDirectory, complete, veri
     if (originals.length) {
       const trusted = path.join(candidate, 'trusted-regression-tests'); await mkdir(trusted, { recursive: true });
       for (const file of originals) await atomicWrite(path.join(trusted, path.basename(file.path)), file.content);
+      // Original tests import ./support/... beside this frozen copy. Never let
+      // candidate fixture edits replace the code evaluating the old assertions.
+      // Keep these exact support paths relative to tests/ so their ../../ source
+      // imports still exercise the candidate application, not its test doubles.
+      for (const file of base.files.filter(file => TRUSTED_SUPPORT.includes(file.path))) await atomicWrite(path.join(trusted, ...file.path.slice('tests/'.length).split('/')), file.content);
       const result = await nodeCheck(['--test', '--test-isolation=none', '--test-timeout=10000', ...originals.map(file => `trusted-regression-tests/${path.basename(file.path)}`)], { cwd: candidate, scratch, signal });
       checks.push({ name: 'Existing trusted regression tests', ...result }); if (!result.passed) return { passed: false, checks };
     }
