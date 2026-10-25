@@ -76,7 +76,7 @@ test('inspection preserves builder ownership/not-found errors and rejects malfor
   assert.equal(reads, 1);
   await assert.rejects(f.tools.execute('inspect_feature_build', { jobId: 'z'.repeat(36) }), { code: 'invalid_tool' });
   await assert.rejects(f.tools.execute('inspect_feature_build', { jobId: id, owner: 'another-workspace' }), { code: 'invalid_tool' }); assert.equal(reads, 1);
-  const definition = f.tools.catalog().find(tool => tool.name === 'inspect_feature_build'); assert.equal(definition.workflowAllowed, false); assert.equal(definition.effectPolicy, 'pure'); assert.equal(f.tools.definitions.length, 24);
+  const definition = f.tools.catalog().find(tool => tool.name === 'inspect_feature_build'); assert.equal(definition.workflowAllowed, false); assert.equal(definition.effectPolicy, 'pure'); assert.equal(f.tools.definitions.length, 25);assert.equal(f.tools.catalog().find(tool=>tool.name==='manage_work').workflowAllowed,false);
   const unavailable = createProductivityTools({ store: f.store }); await assert.rejects(unavailable.execute('inspect_feature_build', { jobId: id }), { code: 'builder_unavailable' });
 });
 

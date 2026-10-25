@@ -70,6 +70,54 @@ async function capabilityFixture(t, {workspace=false,code}={}) {
   return {capabilityRoot:root,capabilities:await loadCapabilities({root}),modulePath};
 }
 
+async function waitForWork(f,user,id,status){const until=Date.now()+4000;for(;;){const result=await f.request('GET','/api/assistant/work/'+id,undefined,user);assert.equal(result.status,200,JSON.stringify(result.value.error));if(result.value.job.status===status)return result.value.job;assert.ok(Date.now()<until,'Work remained '+result.value.job.status+' instead of '+status);await new Promise(resolve=>setTimeout(resolve,25));}}
+
+test('global Stop prevents late work acceptance while readiness is pending for direct and delegated handoffs',async t=>{
+  for(const delegated of [false,true]){
+    const f=await fixture(t,{complete:async()=>({text:'',toolCalls:[{id:'late_handoff',name:'manage_work',arguments:{action:'start',prompt:'Must not start after Stop'}}]})}),user=await f.session();let enter,release,calls=0;const entered=new Promise(resolve=>{enter=resolve;}),original=f.router.getStatus;f.router.getStatus=async()=>{calls++;if(delegated&&calls===1)return original();enter();return new Promise(resolve=>{release=async()=>resolve(await original());});};
+    const body=delegated?{id:'stop-before-handoff',message:'Hand off independent work.',providerId:'fake'}:{id:randomUUID(),prompt:'Must not start after Stop',providerId:'fake'},pending=f.request('POST',delegated?'/api/assistant/chat':'/api/assistant/work',body,user);await entered;assert.equal((await f.request('POST','/api/assistant/stop',{},user)).status,200);await release();const result=await pending;assert.equal(result.status,499);assert.equal(result.value.error.code,'request_cancelled');assert.equal((await f.request('GET','/api/assistant/work',undefined,user)).value.total,0);assert.equal(f.store.snapshot().notes.length,0);
+  }
+});
+
+test('independent work runs two jobs without locking foreground chat, and exact stop/retry preserves actual partial effects',async t=>{
+  const waiting=new Map(),seen=[];let bothStarted;const started=new Promise(resolve=>{bothStarted=resolve;});
+  const f=await fixture(t,{complete:async input=>{
+    const message=input.messages.find(item=>item.role==='user')?.content;if(!message.startsWith('BG '))return{text:'Foreground stays usable.',toolCalls:[]};seen.push(message);assert.equal(input.priority,'background');assert.ok(!input.tools.some(tool=>tool.name==='manage_work'));
+    if(input.messages.at(-1).role!=='tool')return{text:'',toolCalls:[{id:'actual_note',name:'save_note',arguments:{title:message,text:'Actual retained note for '+message}}]};
+    return new Promise((resolve,reject)=>{waiting.set(message,{resolve,reject});input.signal.addEventListener('abort',()=>reject(stopped()),{once:true});if(waiting.size===2)bothStarted();});
+  }}),user=await f.session(),a={id:randomUUID(),prompt:'BG A',providerId:'fake'},b={id:randomUUID(),prompt:'BG B',providerId:'fake'},c={id:randomUUID(),prompt:'BG C',providerId:'fake'};
+  assert.equal((await f.request('POST','/api/assistant/work',a)).status,401);assert.equal((await f.request('POST','/api/assistant/work',a,user,{Origin:'https://example.invalid'})).status,403);
+  assert.equal((await f.request('POST','/api/assistant/work',a,user)).status,202);assert.equal((await f.request('POST','/api/assistant/work',b,user)).status,202);await started;assert.equal(f.store.snapshot().notes.length,2);
+  const queued=await f.request('POST','/api/assistant/work',c,user);assert.equal(queued.status,202);assert.equal(queued.value.job.status,'queued');assert.equal(seen.includes('BG C'),false);assert.equal((await f.request('POST',`/api/assistant/work/${c.id}/cancel`,{},user)).value.job.status,'cancelled');
+  const foreground=await f.request('POST','/api/assistant/chat',{id:'during-background-work',message:'Are you available?',providerId:'fake'},user);assert.equal(foreground.status,200);assert.equal(foreground.value.text,'Foreground stays usable.');
+  const page=await f.request('GET','/api/assistant/work?offset=0&limit=1',undefined,user);assert.equal(page.value.total,3);assert.equal(page.value.jobs.length,1);assert.equal(page.value.hasMore,true);assert.equal((await f.request('GET','/api/assistant/work?limit=1&limit=2',undefined,user)).status,400);
+  const partial=(await f.request('GET','/api/assistant/work/'+a.id,undefined,user)).value.job;assert.equal(partial.outcome.actions[0].status,'completed');assert.equal(partial.outcome.actions[0].result.note.title,'BG A');
+  await f.request('POST',`/api/assistant/work/${a.id}/cancel`,{},user);const cancelled=await waitForWork(f,user,a.id,'cancelled');assert.equal(cancelled.outcome.actions[0].result.note.id,partial.outcome.actions[0].result.note.id);assert.equal((await f.request('GET','/api/assistant/work/'+b.id,undefined,user)).value.job.status,'running');
+  waiting.get('BG B').resolve({text:'BG B finished.',toolCalls:[]});assert.equal((await waitForWork(f,user,b.id,'completed')).outcome.text,'BG B finished.');
+  const count=f.calls.length,replay=await f.request('POST','/api/assistant/work',a,user);assert.equal(replay.status,202);assert.equal(replay.value.replayed,true);assert.equal(replay.value.job.status,'cancelled');assert.equal(f.calls.length,count);assert.equal((await f.request('POST','/api/assistant/work',{...a,prompt:'Different request'},user)).status,409);assert.equal(f.store.snapshot().notes.length,2);
+});
+
+test('a real delegation tool batch returns accepted jobs immediately, preserves parent selection, and cannot recursively delegate',async t=>{
+  let childrenEntered;const entered=new Promise(resolve=>{childrenEntered=resolve;});let activeChildren=0,parentCalls=0;
+  const f=await fixture(t,{complete:async input=>{
+    const message=input.messages.find(item=>item.role==='user')?.content;
+    if(message==='Hand off two independent jobs.'){
+      parentCalls++;return{text:'',toolCalls:[{id:'delegate_a',name:'manage_work',arguments:{action:'start',prompt:'Child task A',title:'A'}},{id:'delegate_b',name:'manage_work',arguments:{action:'start',prompt:'Child task B',title:'B'}}]};
+    }
+    activeChildren++;if(activeChildren===2)childrenEntered();assert.ok(!input.tools.some(tool=>tool.name==='manage_work'));return new Promise((resolve,reject)=>input.signal.addEventListener('abort',()=>reject(stopped()),{once:true}));
+  }}),user=await f.session(),conversationId=randomUUID();await f.request('POST','/api/assistant/conversations',{id:conversationId},user);
+  const body={id:'handoff-two',message:'Hand off two independent jobs.',providerId:'fake',conversationId,expectedRevision:0},reply=await f.request('POST','/api/assistant/chat',body,user);assert.equal(reply.status,200);await entered;assert.equal(parentCalls,1);assert.equal(reply.value.actions.length,2);assert.equal(reply.value.actions.every(action=>action.result.workJob?.id),true);assert.equal(f.store.listConversations().activeConversationId,conversationId);
+  const jobs=(await f.request('GET','/api/assistant/work',undefined,user)).value.jobs;assert.equal(jobs.length,2);assert.ok(jobs.every(job=>job.originConversationId===conversationId&&job.providerId==='fake'));const savedJobs=jobs.map(job=>job.id).sort();assert.equal((await f.request('POST','/api/assistant/chat',body,user)).status,200);assert.deepEqual((await f.request('GET','/api/assistant/work',undefined,user)).value.jobs.map(job=>job.id).sort(),savedJobs);
+  const stop=await f.request('POST','/api/assistant/stop',{},user);assert.equal(stop.status,200);for(const job of jobs)await waitForWork(f,user,job.id,'cancelled');assert.equal(f.store.getConversation(conversationId).turns[0].status,'completed');
+});
+
+test('a source-bound background job reads only the selected window and Clear cancels that job with its real receipt retained',async t=>{
+  let entered;const started=new Promise(resolve=>{entered=resolve;});const desktop=contextDesktop(),f=await fixture(t,{desktop,complete:async input=>{assert.equal(input.priority,'background');assert.match(input.messages[0].content,/Synthetic text 1/);entered();return new Promise((resolve,reject)=>input.signal.addEventListener('abort',()=>reject(stopped()),{once:true}));}}),user=await f.session(),other=await f.session();
+  const pin=(await f.request('POST','/api/assistant/context',{windowId:'synthetic-window'},user)).value.context,body={id:randomUUID(),prompt:'Explain the selected source in the background.',providerId:'fake',contextId:pin.id};assert.equal((await f.request('POST','/api/assistant/work',body,other)).status,409);assert.equal(desktop.reads.length,0);
+  assert.equal((await f.request('POST','/api/assistant/work',body,user)).status,202);await started;await f.request('POST',`/api/assistant/context/${pin.id}/clear`,{},user);const job=await waitForWork(f,user,body.id,'cancelled');assert.equal(job.outcome.actions[0].tool,'window_context');assert.equal(job.outcome.actions[0].status,'completed');assert.equal(job.outcome.windowContext.contextId,pin.id);assert.equal(desktop.reads.length,1);
+  const replay=await f.request('POST','/api/assistant/work',body,user);assert.equal(replay.status,202);assert.equal(replay.value.replayed,true);assert.equal(desktop.reads.length,1);
+});
+
 test('window context selection is metadata only, session scoped, protected by Origin/CSRF and explicitly cleared',async t=>{
   const desktop=contextDesktop(),f=await fixture(t,{desktop}),user=await f.session(),body={windowId:'synthetic-window'};
   assert.equal((await f.request('POST','/api/assistant/context',body)).status,401);

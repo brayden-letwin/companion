@@ -21,14 +21,15 @@ function finish(child, text = 'Synthetic answer.') { child.stdout.write(JSON.str
 async function directory(t) { const folder = await mkdtemp(path.join(tmpdir(), 'companion-codex-test-')); t.after(async () => { assert.ok(path.resolve(folder).startsWith(path.resolve(tmpdir()) + path.sep)); await rm(folder, { recursive: true, force: true }); }); return folder; }
 
 test('Codex completion uses stdin, a private empty job, strict read-only flags and the existing default model', async t => {
-  const dataDirectory = await directory(t); const events = [];
+  const dataDirectory = await directory(t); const events = [];let started=0;
   const spawnImpl = fakeSpawn(async (child, args, options) => {
     assert.equal(options.shell, false); assert.equal(options.windowsHide, true); assert.ok(options.cwd.startsWith(dataDirectory + path.sep)); assert.deepEqual(await readdir(options.cwd), []);
     for (const flag of ['--json', '--ephemeral', '--skip-git-repo-check']) assert.ok(args.includes(flag)); assert.equal(args[args.indexOf('--sandbox') + 1], 'read-only'); assert.ok(args.includes('mcp_servers={}')); assert.ok(!args.includes('--model')); assert.ok(!args.includes('--ignore-user-config'));
     assert.ok(!args.some(arg => arg.includes('synthetic user request'))); assert.match(child.input, /synthetic user request/);
+    assert.equal(started,1,'Ownership is announced before the prompt is sent.');
     child.stdout.write('{"type":"turn.started"}\n'); finish(child);
   });
-  assert.deepEqual(await runCodexCompletion({ prompt: 'A synthetic user request with `shell characters` and $variables.', dataDirectory, spawnImpl, onEvent: event => events.push(event) }), { text: 'Synthetic answer.', toolCalls: [] });
+  assert.deepEqual(await runCodexCompletion({ prompt: 'A synthetic user request with `shell characters` and $variables.', dataDirectory, spawnImpl, onEvent: event => events.push(event),onHelperStarted(...args){assert.deepEqual(args,[]);started++;throw new Error('Observer failure cannot change ownership.');} }), { text: 'Synthetic answer.', toolCalls: [] });
   assert.deepEqual(await readdir(dataDirectory), []); assert.ok(events.length > 1);
 });
 
@@ -70,4 +71,49 @@ test('Codex admits at most two completions and releases both slots after cancell
   const rejections=[assert.rejects(first,{name:'AbortError'}),assert.rejects(second,{name:'AbortError'})];
   firstController.abort(); secondController.abort(); await Promise.all(rejections);
   assert.equal((await runCodexCompletion({ prompt: 'Next.', dataDirectory, spawnImpl: fakeSpawn(child => finish(child)) })).text, 'Synthetic answer.');
+});
+
+test('bounded cancellation retains both real helper leases and private job files until actual close',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const dataDirectory=await directory(t),children=[],settlements=[],callbacks=[0,0];let notify,spawned=0;
+  const started=new Promise(resolve=>{notify=resolve;});
+  const settled=Array.from({length:2},(_,index)=>new Promise(resolve=>{settlements[index]=resolve;}));
+  const spawnImpl=fakeSpawn((child,_args,options)=>{
+    const index=Number(/Synthetic no-close helper (\d)/.exec(child.input)[1]);child.pid=10000+index;child.cwd=options.cwd;child.kill=()=>{child.killed=true;return true;};children[index]=child;if(++spawned===2)notify();
+  });
+  const controllers=[new AbortController(),new AbortController()];
+  const pending=controllers.map((controller,index)=>runCodexCompletion({prompt:'Synthetic no-close helper '+index,dataDirectory,spawnImpl,signal:controller.signal,
+    schema:{type:'object',properties:{text:{type:'string'}},required:['text'],additionalProperties:false},
+    onHelperSettled(...args){assert.deepEqual(args,[]);callbacks[index]++;settlements[index]();if(index===0)throw new Error('Observer failure cannot retain its lease.');},
+  }));
+  const rejected=pending.map(promise=>assert.rejects(promise,{name:'AbortError',code:'request_cancelled'}));
+  try{
+    await started;controllers.forEach(controller=>controller.abort());t.mock.timers.tick(1500);await Promise.all(rejected);
+    assert.deepEqual(callbacks,[0,0]);assert.equal((await readdir(dataDirectory)).length,2);
+    for(const child of children)assert.deepEqual(await readdir(child.cwd),['output-schema.json']);
+    let deniedStarted=0;await assert.rejects(runCodexCompletion({prompt:'Third cannot start while either cancelled process is unconfirmed.',dataDirectory,spawnImpl,onHelperStarted(){deniedStarted++;}}),{code:'provider_busy'});assert.equal(children.length,2);assert.equal(deniedStarted,0);
+    // Even a complete late answer cannot replace the cancellation. Only its
+    // actual close releases the old lease and permits another owned helper.
+    finish(children[0],'Late answer must not be published.');await settled[0];assert.deepEqual(callbacks,[1,0]);
+    assert.equal((await readdir(dataDirectory)).length,1);
+    assert.equal((await runCodexCompletion({prompt:'Next after confirmed close.',dataDirectory,spawnImpl:fakeSpawn(child=>finish(child))})).text,'Synthetic answer.');
+    assert.equal((await readdir(dataDirectory)).length,1);
+    children[1].exitCode=137;children[1].emit('close',137);await settled[1];assert.deepEqual(callbacks,[1,1]);assert.deepEqual(await readdir(dataDirectory),[]);
+    children[0].emit('close',0);assert.deepEqual(callbacks,[1,1]);
+  }finally{for(const child of children)if(child.exitCode===null){child.exitCode=137;child.emit('close',137);}await Promise.all(settled);}
+});
+
+test('a live helper error is not proof of process exit and cannot release its private cwd early',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});const dataDirectory=await directory(t);let child,started,notify,settledCount=0;
+  const entered=new Promise(resolve=>{started=resolve;}),closed=new Promise(resolve=>{notify=resolve;});
+  const pending=runCodexCompletion({prompt:'Synthetic live-error helper.',dataDirectory,spawnImpl:fakeSpawn((value,_args,options)=>{child=value;child.pid=12000;child.cwd=options.cwd;child.kill=()=>true;started();}),onHelperSettled(){settledCount++;notify();}});
+  const rejected=assert.rejects(pending,{code:'provider_unavailable'});
+  try{await entered;child.emit('error',new Error('Synthetic failed IPC while process remains alive.'));t.mock.timers.tick(1500);await rejected;assert.equal(settledCount,0);assert.deepEqual(await readdir(child.cwd),[]);child.exitCode=1;child.emit('close',1);await closed;assert.equal(settledCount,1);assert.deepEqual(await readdir(dataDirectory),[]);}
+  finally{if(child&&child.exitCode===null){child.exitCode=1;child.emit('close',1);}await closed;}
+});
+
+test('pre-spawn cancellation, invalid input and confirmed spawn failures notify settlement once without data',async t=>{
+  const dataDirectory=await directory(t),controller=new AbortController();controller.abort();
+  const variants=[{prompt:'',code:'validation_error'},{prompt:'Synthetic pre-abort.',signal:controller.signal,code:'request_cancelled'},{prompt:'Synthetic spawn throw.',spawnImpl:()=>{throw new Error('Synthetic private spawn diagnostic.');},code:'provider_unavailable'},{prompt:'Synthetic absent-pid spawn error.',spawnImpl:fakeSpawn(child=>child.emit('error',new Error('Synthetic failed spawn.'))),code:'provider_unavailable'}];
+  for(const {code,...options}of variants){let count=0,started=0;await assert.rejects(runCodexCompletion({dataDirectory,...options,onHelperStarted(){started++;},onHelperSettled(...args){assert.deepEqual(args,[]);count++;throw new Error('Synthetic observer failure.');}}),{code});assert.equal(count,1);assert.equal(started,options.spawnImpl&&options.prompt.includes('absent-pid')?1:0);assert.deepEqual(await readdir(dataDirectory),[]);}
 });

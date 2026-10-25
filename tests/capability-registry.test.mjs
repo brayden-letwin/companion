@@ -42,7 +42,7 @@ test('strict recursive schemas enforce nested types, enums, bounds and reject un
 
 test('catalog stays public and provider definitions stay bounded while the actual guarded executor serves direct and gateway calls',async t=>{
   const f=await fixture(t),capabilities=await loadCapabilities(f),store=await createProductivityStore({dataDirectory:path.join(f.root,'private')});f.track(()=>store.close());
-  const tools=createProductivityTools({store,root:f.root,capabilities});assert.equal(tools.definitions.length,24);assert.equal(tools.definitions.some(item=>item.name==='cap_word_count'),false);
+  const tools=createProductivityTools({store,root:f.root,capabilities});assert.equal(tools.definitions.length,25);assert.equal(tools.definitions.some(item=>item.name==='cap_word_count'),false);assert.equal(tools.definitions.some(item=>item.name==='manage_work'),true);
   const publicData=JSON.stringify(tools.catalog());assert.ok(!publicData.includes('modulePath'));assert.ok(!publicData.includes('"acceptance":'));assert.ok(!publicData.includes(f.root));
   const context={requestId:'count-original',callId:'one'};const first=await tools.execute('cap_word_count',{text:'one two three'},context);assert.equal(first.value.words,3);assert.deepEqual(first.hostActions,[]);
   const gateway=await tools.execute('run_capability',{name:'cap_word_count',arguments:{text:'one two three'}},context);assert.equal(gateway.value.words,3);assert.equal(gateway.replayed,true);

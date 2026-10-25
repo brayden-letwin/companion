@@ -33,13 +33,22 @@ async function fixture(t, handler = async () => response({ revision: 0, tasks: [
   return { server, input, messages, calls, request, notify, initialize, waitFor, outputText: () => outputText, errorText: () => errorText };
 }
 
+test('MCP work handoff and paged inspection retain stable identities without rerunning status checks',async t=>{
+  const sent=[],id=randomUUID(),providerId='synthetic-provider',f=await fixture(t,async(url,request)=>{sent.push({url,method:request.method,body:request.body?JSON.parse(request.body):undefined});return response(url.includes('/work?')?{jobs:[{id,status:'running'}],total:1,hasMore:false,nextOffset:null}:{job:{id,conversationId:id,status:url.endsWith('/cancel')?'cancelled':'running'}});});await f.initialize();
+  const body={id,prompt:'Draft a synthetic outline in the background.',providerId};assert.equal((await f.request('tools/call',tool('companion_start_work',body))).result.isError,false);assert.deepEqual(sent.at(-1),{url:ORIGIN+'/api/assistant/work',method:'POST',body});
+  await f.request('tools/call',tool('companion_list_work',{offset:20,limit:10}));assert.equal(sent.at(-1).url,ORIGIN+'/api/assistant/work?offset=20&limit=10');assert.equal(sent.at(-1).method,'GET');
+  await f.request('tools/call',tool('companion_get_work',{id,textOffset:4000,actionOffset:12}));assert.equal(sent.at(-1).url,ORIGIN+'/api/assistant/work/'+id+'?textOffset=4000&actionOffset=12');assert.equal(sent.at(-1).method,'GET');
+  await f.request('tools/call',tool('companion_cancel_work',{id}));assert.deepEqual(sent.at(-1),{url:ORIGIN+'/api/assistant/work/'+id+'/cancel',method:'POST',body:{}});assert.equal(sent.filter(item=>item.method==='POST'&&!item.url.endsWith('/cancel')).length,1);
+  const count=sent.length;for(const[name,args]of[['companion_start_work',{...body,contextId:randomUUID()}],['companion_get_work',{id:id+'?forged=1'}],['companion_get_work',{id,textLimit:4001}],['companion_list_work',{limit:21}],['companion_cancel_work',{id,scope:'forged'}]])assert.equal((await f.request('tools/call',tool(name,args))).error.code,-32602);assert.equal(sent.length,count);
+});
+
 test('MCP lifecycle negotiates tools, requires initialized, and keeps stdout protocol only', async t => {
   const f = await fixture(t); assert.equal((await f.request('ping')).result.constructor, Object);
   assert.equal((await f.request('tools/list')).error.code, -32002);
   const initialized = await f.request('initialize', { ...init, protocolVersion: '2024-11-05' }); assert.equal(initialized.result.protocolVersion, '2025-11-25'); assert.deepEqual(initialized.result.capabilities, { tools: { listChanged: false } });
   assert.equal(initialized.result.serverInfo.version, APP_VERSION);
   assert.equal((await f.request('tools/list')).error.code, -32002); f.notify('notifications/initialized');
-  const listed = await f.request('tools/list'); assert.equal(listed.result.tools.length, 18); assert.equal(listed.result.tools.find(item => item.name === 'companion_workspace').annotations.readOnlyHint, true); assert.equal(listed.result.tools.find(item => item.name === 'companion_apply_build').annotations.destructiveHint, true);
+  const listed = await f.request('tools/list'); assert.equal(listed.result.tools.length, 22); assert.equal(listed.result.tools.find(item => item.name === 'companion_workspace').annotations.readOnlyHint, true); assert.equal(listed.result.tools.find(item => item.name === 'companion_apply_build').annotations.destructiveHint, true);
   assert.equal(listed.result.tools.find(item => item.name === 'companion_run_tool').annotations.openWorldHint, true);
   assert.equal(listed.result.tools.some(item => /approve.*desktop|desktop.*approve/.test(item.name)), false);
   assert.equal(f.calls.length, 0); assert.equal(f.errorText(), ''); for (const line of f.outputText().trim().split('\n')) assert.equal(JSON.parse(line).jsonrpc, '2.0');

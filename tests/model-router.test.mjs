@@ -80,13 +80,31 @@ test('provider failures, incomplete output, unknown tools and malformed argument
   response = new Response('x'.repeat(2 * 1024 * 1024 + 1)); await assert.rejects(router.complete({ providerId: 'synthetic-openai', messages }), { code: 'provider_output_limit' });
 });
 
-test('router cancellation and combined concurrency admission cannot publish stale provider text', async t => {
+test('router queues combined concurrency and cancellation cannot publish stale provider text', async t => {
   const pending = []; const { router } = await fixture(t, { fetchImpl: async (_url, init) => new Promise((resolve, reject) => { pending.push({ resolve, reject }); init.signal.addEventListener('abort', () => reject(new Error('synthetic private transport detail'))); }) }); await router.configure(config('openai'));
   const firstController = new AbortController(), secondController = new AbortController();
   const first = router.complete({ providerId: 'synthetic-openai', messages, signal: firstController.signal }); const second = router.complete({ providerId: 'synthetic-openai', messages, signal: secondController.signal });
   while (pending.length < 2) await new Promise(resolve => setImmediate(resolve));
-  await assert.rejects(router.complete({ providerId: 'synthetic-openai', messages }), { code: 'provider_busy' }); firstController.abort(); secondController.abort(); await assert.rejects(first, { name: 'AbortError' }); await assert.rejects(second, { name: 'AbortError' });
+  const thirdController=new AbortController(),third=router.complete({providerId:'synthetic-openai',messages,signal:thirdController.signal});await new Promise(resolve=>setImmediate(resolve));assert.equal(pending.length,2);
+  const rejections=[assert.rejects(first,{name:'AbortError'}),assert.rejects(second,{name:'AbortError'}),assert.rejects(third,{name:'AbortError'})];thirdController.abort();firstController.abort();secondController.abort();await Promise.all(rejections);
   const next = router.complete({ providerId: 'synthetic-openai', messages }); while (pending.length < 3) await new Promise(resolve => setImmediate(resolve)); pending[2].resolve(ok({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fresh answer.' }] }] })); assert.equal((await next).text, 'Fresh answer.');
+});
+
+test('a queued job cannot silently switch to a changed provider model before its actual network call',async t=>{
+  const pending=[];const {router}=await fixture(t,{fetchImpl:async(_url,init)=>new Promise(resolve=>pending.push({resolve,body:JSON.parse(init.body)}))});await router.configure(config('openai'));const expectedProvider=(await router.listProviders()).find(item=>item.id==='synthetic-openai');
+  const first=router.complete({providerId:expectedProvider.id,messages}),second=router.complete({providerId:expectedProvider.id,messages});while(pending.length<2)await new Promise(resolve=>setImmediate(resolve));
+  const queued=router.complete({providerId:expectedProvider.id,messages,priority:'background',expectedProvider});const rejected=assert.rejects(queued,{code:'provider_changed',statusCode:409});await router.configure({...config('openai'),model:'another-synthetic-model'});
+  for(const entry of pending)entry.resolve(ok({status:'completed',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'An actual synthetic answer.'}]}]}));await Promise.all([first,second]);await rejected;assert.equal(pending.length,2);
+});
+
+test('router retains the model lease until a cancelled Codex helper actually closes',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});const children=[];
+  const spawnImpl=()=>{const child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();child.stdin=new Writable({write(_part,_encoding,callback){callback();}});child.exitCode=null;child.kill=()=>true;children.push(child);return child;};
+  const {router}=await fixture(t,{spawnImpl});const a=new AbortController(),b=new AbortController(),first=router.complete({providerId:'codex',messages,signal:a.signal}),second=router.complete({providerId:'codex',messages,signal:b.signal});
+  while(children.length<2)await new Promise(resolve=>setImmediate(resolve));const rejected=Promise.all([assert.rejects(first,{name:'AbortError'}),assert.rejects(second,{name:'AbortError'})]);a.abort();b.abort();t.mock.timers.tick(1501);await rejected;
+  let settled=false;const third=router.complete({providerId:'codex',messages}).then(value=>{settled=true;return value;},error=>{settled=true;throw error;});await new Promise(resolve=>setImmediate(resolve));assert.equal(settled,false);assert.equal(children.length,2);
+  children[0].exitCode=137;children[0].emit('close',137);while(children.length<3)await new Promise(resolve=>setImmediate(resolve));children[2].stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Fresh after confirmed exit.'}})+'\n');children[2].stdout.write('{"type":"turn.completed"}\n');children[2].exitCode=0;children[2].emit('close',0);assert.equal((await third).text,'Fresh after confirmed exit.');children[1].exitCode=137;children[1].emit('close',137);
+  await new Promise(resolve=>setImmediate(resolve));
 });
 
 test('structured generation has its own longer HTTP budget while normal chat and tools keep the shorter timeout', async t => {

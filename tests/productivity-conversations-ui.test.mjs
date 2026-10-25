@@ -44,11 +44,13 @@ function createLocks() {
   return { request: async (name, options, callback) => { if (held.has(name)) return callback(null); held.add(name); try { return await callback({ name }); } finally { held.delete(name); } } };
 }
 
-async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], workspaceWorkflows = [], workspaceTasks = [], storedWorkflowRuns = [], catalog = [], contextWindows = [] } = {}) {
+async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], workspaceWorkflows = [], workspaceTasks = [], storedWorkflowRuns = [], catalog = [], contextWindows = [], savedWork = [], storedWorkIds = [] } = {}) {
   const nodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(match => [match[1], new Element()]));
   nodes.get('provider-type').value = 'openai';
   const records = new Map(saved.map(item => [item.id, structuredClone(item)]));
+  const workRecords = new Map(savedWork.map(item => [item.id, structuredClone(item)]));
   const storage = new Map(selected ? [['companion.workspace.ui.v1.conversationId', JSON.stringify(selected)]] : []);
+  if (storedWorkIds.length) storage.set('companion.workspace.ui.v1.pendingWorkIds', JSON.stringify(storedWorkIds));
   if (storedWorkflowRuns.length) storage.set('companion.workspace.ui.v1.pendingWorkflowRuns', JSON.stringify(storedWorkflowRuns));
   const requests = [], intervals = [], timers = new Set();
   const workspace = { revision: 0, tasks: structuredClone(workspaceTasks), notes: [], workflows: structuredClone(workspaceWorkflows), preferences: structuredClone(workspacePreferences), focus: null, activity: [] };
@@ -79,6 +81,9 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
     if (route === 'providers') return response({ providers: [provider], activeProviderId: provider.id });
     if (route === 'status') return response({ transcriptionReady: true });
     if (route === 'workspace') return response(workspace);
+    if (route === 'work' && options.method === 'POST') { const body = JSON.parse(options.body); if (!workRecords.has(body.id)) { workRecords.set(body.id, { id: body.id, conversationId: body.id, requestId: 'work_' + body.id, title: body.prompt.slice(0, 70), prompt: body.prompt, providerId: body.providerId, provider: { id: body.providerId, label: 'GPT', type: 'codex', model: '' }, status: 'queued', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), progress: { message: 'Queued', events: [] } }); records.set(body.id, blank(body.id, body.prompt.slice(0, 70))); } return response({ job: workRecords.get(body.id) }); }
+    if (route.startsWith('work?')) { const params = new URLSearchParams(route.slice(5)), offset = Number(params.get('offset') || 0), limit = Number(params.get('limit') || 20), all = [...workRecords.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)); return response({ jobs: all.slice(offset, offset + limit).map(job => ({ ...job, prompt: undefined, promptPreview: job.prompt.slice(0, 100), outcome: undefined })), total: all.length, hasMore: offset + limit < all.length, nextOffset: offset + limit < all.length ? offset + limit : null }); }
+    if (route.startsWith('work/')) { const [pathname, query = ''] = route.split('?'), [, id, operation] = pathname.split('/'), job = workRecords.get(id); if (!job) return response({ error: { code: 'work_missing', message: 'Work missing' } }, 404); if (operation === 'cancel') { job.status = 'cancelled'; job.updatedAt = new Date().toISOString(); } const result = structuredClone(job); if (result.outcome) { const params = new URLSearchParams(query), textOffset = Number(params.get('textOffset') || 0), actionOffset = Number(params.get('actionOffset') || 0), text = result.outcome.text || '', actions = result.outcome.actions || []; result.outcome = { ...result.outcome, text: text.slice(textOffset, textOffset + 4000), textOffset, nextTextOffset: textOffset + 4000 < text.length ? textOffset + 4000 : null, textHasMore: textOffset + 4000 < text.length, totalTextCharacters: text.length, actions: actions.slice(actionOffset, actionOffset + 12), actionOffset, nextActionOffset: actionOffset + 12 < actions.length ? actionOffset + 12 : null, actionsHasMore: actionOffset + 12 < actions.length, totalActions: actions.length }; } return response({ job: result }); }
     if (route === 'features') return response({ jobs: [] });
     if (route === 'integrations') return response({ mcp: { command: 'C:/Node/node.exe', args: ['C:/Companion/server/mcp-server.mjs'] }, tools: catalog, capabilityStatus: { ready: true } });
     if (route === 'runtime') return response({ managed: true, restarting: false, workerPid: 100 });
@@ -104,10 +109,10 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
   }
   const window = { MediaRecorder: Recorder, AudioContext, addEventListener() {} };
   const context = vm.createContext({ createVoiceSession, window, document, navigator: { locks, permissions: { query: async () => ({ state: 'granted' }) }, mediaDevices: { getUserMedia: () => { permission = deferred(); return permission.promise; } } }, MediaRecorder: Recorder, fetch: fetchMock, Headers, AbortController, Blob, URL, URLSearchParams, DOMException, crypto: webcrypto, structuredClone, performance, console, localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) }, location: { search: '', reload() {}, assign() {} }, Event: class {}, setTimeout: (callback, milliseconds) => { const timer = setTimeout(callback, milliseconds); timer.unref(); timers.add(timer); return timer; }, clearTimeout, setInterval: callback => { intervals.push(callback); return intervals.length; }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} });
-  vm.runInContext(source + '\nglobalThis.ui={ready:()=>checkingService,selectConversation,refreshConversations,refreshConversation,loadEarlierConversation,runCommand,cancelTurn,startRecording,setVoiceVisible,renderSavedConversation,rememberDesktopAction,captureConversationContext,setChatOpen,showDialog,openDesktopReview,addMessage,processVoiceSegment,refreshToolCatalog,applyToolCatalog,applyExtensionManifest,openFeatureByName,openWorkflow,renderWorkflowSteps,validateWorkflowSteps,runWorkflow,renderActionReceipts,appendInstalledFeatureReady,refreshJobs,refreshWorkspace,selectWindowContext,clearWindowContext,captureWindowContext,renderWindowContext,applyRuntime,setExtensionLoader:loader=>loadExtensionModule=loader,get:()=>({id:conversationId,detail:conversationDetail,localChatTurn,turnBusy,recording,voiceCaptureContext,activeRequest,selectedWindowContext,windowContextGeneration,voiceState:voiceSessionState,chatOpen,currentView,ownsVoice:voiceOwnsCapture,initial:conversationInitialized,listPending:!!conversationListPending,detailPending:!!conversationDetailRequest,desktop:desktopActions,workflowDraft,toolCatalog,extensions:[...extensions.values()],workspace})};', context);
+  vm.runInContext(source + '\nglobalThis.ui={ready:()=>checkingService,selectConversation,refreshConversations,refreshConversation,loadEarlierConversation,runCommand,cancelTurn,startRecording,setVoiceVisible,renderSavedConversation,rememberDesktopAction,captureConversationContext,setChatOpen,showDialog,openDesktopReview,addMessage,processVoiceSegment,refreshToolCatalog,applyToolCatalog,applyExtensionManifest,openFeatureByName,openWorkflow,renderWorkflowSteps,validateWorkflowSteps,runWorkflow,renderActionReceipts,appendInstalledFeatureReady,refreshJobs,refreshWorkspace,selectWindowContext,clearWindowContext,captureWindowContext,renderWindowContext,applyRuntime,submitWork,refreshWork,refreshWorkDetail,selectWork,checkWorkHandoff,cancelWork,openWorkConversation,showView,loadWorkOutcome,applyProviders,setExtensionLoader:loader=>loadExtensionModule=loader,get:()=>({id:conversationId,detail:conversationDetail,localChatTurn,turnBusy,recording,voiceCaptureContext,activeRequest,selectedWindowContext,windowContextGeneration,voiceState:voiceSessionState,chatOpen,currentView,ownsVoice:voiceOwnsCapture,initial:conversationInitialized,listPending:!!conversationListPending,detailPending:!!conversationDetailRequest,desktop:desktopActions,workflowDraft,toolCatalog,extensions:[...extensions.values()],workspace,workJobs,selectedWorkId,workDetails:[...workDetails.values()],workSubmitting,pendingWorkIds:[...pendingWorkIds]})};', context);
   await context.ui.ready();
   if (waitForConversations) await until(() => !context.ui.get().listPending && !context.ui.get().detailPending, 'initial conversation load');
-  return { ui: context.ui, nodes, records, storage, requests, document, intervals, setIntercept: value => { custom = value; }, get waitingForMicrophone() { return !!permission; }, grantMicrophone: () => { const pending = permission; permission = null; pending.resolve({ getTracks: () => [{ stop: () => stoppedTracks++ }] }); }, get stoppedTracks() { return stoppedTracks; }, close: () => { context.ui.cancelTurn(false); for (const timer of timers) clearTimeout(timer); } };
+  return { ui: context.ui, nodes, records, workRecords, storage, requests, document, intervals, setIntercept: value => { custom = value; }, get waitingForMicrophone() { return !!permission; }, grantMicrophone: () => { const pending = permission; permission = null; pending.resolve({ getTracks: () => [{ stop: () => stoppedTracks++ }] }); }, get stoppedTracks() { return stoppedTracks; }, close: () => { context.ui.cancelTurn(false); for (const timer of timers) clearTimeout(timer); } };
 }
 
 test('explicit New survives a late initial history response and first send creates exactly one saved conversation', async () => {
@@ -748,5 +753,149 @@ test('saved answer provenance shows the actual fresh window title, read time and
     await app.ui.refreshConversation(); const selectedOnly = descendants(app.nodes.get('messages')).filter(node => node.className === 'window-context-source').at(-1);
     assert.match(selectedOnly.textContent, /^Selected source: Paper A selected only/); assert.match(selectedOnly.textContent, /No completed read recorded\./); assert.doesNotMatch(selectedOnly.textContent, /Read unknown time|Window source:|text was omitted/);
     assert.ok([...app.storage.values()].every(value => !value.includes(contextId) && !value.includes('Paper A')));
+  } finally { app.close(); }
+});
+
+
+const workFixture = (id, values = {}) => ({ id, conversationId: id, requestId: 'work_' + id, title: 'Background review', prompt: 'Review the saved tasks without starting another request.', providerId: 'codex', provider: { id: 'codex', label: 'GPT', type: 'codex', model: '' }, status: 'queued', createdAt: '2026-10-25T12:00:00Z', updatedAt: '2026-10-25T12:00:00Z', progress: { message: 'Queued for a worker', events: [] }, ...values });
+
+test('a handoff freezes its provider and source, stays independent of the live turn, and stores only its pending ID', async () => {
+  const app = await createUI({ contextWindows: [sourceWindowA] });
+  try {
+    await app.ui.selectWindowContext(sourceWindowA); const sourceId = app.ui.get().selectedWindowContext.id, accepted = deferred();
+    app.setIntercept((url, options) => url.endsWith('/work') && options.method === 'POST' ? accepted.promise : null);
+    app.nodes.get('work-prompt').value = 'Exact private handoff draft'; const handoff = app.ui.submitWork();
+    await until(() => app.requests.some(request => request.url.endsWith('/work')));
+    const request = app.requests.find(request => request.url.endsWith('/work')), body = JSON.parse(request.body);
+    assert.equal(body.prompt, 'Exact private handoff draft'); assert.equal(body.providerId, 'codex'); assert.equal(body.contextId, sourceId);
+    assert.equal(app.ui.get().turnBusy, false); assert.equal(app.ui.get().activeRequest, null);
+    assert.deepEqual(JSON.parse(app.storage.get('companion.workspace.ui.v1.pendingWorkIds')), [body.id]);
+    assert.ok([...app.storage.values()].every(value => !value.includes(body.prompt) && !value.includes(sourceId)));
+    app.ui.applyProviders({ providers: [{ id: 'other', label: 'Other AI', type: 'compatible', model: 'new-model', ready: true }], activeProviderId: 'other' });
+    await app.ui.clearWindowContext(); app.ui.cancelTurn(false); app.nodes.get('work-prompt').value = 'A newer unsent draft';
+    accepted.resolve(response({ job: workFixture(body.id, { prompt: body.prompt }) })); await handoff;
+    assert.equal(app.ui.get().workJobs[0].provider.id, 'codex'); assert.equal(app.nodes.get('work-prompt').value, 'A newer unsent draft'); assert.equal(app.ui.get().pendingWorkIds.length, 0);
+    assert.equal(app.requests.some(request => request.url.includes('/work/') && request.url.endsWith('/cancel')), false);
+  } finally { app.close(); }
+});
+
+test('an uncertain work submission offers GET-only Check handoff with its original ID and never repeats the POST', async () => {
+  const app = await createUI();
+  try {
+    let acceptedId;
+    app.setIntercept((url, options) => { if (!url.endsWith('/work') || options.method !== 'POST') return null; const body = JSON.parse(options.body); acceptedId = body.id; app.workRecords.set(body.id, workFixture(body.id, { prompt: body.prompt, status: 'running' })); throw new Error('Synthetic dropped response'); });
+    app.nodes.get('work-prompt').value = 'Keep this handoff exactly once'; await app.ui.submitWork();
+    assert.equal(app.requests.filter(request => request.url.endsWith('/work') && request.method === 'POST').length, 1);
+    assert.equal(app.nodes.get('work-submit').disabled, true); assert.match(app.nodes.get('work-handoffs').textContent, /Check handoff/);
+    await app.ui.submitWork(); assert.equal(app.requests.filter(request => request.url.endsWith('/work') && request.method === 'POST').length, 1);
+    app.setIntercept(null); const check = descendants(app.nodes.get('work-handoffs')).find(node => node.textContent === 'Check handoff'); await check.dispatch('click'); await until(() => app.ui.get().pendingWorkIds.length === 0);
+    assert.equal(app.ui.get().selectedWorkId, acceptedId); assert.equal(app.ui.get().workJobs[0].status, 'running'); assert.equal(app.ui.get().pendingWorkIds.length, 0);
+    assert.equal(app.requests.filter(request => request.url.endsWith('/work') && request.method === 'POST').length, 1);
+    assert.equal(app.nodes.get('work-prompt').value, 'Keep this handoff exactly once'); assert.match(app.nodes.get('work-detail').textContent, /Working/);
+  } finally { app.close(); }
+});
+
+test('a reload checks a pending handoff only on explicit request and a missing receipt permits a deliberate new handoff', async () => {
+  const app = await createUI({ storedWorkIds: [A] });
+  try {
+    assert.equal(app.requests.some(request => request.url.startsWith('/api/assistant/work/' + A)), false);
+    assert.equal(app.requests.some(request => request.url.endsWith('/work') && request.method === 'POST'), false);
+    assert.match(app.nodes.get('work-handoffs').textContent, /Check handoff/); await app.ui.checkWorkHandoff(A);
+    assert.match(app.nodes.get('work-error').textContent, /No saved handoff was found/); assert.equal(app.ui.get().pendingWorkIds.length, 0);
+    app.nodes.get('work-prompt').value = 'A deliberate new attempt'; await app.ui.submitWork();
+    const posts = app.requests.filter(request => request.url.endsWith('/work') && request.method === 'POST'); assert.equal(posts.length, 1); assert.notEqual(JSON.parse(posts[0].body).id, A);
+  } finally { app.close(); }
+});
+
+test('a real work receipt releases the foreground turn and a second question can continue while work is running', async () => {
+  const job = workFixture(B, { status: 'running' }), app = await createUI({ saved: [blank(A)], selected: A });
+  try {
+    let questions = 0; app.workRecords.set(B, job); app.records.set(B, blank(B, job.title));
+    app.setIntercept((url, options, { records }) => { if (!url.endsWith('/chat')) return null; const body = JSON.parse(options.body), record = records.get(body.conversationId), reply = { id: body.id, text: ++questions === 1 ? 'Handed off. You can keep talking.' : 'Here is the next reply.', providerId: body.providerId, actions: questions === 1 ? [{ id: 'delegate', tool: 'manage_work', arguments: { action: 'start' }, status: 'completed', result: { workJob: job, message: 'Handed off; not completed yet' } }] : [] }; record.turns.push({ id: body.id, message: body.message, status: 'completed', reply }); record.revision += 2; return response(reply); });
+    await app.ui.runCommand('Work on this in the background'); assert.equal(app.ui.get().turnBusy, false); assert.equal(app.ui.get().activeRequest, null);
+    assert.equal(app.ui.get().workJobs.find(item => item.id === B).status, 'running'); assert.match(app.nodes.get('messages').textContent, /Work handed off/); assert.match(app.nodes.get('messages').textContent, /Open work/);
+    await app.ui.runCommand('And answer another question'); assert.equal(questions, 2); assert.equal(app.ui.get().id, A); assert.match(app.nodes.get('messages').textContent, /next reply/);
+    app.ui.cancelTurn(false); assert.equal(app.requests.some(request => request.url.endsWith('/work/' + B + '/cancel')), false);
+    const open = descendants(app.nodes.get('messages')).find(node => node.textContent === 'Open work'); await open.dispatch('click'); await until(() => app.ui.get().selectedWorkId === B);
+    assert.equal(app.ui.get().currentView, 'work'); assert.equal(app.ui.get().chatOpen, false);
+  } finally { app.close(); }
+});
+
+test('work list and outcome pages remain explicit and preserve complete text and actual action receipts after refresh', async () => {
+  const tasks = Array.from({ length: 23 }, (_, index) => workFixture('10000000-0000-4000-8000-' + String(index).padStart(12, '0'), { createdAt: new Date(Date.UTC(2026, 9, 25, 12, index)).toISOString() }));
+  const text = 'First paragraph. ' + 'exact result '.repeat(800) + 'Final paragraph.';
+  tasks[22] = { ...tasks[22], status: 'failed', outcome: { status: 'failed', text, error: { code: 'partial_failure', message: 'Stopped after the saved actions below.' }, actions: Array.from({ length: 27 }, (_, index) => ({ id: 'receipt-' + index, tool: 'save_note', status: 'completed', result: { note: { title: 'Actual note ' + index } } })) } };
+  const app = await createUI({ savedWork: tasks });
+  try {
+    await app.ui.refreshWork(); assert.equal(app.ui.get().workJobs.length, 20); assert.match(app.nodes.get('work-count').textContent, /20 of 23/);
+    await app.nodes.get('work-more').dispatch('click'); await until(() => app.ui.get().workJobs.length === 23); assert.match(app.nodes.get('work-count').textContent, /23 of 23/); assert.equal(app.nodes.get('work-more').hidden, true);
+    const id = tasks[22].id; app.ui.selectWork(id); await app.ui.refreshWorkDetail(id);
+    assert.equal(app.ui.get().workDetails.find(item => item.id === id).outcome.text.length, 4000); assert.match(app.nodes.get('work-detail').textContent, /Stopped after the saved actions/);
+    while (app.ui.get().workDetails.find(item => item.id === id).outcome.textHasMore) await app.ui.loadWorkOutcome(id, 'text');
+    while (app.ui.get().workDetails.find(item => item.id === id).outcome.actionsHasMore) await app.ui.loadWorkOutcome(id, 'actions');
+    const outcome = app.ui.get().workDetails.find(item => item.id === id).outcome; assert.equal(outcome.text, text); assert.equal(outcome.actions.length, 27); assert.match(app.nodes.get('work-detail').textContent, /Actual note 26/);
+    await app.ui.refreshWorkDetail(id); assert.equal(app.ui.get().workDetails.find(item => item.id === id).outcome.text, text); assert.equal(app.ui.get().workDetails.find(item => item.id === id).outcome.actions.length, 27);
+    assert.equal(app.requests.filter(request => request.method === 'POST').length, 0);
+  } finally { app.close(); }
+});
+
+test('late work detail and ID-scoped stop never retarget the selected work or another conversation', async () => {
+  const app = await createUI({ saved: [blank(A), blank(B)], savedWork: [workFixture(A), workFixture(B)] });
+  try {
+    await app.ui.refreshWork(); const late = deferred(); app.setIntercept(url => url.includes('/work/' + A + '?') ? late.promise : null);
+    app.ui.selectWork(A); app.ui.selectWork(B); await app.ui.refreshWorkDetail(B);
+    late.resolve(response({ job: workFixture(A, { status: 'completed', outcome: { status: 'completed', text: 'Late A output', actions: [] } }) })); await until(() => app.ui.get().workDetails.some(item => item.id === A && item.status === 'completed'));
+    assert.equal(app.ui.get().selectedWorkId, B); assert.doesNotMatch(app.nodes.get('work-detail').textContent, /Late A output/);
+    app.setIntercept(null); await app.ui.cancelWork(A); assert.equal(app.ui.get().selectedWorkId, B); assert.equal(app.workRecords.get(A).status, 'cancelled'); assert.equal(app.workRecords.get(B).status, 'queued');
+    assert.equal(app.requests.filter(request => /work\/[^/]+\/cancel$/.test(request.url)).length, 1);
+    const capture = app.ui.startRecording(); await until(() => app.waitingForMicrophone); await app.ui.openWorkConversation(B); assert.notEqual(app.ui.get().id, B); app.ui.cancelTurn(false); if (app.waitingForMicrophone) app.grantMicrophone(); await capture;
+    await app.ui.openWorkConversation(B); assert.equal(app.ui.get().id, B); assert.equal(app.ui.get().chatOpen, true);
+  } finally { app.close(); }
+});
+
+test('Work stays behind Tools and only an actual human voice navigation command opens it', async () => {
+  const app = await createUI({ savedWork: [workFixture(A, { status: 'failed', progress: { message: 'Latest saved update', events: [{ at: '2026-10-25T12:00:00Z', type: 'running', message: 'Earlier actual progress' }] }, outcome: { status: 'failed', error: { code: 'provider_changed', message: 'The frozen provider configuration changed.' }, text: '', actions: [] } })] });
+  try {
+    await app.ui.refreshWork(); assert.equal(app.ui.get().currentView, 'today'); assert.equal(app.ui.get().chatOpen, false);
+    app.ui.addMessage('assistant', 'show work'); assert.equal(app.ui.get().currentView, 'today');
+    await app.ui.runCommand('Show work.', { voice: true, conversationContext: copy(app.ui.captureConversationContext()), approvalContext: null });
+    assert.equal(app.ui.get().currentView, 'work'); assert.match(app.nodes.get('work-detail').textContent, /frozen provider configuration changed/);
+    const progress = app.nodes.get('work-detail').querySelectorAll('.work-progress')[0]; assert.equal(progress.tagName, 'details'); assert.equal(progress.open, false); assert.equal(progress.children[0].textContent, 'Progress'); assert.match(app.nodes.get('work-detail').textContent, /Latest saved update/); assert.equal(app.nodes.get('work-detail').querySelectorAll('.work-original')[0].open, false); progress.open = true;
+    const job = app.workRecords.get(A); job.status = 'waiting_for_review'; job.updatedAt = '2026-10-25T14:00:00Z'; job.outcome = { status: 'waiting_for_review', text: 'Input is prepared, not executed.', actions: [{ id: 'prepared', tool: 'desktop_propose_action', status: 'completed', result: { desktopAction: { id: 'pending-review', status: 'pending', summary: 'Exact prepared input', expiresAt: new Date(Date.now() + 60000).toISOString() } } }] }; await app.ui.refreshWorkDetail(A);
+    assert.equal(app.nodes.get('work-detail').querySelectorAll('.work-progress')[0].open, true); assert.match(app.nodes.get('work-detail').querySelectorAll('.work-progress')[0].textContent, /Earlier actual progress/);
+    assert.equal(descendants(app.nodes.get('work-detail')).some(node => node.textContent === 'Stop this work'), false); assert.equal(descendants(app.nodes.get('work-detail')).some(node => node.textContent === 'Open conversation'), true); assert.equal(descendants(app.nodes.get('work-detail')).some(node => node.textContent === 'Review computer action'), true);
+    job.status = 'running'; job.cancelRequested = true; job.updatedAt = '2026-10-25T14:01:00Z'; await app.ui.refreshWorkDetail(A); const stopping = descendants(app.nodes.get('work-detail')).find(node => node.textContent === 'Stop this work'); assert.equal(stopping.disabled, true); assert.match(app.nodes.get('work-detail').textContent, /Stopping…/);
+    assert.equal(app.requests.some(request => request.method === 'POST'), false);
+    assert.match(html, /id="tools-menu"[^]*id="work-open"/); assert.doesNotMatch(html.split('id="tools-menu"')[0], /id="work-open"/);
+  } finally { app.close(); }
+});
+
+
+test('uncertain checks and conversation opening respect a newer work selection, and an unconfirmed stop reads without repeating effects', async () => {
+  const app = await createUI({ saved: [blank(A), blank(B)], selected: A, savedWork: [workFixture(A, { status: 'running' }), workFixture(B)], storedWorkIds: [A] });
+  try {
+    await app.ui.refreshWork(); const checking = deferred(); app.setIntercept(url => url.includes('/work/' + A + '?') ? checking.promise : null);
+    const check = app.ui.checkWorkHandoff(A); app.ui.selectWork(B); await app.ui.refreshWorkDetail(B);
+    checking.resolve(response({ job: workFixture(A, { status: 'running' }) })); await check;
+    assert.equal(app.ui.get().selectedWorkId, B); assert.equal(app.ui.get().pendingWorkIds.length, 0);
+    const listing = deferred(); app.setIntercept((url, options) => url.endsWith('/conversations') && !options.method ? listing.promise : null);
+    const opening = app.ui.openWorkConversation(B); app.ui.selectWork(A); listing.resolve(response({ conversations: [blank(A), blank(B)].map(item => ({ ...item, turnCount: 0 })) })); await opening;
+    assert.equal(app.ui.get().id, A); assert.equal(app.ui.get().chatOpen, false); assert.equal(app.ui.get().selectedWorkId, A);
+    await app.ui.refreshWorkDetail(A); const confirmation = deferred();
+    app.setIntercept((url, options) => { if (url.endsWith('/work/' + A + '/cancel') && options.method === 'POST') { app.workRecords.get(A).status = 'cancelled'; throw new Error('Synthetic stop response lost'); } if (url.includes('/work/' + A + '?')) return confirmation.promise; return null; });
+    await app.ui.cancelWork(A); assert.match(app.nodes.get('work-error').textContent, /stop was not confirmed/); assert.equal(app.ui.get().workJobs.find(item => item.id === A).status, 'running');
+    app.ui.selectWork(B); await app.ui.refreshWorkDetail(B); confirmation.resolve(response({ job: workFixture(A, { status: 'cancelled', updatedAt: '2026-10-25T15:00:00Z' }) })); await until(() => app.ui.get().workJobs.find(item => item.id === A).status === 'cancelled');
+    assert.equal(app.ui.get().selectedWorkId, B); assert.equal(app.requests.filter(request => request.url.endsWith('/work/' + A + '/cancel')).length, 1);
+  } finally { app.close(); }
+});
+
+test('a ready work result preserves its separately queued feature build and opens the actual build history', async () => {
+  const build = { id: '33333333-3333-4333-8333-333333333333', status: 'queued', prompt: 'Build the requested panel', createdAt: '2026-10-25T12:00:00Z', updatedAt: '2026-10-25T12:00:00Z', progress: { message: 'Queued' } };
+  const job = workFixture(A, { status: 'completed', outcome: { status: 'completed', text: 'The feature build is queued separately.', actions: [{ id: 'build-request', tool: 'build_feature', status: 'completed', result: { featureJob: build } }] } });
+  const app = await createUI({ savedWork: [job], intercept: url => url.endsWith('/features/' + build.id) ? response(build) : null });
+  try {
+    await app.ui.refreshWork(); assert.match(app.nodes.get('work-detail').textContent, /Result ready/); assert.match(app.nodes.get('work-detail').textContent, /Feature build · Queued \(saved status\)/); assert.doesNotMatch(app.nodes.get('work-detail').textContent, /Feature activated|ready to use/);
+    const open = descendants(app.nodes.get('work-detail')).find(node => node.textContent === 'View feature build ↗'); assert.ok(open); await open.dispatch('click'); assert.equal(app.ui.get().currentView, 'build');
+    assert.equal(app.requests.some(request => request.method === 'POST'), false);
   } finally { app.close(); }
 });
