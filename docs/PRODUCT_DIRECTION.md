@@ -10,6 +10,8 @@ Earlier math-reading and University of Washington theory-group requirements rema
 
 This document records scope and evidence. It does not grant a model unlimited PC access, create an institutional affiliation, or make a proposed capability an implemented one.
 
+The 0.23 maintenance checkpoint makes focused routine-editor changes practical within the existing source and correction budgets. It extracts the actual editor and shared test scaffold while preserving every original UI assertion and freezing original helper copies. Its new build/correction proof uses an injected provider; it supplements earlier real GPT evidence and does not complete the broader self-programming or computer-control goal. See [QA.md](../QA.md).
+
 ## Requirement history
 
 | Evidence from the design conversation | Requirement preserved |

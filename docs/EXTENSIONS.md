@@ -4,6 +4,12 @@ The feature builder edits JavaScript, HTML and CSS in an isolated copy of the so
 
 For functionality that voice/chat, workflows, panels, and MCP must all call, implement a real executable capability using [CAPABILITIES.md](CAPABILITIES.md). The panel is an optional interface to that same action. Registering `mount()` alone does not make its behavior callable by the assistant.
 
+## Focused maintenance of existing controls
+
+The routine editor lives in protected `src/workflow-editor.mjs`. Its `createWorkflowEditor` factory receives explicit DOM, workspace/catalog readers, refresh/save callbacks, pending-operation lookup, dialog/notification helpers and UUID creation. The host retains authenticated transport, actual runs, run history, Stop and voice routing. Read the complete editor module when changing its form behavior; a reference-only copy of the large main interface is unnecessary.
+
+`tests/support/assistant-ui-fixture.mjs` exports `createUI` and existing synthetic DOM/service helpers. A new `src/features/<id>.test.mjs` can import `../../tests/support/assistant-ui-fixture.mjs` to exercise the actual interface with fake services and microphone media. Keep meaningful assertions in that test. The original 131 interface tests remain intact; their trusted copies import the original frozen helper beside them, so a candidate cannot change its helper to falsify those checks. This fixture does not make a new file under `tests/` automatically eligible as a generated-feature check.
+
 ## Runtime panel contract
 
 The frontend host loads `src/features/manifest.json`:
