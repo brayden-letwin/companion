@@ -21,7 +21,7 @@ This is a protocol process, so it does not display an interactive prompt. Its st
 | Tool | Purpose |
 | --- | --- |
 | `companion_workspace` | Read tasks, notes, workflows, focus state, and activity. |
-| `companion_run_tool` | Run a registered workspace tool with `tool`, `arguments`, and optional retry `operationId`. |
+| `companion_run_tool` | Run a registered workspace or desktop tool with `tool`, `arguments`, and optional retry `operationId`. Desktop input produces an exact pending review; this wrapper cannot approve it. |
 | `companion_chat` | Send `{id, message, providerId?}` to Companion's selected assistant. |
 | `companion_build_feature` | Queue `{prompt, providerId?, autoApply?}` as a real coding job. |
 | `companion_list_builds` / `companion_get_build` | Read actual build status, diffs, and checks. The latter takes `{id}`. |
@@ -30,8 +30,12 @@ This is a protocol process, so it does not display an interactive prompt. Its st
 | `companion_source` | Read permitted source paths and hashes; `{includeContent:true}` also returns source text. |
 | `companion_submit_patch` | Queue a concrete patch with source hashes. |
 | `companion_connections` | Read redacted provider metadata; it cannot configure or retrieve keys. |
+| `companion_desktop_status` | Read Windows desktop-adapter availability without inspecting a window. |
+| `companion_desktop_actions` | Read pending desktop previews and actual results after the user acts in Companion. |
 
 The connected client can access the notes and source these tools return. Saved text remains untrusted evidence, and tool annotations are hints rather than permission or proof that an action succeeded. Clients should use the actual returned receipts and their own review controls. Tool results contain both JSON text and `structuredContent`; execution failures set `isError:true`, while malformed tool arguments use JSON-RPC errors. This follows the MCP [tools specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools).
+
+The desktop tools discover installed apps and eligible windows. Use the returned IDs, scope window searches to the task, and read only the specific window needed for the user's request. Launch and URL receipts confirm that Windows accepted a request; they do not establish that a document loaded or that work inside an app finished. Generic clicking, text replacement and key presses require a fresh target snapshot and the user's review in Companion. A pending action is not an executed action. There is no desktop-approval MCP tool or arbitrary shell tool.
 
 ## Submit and review source changes
 
