@@ -2,6 +2,7 @@ import { createVoiceSession } from './voice-session.mjs';
 import { createProjectFilesUI } from './project-files.mjs';
 import {createBuildContinuationUI} from './build-continuation.mjs';
 import { createBuildAttemptsUI } from './build-attempts.mjs';
+import { createProviderChecksUI, providerAvailabilityText, providerCheckSummary } from './provider-checks.mjs';
 const $ = id => document.getElementById(id);
 const shellCandidate = window.companionShell;
 const nativeShell = shellCandidate?.desktop===true&&['corner','workspace'].includes(shellCandidate.mode)
@@ -27,6 +28,7 @@ let selectedWindowContext=null,windowContextGeneration=0,windowContextRenderKey=
 let projectFilesUI=null,selectedProject=null,projectSelectionGeneration=0,projectAccessPending=null,projectRestored=false;
 let buildContinuationUI=null,continuationBuildId=null,continuationSelectionGeneration=0;
 let buildAttemptsUI=null;
+let providerChecksUI=null,connectionChecksAvailable=false,providerCheckSelectionGeneration=0,providerCheckRouteKey='';
 let voiceDialogOverride=false;
 let voiceSession=null,voiceSessionState={enabled:false,optedIn:false,visible:true,status:'off'},voiceCaptureContext=null,voiceFirstContext=null,activeVoiceSegment=null,voiceOwnershipRequest=null,voiceOwnsCapture=false;
 let chatOpen=false,memoryBusy=false;
@@ -205,7 +207,7 @@ $('voice-home').addEventListener('click',()=>setChatOpen(false));
 function showView(view) {
   if(!['today','tasks','notes','workflows','build','settings','desktop','work','files'].includes(view)&&!extensions.has(view))return;
   currentView=view;document.body.classList.toggle('tools-open',view!=='today');$('voice-home').setAttribute('aria-pressed',String(view==='today'&&!chatOpen));
-  syncBuildContinuation();
+  syncBuildContinuation();syncProviderCheckSelection();
   document.querySelectorAll('.view-panel').forEach(panel=>panel.hidden=panel.id!==view+'-view');
   document.querySelectorAll('[data-view]').forEach(item=>{item.classList.toggle('active',item.dataset.view===view);item.setAttribute('aria-current',item.dataset.view===view?'page':'false');});
   $('view-title').textContent=extensions.get(view)?.title||({today:'Chat',tasks:'Tasks',notes:'Notes',workflows:'Workflows',build:'Build a feature',settings:'Settings',desktop:'Computer',work:'Work',files:'Files'})[view];
@@ -284,8 +286,14 @@ async function continueBuildOriginal(context){
   await buildContinuationUI.refresh();if(!currentBuildContinuationContext(context))throw new Error('The selected build changed. Repeat the command for the intended original request.');
   const result=await buildContinuationUI.continueOriginal(context.buildId);if(!result)throw new Error('The continuation response is unconfirmed. Use Check continuation before sending it again.');return result;
 }
+function syncProviderCheckSelection(){const provider=activeProvider(),key=JSON.stringify([currentView==='settings',provider?.id,provider?.revision]);if(key!==providerCheckRouteKey){providerCheckRouteKey=key;providerCheckSelectionGeneration++;}}
+function captureProviderCheckContext(){syncProviderCheckSelection();const provider=activeProvider();return {providerId:currentView==='settings'?provider?.id||null:null,revision:currentView==='settings'?provider?.revision||null:null,generation:providerCheckSelectionGeneration};}
+function currentProviderCheckContext(context){syncProviderCheckSelection();const provider=activeProvider();return !!context&&currentView==='settings'&&context.providerId===provider?.id&&context.revision===provider?.revision&&context.generation===providerCheckSelectionGeneration;}
+async function testSelectedProvider(context){if(!context?.providerId||!currentProviderCheckContext(context))throw new Error('Open Settings with the intended AI selected, then say “test connection”.');const result=await providerChecksUI.startCheck(context.providerId,context.revision);if(!result)throw new Error('The connection test response was not confirmed. Use Check test before trying again.');return result;}
+function initProviderChecksUI(){providerChecksUI=createProviderChecksUI({api:continuationApi,onCheck:applyProviderCheck});}
+function applyProviderCheck(check){providers=providers.map(provider=>provider.id===check.providerId&&!(provider.connectionCheck&&Date.parse(provider.connectionCheck.createdAt)>Date.parse(check.createdAt))?{...provider,connectionCheck:check,verified:provider.ready===true&&provider.revision===check.revision&&check.configurationMatches&&check.observedThisSession&&check.status==='passed'}:provider);renderProviders();renderService();}
 function activeProvider(){return providers.find(provider=>provider.id===activeProviderId);}
-function applyProviders(value){if(!Array.isArray(value?.providers))throw new Error('AI connections could not be read.');providers=value.providers;activeProviderId=value.activeProviderId||value.defaultProviderId||'';renderProviders();renderService();}
+function applyProviders(value){if(!Array.isArray(value?.providers))throw new Error('AI connections could not be read.');providers=value.providers;connectionChecksAvailable=value.connectionChecksAvailable===true;activeProviderId=value.activeProviderId||value.defaultProviderId||'';syncProviderCheckSelection();renderProviders();renderService();}
 async function checkService({reconnecting=false,force=false,deadline=Infinity}={}){
   if(destroyed||(runtimeReconnectPromise&&!reconnecting))return;
   if(force){serviceCheckGeneration+=1;checkingService=null;}
@@ -314,12 +322,12 @@ async function checkService({reconnecting=false,force=false,deadline=Infinity}={
 function renderService(){
   const provider=activeProvider();const ready=provider?.ready===true;
   $('connection-dot').className='status-dot '+(ready?'ready':'offline');
-  $('connection-label').textContent=provider?(ready?provider.label+' is ready':provider.label+' needs attention'):'No AI connected';
+  $('connection-label').textContent=provider?provider.label+' selected · '+providerAvailabilityText(provider)+' · '+providerCheckSummary(provider,{compact:true}):'No AI connected';
   const supported=!!(navigator.mediaDevices?.getUserMedia&&window.MediaRecorder);
   $('hands-free').disabled=!!runtimeReconnectPromise||!service.transcriptionReady||!supported;
   if($('hands-free').disabled&&$('hands-free').checked)disableHandsFree();
   $('transcription-status').textContent=service.transcriptionReady?'Local transcription is ready. Tap the microphone to start.':service.transcriptionUnavailableReason||'Local transcription is not ready yet. You can type messages and use the workspace.';
-  const details=$('service-status');details.replaceChildren();details.append(element('strong','',ready?'Your AI is ready':'Choose an AI connection'));
+  const details=$('service-status');details.replaceChildren();details.append(element('strong','',provider?'Selected AI connection':'Choose an AI connection'));
   details.append(element('p','',ready?`${provider.label}${provider.model?' · '+provider.model:''}`:serviceError||provider?.unavailableReason||'Open Settings to use your existing Codex sign-in, or connect GPT, Claude, a compatible API, or a local model.'));
   details.append(element('strong','',service.transcriptionReady?'Voice input is ready':'Voice input is not ready'),element('p','',$('transcription-status').textContent));
   details.append(element('small','','Your chosen provider handles your messages. API connections may incur provider charges. Tasks, notes, workflows, and build history are saved on this PC.'));
@@ -854,18 +862,19 @@ function renderProviders(){
   if(!providers.length){const option=element('option','','No AI connected');option.value='';picker.append(option);}
   for(const provider of providers){const option=element('option','',`${provider.label}${provider.model?' · '+provider.model:''}${provider.ready?'':' · not ready'}`);option.value=provider.id;picker.append(option);}
   picker.value=activeProviderId;picker.disabled=providerBusy||!providers.length;
-  const list=$('provider-list');list.replaceChildren();
+  const list=$('provider-list');list.replaceChildren();providerChecksUI?.setProviders(providers,connectionChecksAvailable);if(providerChecksUI)providers=providers.map(provider=>providerChecksUI.providerView(provider));
   if(!providers.length)list.append(emptyState('Bring your preferred AI.','Connect a provider below, or check that Companion’s service is running.'));
   for(const provider of providers){const card=element('article','provider-card'),info=element('div','provider-info'),actions=element('div','provider-actions');const mark={codex:'C',openai:'G',anthropic:'A',compatible:'↗',ollama:'○'}[provider.type]||'◇';
-    info.append(element('h2','',provider.label));let status=provider.ready?(provider.verified===false&&provider.type!=='codex'?'Configured · not yet tested':'Ready to use'):'Needs attention';
+    info.append(element('h2','',provider.label));const status=providerAvailabilityText(provider);
     info.append(element('p','',status+(provider.hasKey?' · Key saved':'')),element('p','provider-model',provider.model|| (provider.type==='codex'?'Uses your existing Codex model setting':'Provider default model')));
     if(provider.type==='codex')info.append(element('p','','Uses your existing Codex sign-in on this computer.'));
     if(!provider.ready&&provider.unavailableReason)info.append(element('p','provider-reason',provider.unavailableReason));
     if(provider.secretStorage==='memory'&&provider.hasKey)info.append(element('p','provider-reason','This key is held in memory. Reconnect after restarting Companion.'));
     if(provider.id===activeProviderId)actions.append(element('span','active-provider-tag','Selected'));else{const use=button('Use this AI','secondary-button',()=>void selectProvider(provider.id));use.disabled=providerBusy;actions.append(use);}
     if(provider.type!=='codex'){actions.append(button('Edit connection','quiet-button',()=>editProvider(provider)));const remove=button('Remove','quiet-button danger-button',()=>void removeProvider(provider));remove.disabled=providerBusy;actions.append(remove);}
-    card.append(element('span','provider-mark',mark),info,actions);list.append(card);
+    providerChecksUI?.renderCard(info,actions,provider);card.append(element('span','provider-mark',mark),info,actions);list.append(card);
   }
+  if(connectionChecksAvailable)list.append(element('p','provider-check-note','Sends a small test message. No chats or files are included.'));providerChecksUI?.renderPending(list);
 }
 async function selectProvider(id){if(providerBusy||runtimeReconnectPromise||id===activeProviderId)return;providerBusy=true;cancelTurn(false);renderProviders();try{applyProviders(await boundedApi('providers/select',{method:'POST',body:JSON.stringify({id})}));toast('Selected '+(activeProvider()?.label||'your AI')+'.');}catch(error){toast(error.message);}finally{providerBusy=false;renderProviders();renderService();}}
 $('provider-select').addEventListener('change',event=>void selectProvider(event.target.value));
@@ -1190,7 +1199,7 @@ async function ownVoice(action){
   }).catch(error=>{if(voiceOwnershipRequest===entry){releaseVoiceOwnership();$('question-error').textContent=error.message;}});
   return entry.ready;
 }
-function makeVoiceContext(){conversationInitialized=true;return {providerId:activeProviderId,conversationContext:clone(captureConversationContext()),windowContext:clone(captureWindowContext()),projectContext:clone(captureProjectContext()),buildContinuationContext:clone(captureBuildContinuationContext()),approvalContext:clone(captureDesktopApprovalContext())};}
+function makeVoiceContext(){conversationInitialized=true;return {providerId:activeProviderId,conversationContext:clone(captureConversationContext()),windowContext:clone(captureWindowContext()),projectContext:clone(captureProjectContext()),buildContinuationContext:clone(captureBuildContinuationContext()),providerCheckContext:clone(captureProviderCheckContext()),approvalContext:clone(captureDesktopApprovalContext())};}
 function initVoiceSession(){
   voiceSession=createVoiceSession({mediaDevices:navigator.mediaDevices,permissions:navigator.permissions,MediaRecorder:window.MediaRecorder,AudioContext:window.AudioContext||window.webkitAudioContext,now:()=>performance.now(),requestFrame:requestAnimationFrame,cancelFrame:cancelAnimationFrame,setTimer:setTimeout,clearTimer:clearTimeout,readOptIn:()=>readStored('voiceEnabled',false)===true,writeOptIn:value=>store('voiceEnabled',value),
     captureContext:()=>{const context=voiceFirstContext||makeVoiceContext();voiceFirstContext=null;voiceCaptureContext=clone(context);return context;},
@@ -1227,12 +1236,13 @@ async function processVoiceSegment({blob,context,signal}){
   const entry={};activeVoiceSegment=entry;const turn=++generation;voicePipeline=true;setBusy(true);setState('transcribing','Microphone off while Companion works.');
   const abort=()=>{if(activeVoiceSegment===entry)cancelTurn(false,{preserveVoice:true});};signal.addEventListener('abort',abort,{once:true});
   try{const result=await requestWithTurn('transcribe',blob,{raw:true,headers:{'Content-Type':blob.type}},turn);if(signal.aborted||turn!==generation||destroyed)return;if(typeof result.text!=='string'||!result.text.trim())throw new Error('No words were detected. Please try again.');
-    $('question').value=result.text.slice(0,4000);setBusy(false);await runCommand($('question').value,{voice:true,providerId:context?.providerId,conversationContext:context?.conversationContext,windowContext:context?.windowContext,projectContext:context?.projectContext,buildContinuationContext:context?.buildContinuationContext,approvalContext:context?.approvalContext});
+    $('question').value=result.text.slice(0,4000);setBusy(false);await runCommand($('question').value,{voice:true,providerId:context?.providerId,conversationContext:context?.conversationContext,windowContext:context?.windowContext,projectContext:context?.projectContext,buildContinuationContext:context?.buildContinuationContext,providerCheckContext:context?.providerCheckContext,approvalContext:context?.approvalContext});
   }catch(error){if(!signal.aborted&&activeVoiceSegment===entry){$('question-error').textContent=error.message;voiceSession.disable({remember:false});}}
   finally{signal.removeEventListener('abort',abort);if(activeVoiceSegment===entry){activeVoiceSegment=null;voicePipeline=false;setBusy(false);if(!recording&&!microphoneOpening)setState('idle');maybeResume();}}
 }
 async function localVoiceCommand(message,options={}){
   if(!options.voice)return false;const phrase=message.trim().toLowerCase().replace(/[.!?]+$/,'');
+  if(phrase==='test connection'){try{await testSelectedProvider(options.providerCheckContext);}catch(error){$('question-error').textContent=error.message;voiceSession?.disable({remember:false});}if($('question').value.trim()===message.trim())$('question').value='';return true;}
   if(phrase==='continue original request'){try{await continueBuildOriginal(options.buildContinuationContext);}catch(error){$('question-error').textContent=error.message;voiceSession?.disable({remember:false});}if($('question').value.trim()===message.trim())$('question').value='';return true;}
   if(['stop listening','microphone off','mic off','turn voice off','disable voice'].includes(phrase)){voiceSession?.disable();stopSpeech();$('question').value='';return true;}
   if(['stop','cancel','stop current work','cancel current work','stop everything'].includes(phrase)){void stopAllActivity(true,{global:true});$('question').value='';return true;}
@@ -1260,9 +1270,9 @@ $('hands-free').addEventListener('change',()=>{if($('hands-free').checked)void s
 $('settings-read-aloud').addEventListener('change',()=>{$('read-aloud').checked=$('settings-read-aloud').checked;$('read-aloud').dispatchEvent(new Event('change'));});
 $('read-aloud').addEventListener('change',()=>{$('settings-read-aloud').checked=$('read-aloud').checked;});
 document.addEventListener('visibilitychange',()=>{if(document.hidden){setVoiceVisible(false);if(voicePipeline||recording||microphoneOpening)cancelTurn(false,{preserveVoice:true});else{disableHandsFree();stopSpeech();}$('provider-key').value='';}else{void setVoiceVisible(true);void checkService();void refreshConversations({initialize:true,quiet:true});}});
-window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;projectFilesUI?.close();buildContinuationUI?.close();buildAttemptsUI?.close();for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
+window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;projectFilesUI?.close();buildContinuationUI?.close();buildAttemptsUI?.close();providerChecksUI?.close();for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
 window.addEventListener('pageshow',event=>{if(!event.persisted)return;destroyed=false;setBusy(false);setState('idle');updateVoiceHelp();void setVoiceVisible(true);void checkService();void loadExtensions();});
-initProjectFiles();initBuildContinuationUI();initBuildAttemptsUI();initNativeShell();initVoiceSession();renderWindowContext();renderProjectContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
+initProjectFiles();initBuildContinuationUI();initBuildAttemptsUI();initProviderChecksUI();initNativeShell();initVoiceSession();renderWindowContext();renderProjectContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
 void checkService();void loadExtensions();
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;renderFocus();if(currentView==='build')void buildContinuationUI?.refresh();if(jobs.some(job=>ACTIVE_JOBS.has(job.status))||currentView==='build')void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});},2000);
 setInterval(()=>{if(!document.hidden&&!destroyed&&!operationBusy&&!runtimeReconnectPromise)void refreshWorkspace().catch(error=>{$('connection-label').textContent=error.message;});},5000);
@@ -1278,3 +1288,5 @@ setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;v
 setInterval(()=>{if(destroyed||!selectedWindowContext)return;if(checkWindowContextExpiry()){cancelTurn(false);renderWindowContext();}},1000);
 
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;if(currentView==='work'||workJobs.some(job=>WORK_ACTIVE.has(job.status)))void refreshWork({quiet:true});},2500);
+
+setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;void providerChecksUI?.refreshActive();},2000);
