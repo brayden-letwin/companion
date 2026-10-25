@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import { BUILTIN_TOOL_DEFINITIONS, builtinCatalog, validateToolArguments, capabilityHash, validateWorkflowSteps } from './capability-registry.mjs';
+import { listTasks, readTask, summarizeTasks } from './task-queries.mjs';
 const defaultExecuteCapability=async options=>(await import('./capability-runtime.mjs')).executeCapability(options);
 export const TOOL_DEFINITIONS = BUILTIN_TOOL_DEFINITIONS;
 const fail = (message, code = 'invalid_tool') => Object.assign(new Error(message), { code, statusCode: 400 });
@@ -155,7 +156,9 @@ export function createProductivityTools({ store, builder, desktop, root, capabil
     switch (name) {
       case 'list_capabilities': return {capabilities:catalog().filter(item=>item.kind==='capability'),ready:capabilityStatus.ready!==false,...(capabilityStatus.ready===false?{unavailableReason:capabilityStatus.unavailableReason||capabilityStatus.message||'The capability registry could not be loaded.'}:{})};
       case 'run_capability': return runCapability(args.name,args.arguments,context);
-      case 'list_tasks': return { tasks: state.tasks.filter(task => (!args.status || task.status === args.status) && (!args.project || task.project.toLowerCase() === args.project.toLowerCase())).slice(-100), revision: state.revision };
+      case 'list_tasks': return listTasks(state,args);
+      case 'read_task': return readTask(state,args);
+      case 'summarize_tasks': return summarizeTasks(state,args,now());
       case 'create_task': { const result = mutate('addTask', args); return { task: result.workspace.tasks.find(item => item.id === result.entityId), replayed: result.replayed }; }
       case 'update_task': case 'complete_task': { const result = mutate(name === 'update_task' ? 'updateTask' : 'completeTask', args); return { task: result.workspace.tasks.find(task => task.id === args.taskId), replayed: result.replayed }; }
       case 'list_notes': case 'search_notes': {

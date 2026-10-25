@@ -7,6 +7,8 @@ const unsafe = key => ['__proto__', 'prototype', 'constructor'].includes(key);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const str = (description, extra = {}) => ({ type: 'string', description, ...extra });
 const obj = (properties, required = []) => ({ type: 'object', properties, required, additionalProperties: false });
+const taskFilters = () => ({status:str('Task status; omit for all tasks',{enum:['todo','done']}),priority:str('Exact task priority; omit for both',{enum:['normal','high']}),dueBefore:str('ISO timestamp: include only tasks with an actual due date strictly earlier than this bound',{minLength:1,maxLength:40}),project:str('Case-insensitive exact nonblank project name; cannot combine with unassigned',{minLength:1,maxLength:100}),unassigned:{type:'boolean',description:'True selects blank projects only; false selects assigned projects only. Omit for both. Cannot combine with project.'}});
+const taskPage = () => ({offset:{type:'integer',minimum:0,maximum:2000},limit:{type:'integer',minimum:1,maximum:100},expectedRevision:{type:'integer',minimum:0,description:'Use the prior response revision to reject changes between pages.'}});
 const label = (value, maximum, name, optional = false) => { if (optional && value === undefined) return undefined; if (typeof value !== 'string' || !value.trim() || value.length > maximum || /[\u0000-\u001f]/u.test(value)) throw fail(`Use bounded ${name}.`); return value.trim(); };
 const canonical = value => Array.isArray(value) ? value.map(canonical) : object(value) ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
 export const capabilityHash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
@@ -72,7 +74,9 @@ export function validateToolArguments(definition, value) {
 
 // Metadata and workflow eligibility are shared with the standalone store.
 export const BUILTIN_TOOL_DEFINITIONS = [
-  { name:'list_tasks', description:'Read real tasks. Use returned task IDs for updates.', parameters:obj({status:str('Task status',{enum:['todo','done']}),project:str('Project filter',{maxLength:100})}) },
+  { name:'list_tasks', description:'Read a bounded page of actual matching tasks, with full matching total and nextOffset/hasMore. Details are previews of at most 400 characters; follow read_task for complete details. Do not infer all-workspace counts from one page. Use returned task IDs for updates.', parameters:obj({...taskFilters(),...taskPage()}) },
+  { name:'read_task', description:'Read an actual task and a bounded page of its full details. Follow nextOffset/hasMore and retain expectedRevision to read complete details consistently.', parameters:obj({taskId:str('Actual task UUID from list_tasks',{minLength:36,maxLength:36}),offset:{type:'integer',minimum:0,maximum:12000},limit:{type:'integer',minimum:1,maximum:4000},expectedRevision:{type:'integer',minimum:0}},['taskId']) },
+  { name:'summarize_tasks', description:'Compute actual counts across ALL matching tasks, independent of list pagination, plus bounded pages of project-level counts. Returns total/open/completed/high-priority-open/overdue-open counts, projectCount and nextOffset/hasMore. Blank projects remain distinct from a project literally named Unassigned.', parameters:obj({...taskFilters(),...taskPage()}) },
   { name:'create_task', description:'Create a task requested by the user.', parameters:obj({title:str('Task title',{minLength:1,maxLength:300}),details:str('Details',{maxLength:12000}),priority:str('Priority',{enum:['normal','high']}),project:str('Project',{maxLength:100}),dueAt:str('ISO date',{maxLength:100})},['title']) },
   { name:'update_task', description:'Update a task using an actual task ID.', parameters:obj({taskId:str('Task UUID',{minLength:1,maxLength:36}),title:str('Title',{minLength:1,maxLength:300}),details:str('Details',{maxLength:12000}),status:str('Status',{enum:['todo','done']}),priority:str('Priority',{enum:['normal','high']}),project:str('Project',{maxLength:100}),dueAt:str('ISO date',{maxLength:100})},['taskId']) },
   { name:'complete_task', description:'Mark an existing task complete.', parameters:obj({taskId:str('Task UUID',{minLength:1,maxLength:36})},['taskId']) },
@@ -95,8 +99,8 @@ export const BUILTIN_TOOL_DEFINITIONS = [
   { name:'list_capabilities', description:'Discover installed callable capabilities and their exact schemas. Use existing capabilities before building replacements.', parameters:obj({}) },
   { name:'run_capability', description:'Run an installed capability by its actual catalog name and validated arguments. Reports parent-confirmed workspace actions only.', parameters:obj({name:str('Actual cap_ name from list_capabilities',{minLength:1,maxLength:64}),arguments:{type:'object',additionalProperties:true}},['name','arguments']) },
 ];
-const workflowNames = new Set(['list_tasks','create_task','update_task','complete_task','list_notes','search_notes','read_note','save_note','start_focus','stop_focus','get_time']);
-const readNames = new Set(['list_tasks','list_notes','search_notes','read_note','get_time','list_workflows','get_preferences','list_feature_builds','inspect_feature_build','list_capabilities']);
+const workflowNames = new Set(['list_tasks','read_task','summarize_tasks','create_task','update_task','complete_task','list_notes','search_notes','read_note','save_note','start_focus','stop_focus','get_time']);
+const readNames = new Set(['list_tasks','read_task','summarize_tasks','list_notes','search_notes','read_note','get_time','list_workflows','get_preferences','list_feature_builds','inspect_feature_build','list_capabilities']);
 export function builtinCatalog() { return BUILTIN_TOOL_DEFINITIONS.map(definition => ({ ...structuredClone(definition),title:definition.name.replaceAll('_',' '),kind:'builtin',version:1,workflowAllowed:workflowNames.has(definition.name),effectPolicy:readNames.has(definition.name)?'pure':'workspace' })); }
 
 export function validateWorkflowSteps(value, catalog = builtinCatalog(), { requirePins = false } = {}) {

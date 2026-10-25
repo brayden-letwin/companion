@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 
 const RUNNER = fileURLToPath(new URL('./capability-runner.mjs', import.meta.url));
 const GUARD = fileURLToPath(new URL('./capability-guard.cjs', import.meta.url));
-const SAFE_TOOLS = new Set(['list_tasks', 'list_notes', 'read_note', 'search_notes', 'create_task', 'update_task', 'complete_task', 'save_note', 'start_focus', 'stop_focus', 'get_time']);
+const SAFE_TOOLS = new Set(['list_tasks', 'read_task', 'summarize_tasks', 'list_notes', 'read_note', 'search_notes', 'create_task', 'update_task', 'complete_task', 'save_note', 'start_focus', 'stop_focus', 'get_time']);
 const MAX_OUTPUT = 128 * 1024, MAX_INPUT = 64 * 1024;
 let active = 0;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
