@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -8,9 +8,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { createProductivityStore } from '../server/productivity-store.mjs';
 import { createProductivityTools } from '../server/productivity-tools.mjs';
 
-async function fixture(t) {
+async function fixture(t, options = {}) {
   const dataDirectory = await mkdtemp(path.join(tmpdir(), 'companion-productivity-store-')), stores = [];
-  const open = async () => { const store = await createProductivityStore({ dataDirectory }); stores.push(store); return store; };
+  const open = async () => { const store = await createProductivityStore({ dataDirectory, ...options }); stores.push(store); return store; };
   const store = await open();
   t.after(async () => { for (const item of stores) item.close(); const resolved = path.resolve(dataDirectory); assert.ok(resolved.startsWith(path.resolve(tmpdir()) + path.sep)); await rm(resolved, { recursive: true, force: true }); });
   const apply = (type, fields = {}, target = store) => target.apply({ operationId: randomUUID(), expectedRevision: target.snapshot().revision, type, ...fields });
@@ -93,4 +93,126 @@ test('tool argument whitelists, cancellation and bounded note reads operate on r
   await assert.rejects(tools.execute('shell', { command: 'unsupported' }), { code: 'invalid_tool' });
   await assert.rejects(tools.execute('create_task', { title: 'No extra claims', actor: 'administrator' }), { code: 'invalid_tool' });
   const controller = new AbortController(); controller.abort(); await assert.rejects(tools.execute('create_task', { title: 'Cancelled' }, { signal: controller.signal }), { name: 'AbortError' }); assert.equal(f.store.snapshot().revision, revision);
+});
+
+const turnInput = (conversationId, revision = 0, requestId = 'turn_' + randomUUID()) => ({ conversationId, expectedRevision: revision, id: requestId, message: 'A synthetic conversation request.', providerId: '', digest: createHash('sha256').update(requestId).digest('hex') });
+const completed = (turn, reply = { text: 'A synthetic reply.', actions: [], providerId: 'synthetic-provider' }) => ({ conversationId: turn.conversationId, id: turn.id, digest: turn.digest, status: 'completed', reply });
+
+test('durable conversations preserve existing workspace data, derive first-message titles and restore ordered replies', async t => {
+  const f = await fixture(t); f.apply('addNote', { text: 'An existing workspace note.' });
+  const conversationId = randomUUID(); assert.equal(f.store.listConversations().conversations.length, 0); assert.equal(f.store.createConversation({ id: conversationId }).title, 'New conversation');
+  const turn = { ...turnInput(conversationId), message: 'Plan a synthetic week with concrete next steps.' };
+  const started = f.store.beginConversationTurn(turn); assert.equal(started.conversation.revision, 1); assert.equal(started.conversation.title, turn.message); assert.equal(started.conversation.activeRequestId, turn.id); assert.deepEqual(started.receipt, { state: 'in_progress', reply: null });
+  const reply = { text: '\n  Preserve this reply’s spacing.\n', actions: [], providerId: 'resolved-provider', rawContinuation: { mustNotPersist: 'opaque-secret-marker' } };
+  const finished = f.store.finishConversationTurn(completed(turn, reply)); assert.equal(finished.conversation.revision, 2); assert.equal(finished.receipt.reply.conversationRevision, 2); assert.equal(finished.receipt.reply.text, reply.text); assert.equal(finished.conversation.activeRequestId, null);
+  assert.ok(!JSON.stringify(finished).includes('opaque-secret-marker')); assert.equal(f.store.createConversation({ id: conversationId, title: 'Must not overwrite existing title' }).title, turn.message);
+  f.store.close(); const restarted = await f.open(), restored = restarted.getConversation(conversationId); assert.equal(restored.turns[0].status, 'completed'); assert.equal(restored.turns[0].reply.text, reply.text); assert.equal(restored.turns[0].reply.providerId, 'resolved-provider'); assert.equal(restarted.snapshot().notes[0].text, 'An existing workspace note.');
+  const listed = restarted.listConversations(); assert.equal(listed.activeConversationId, conversationId); assert.equal(listed.conversations[0].turnCount, 1); assert.equal(listed.conversations[0].lastStatus, 'completed');
+});
+
+test('conversation CAS and one-running-turn rule are atomic across connections and do not poison failed request IDs', async t => {
+  const f = await fixture(t), other = await f.open(), conversationId = randomUUID(); f.store.createConversation({ id: conversationId }); const first = turnInput(conversationId), competing = turnInput(conversationId);
+  f.store.beginConversationTurn(first);
+  assert.throws(() => other.beginConversationTurn(competing), error => error.code === 'conversation_revision_conflict' && error.conversation.revision === 1); assert.equal(other.chatReceipt(competing.id, competing.digest), null);
+  assert.throws(() => other.beginConversationTurn({ ...competing, expectedRevision: 1 }), { code: 'conversation_busy' }); assert.equal(other.chatReceipt(competing.id, competing.digest), null);
+  assert.equal(other.beginConversationTurn(first).replayed, true); assert.throws(() => other.beginConversationTurn({ ...first, message: 'Same digest with changed input' }), { code: 'request_conflict' });
+  const parallelId = randomUUID(); other.createConversation({ id: parallelId }); assert.equal(other.beginConversationTurn(turnInput(parallelId)).conversation.activeRequestId.startsWith('turn_'), true);
+});
+
+test('conversation turn and paired effect receipts roll back together when either SQL write fails', async t => {
+  const f = await fixture(t), conversationId = randomUUID(); f.store.createConversation({ id: conversationId }); const turn = turnInput(conversationId);
+  function executeSql(sql) { const connection = new DatabaseSync(path.join(f.dataDirectory, 'productivity.sqlite')); try { connection.exec(sql); } finally { connection.close(); } }
+  executeSql("CREATE TRIGGER synthetic_conversation_insert BEFORE INSERT ON conversation_turns BEGIN SELECT RAISE(ABORT, 'Synthetic turn insert failure'); END;");
+  assert.throws(() => f.store.beginConversationTurn(turn), /Synthetic turn insert failure/); assert.equal(f.store.chatReceipt(turn.id, turn.digest), null); assert.equal(f.store.getConversation(conversationId).revision, 0); assert.equal(f.store.getConversation(conversationId).turns.length, 0);
+  executeSql('DROP TRIGGER synthetic_conversation_insert;'); f.store.beginConversationTurn(turn);
+  executeSql("CREATE TRIGGER synthetic_conversation_finish BEFORE UPDATE ON chat_receipts WHEN NEW.state='completed' BEGIN SELECT RAISE(ABORT, 'Synthetic receipt finish failure'); END;");
+  assert.throws(() => f.store.finishConversationTurn(completed(turn)), /Synthetic receipt finish failure/); assert.equal(f.store.getConversation(conversationId).turns[0].status, 'running'); assert.equal(f.store.getConversation(conversationId).revision, 1); assert.equal(f.store.chatReceipt(turn.id, turn.digest).state, 'in_progress');
+  executeSql('DROP TRIGGER synthetic_conversation_finish;'); assert.equal(f.store.finishConversationTurn(completed(turn)).receipt.state, 'completed');
+});
+
+test('exact turn and terminal replays preserve the original committed revision after later turns', async t => {
+  const f = await fixture(t), conversationId = randomUUID(); f.store.createConversation({ id: conversationId }); const first = turnInput(conversationId); f.store.beginConversationTurn(first); const initial = f.store.finishConversationTurn(completed(first));
+  const second = turnInput(conversationId, 2); f.store.beginConversationTurn(second); f.store.finishConversationTurn(completed(second));
+  const replay = f.store.beginConversationTurn(first); assert.equal(replay.replayed, true); assert.equal(replay.conversation.revision, 4); assert.deepEqual(replay.receipt, initial.receipt); assert.equal(f.store.finishConversationTurn(completed(first)).receipt.reply.conversationRevision, 2);
+  assert.throws(() => f.store.finishConversationTurn(completed(first, { text: 'Changed final answer.' })), { code: 'request_conflict' });
+  const another = randomUUID(); f.store.createConversation({ id: another }); assert.throws(() => f.store.beginConversationTurn({ ...first, conversationId: another }), { code: 'request_conflict' });
+});
+
+test('restart marks running turns interrupted and retains their actual task/build checkpoints without resuming', async t => {
+  const f = await fixture(t), conversationId = randomUUID(); f.store.createConversation({ id: conversationId }); const turn = turnInput(conversationId); f.store.beginConversationTurn(turn);
+  const task = f.apply('addTask', { title: 'Finished before the simulated restart' }).workspace.tasks[0], featureJob = { id: randomUUID(), status: 'queued' };
+  const actions = [{ id: 'created_task', tool: 'create_task', status: 'completed', arguments: { title: task.title }, result: { task } }];
+  const checkpoint = f.store.recordConversationActions({ ...turn, actions, featureJob }); assert.equal(checkpoint.conversation.revision, 1); assert.equal(checkpoint.conversation.turns[0].actions[0].result.task.id, task.id);
+  assert.throws(() => f.store.recordConversationActions({ ...turn, actions: [] }), { code: 'conversation_checkpoint_conflict' });
+  f.store.close(); const restarted = await f.open(), restored = restarted.getConversation(conversationId); assert.equal(restored.revision, 2); assert.equal(restored.activeRequestId, null); assert.equal(restored.turns[0].status, 'interrupted'); assert.equal(restored.turns[0].error.code, 'request_interrupted'); assert.equal(restored.turns[0].error.actions[0].result.task.id, task.id); assert.equal(restored.turns[0].featureJob.id, featureJob.id); assert.equal(restarted.snapshot().tasks.length, 1);
+  const replay = restarted.beginConversationTurn(turn); assert.equal(replay.replayed, true); assert.equal(replay.receipt.state, 'failed'); assert.equal(replay.receipt.reply.statusCode, 409); assert.equal(replay.receipt.reply.conversationRevision, 2); assert.throws(() => restarted.finishConversationTurn(completed(turn)), { code: 'request_conflict' });
+});
+
+test('large checkpoints compact details while retaining every action, workflow-step ID and desktop uncertainty', async t => {
+  const f = await fixture(t, { conversationLimits: { outcomeBytes: 8192 } }), conversationId = randomUUID(); f.store.createConversation({ id: conversationId }); const turn = turnInput(conversationId); f.store.beginConversationTurn(turn);
+  const stepIds = Array.from({ length: 12 }, () => randomUUID());
+  const actions = [
+    { id: 'workflow', tool: 'run_workflow', status: 'completed', result: { steps: stepIds.map((id, index) => ({ tool: 'create_task', result: { task: { id, title: 'Step ' + index, details: 'x'.repeat(4000) } } })) } },
+    { id: 'uncertain', tool: 'desktop_propose_action', status: 'failed', result: { desktopAction: { id: randomUUID(), status: 'failed', outcomeUnknown: true } } },
+    { id: 'pending', tool: 'desktop_propose_action', status: 'pending', result: { desktopAction: { id: randomUUID(), status: 'pending', preview: { action: 'setText', text: 'Literal preview '.repeat(200) }, requiresApproval: true } } },
+  ];
+  const checkpoint = f.store.recordConversationActions({ ...turn, actions }); assert.equal(checkpoint.conversation.turns[0].actions.length, 3);
+  const final = f.store.finishConversationTurn(completed(turn, { text: 'Long answer '.repeat(18000), actions, rawContinuation: { marker: 'must-not-persist' } })); const saved = final.receipt.reply;
+  assert.ok(Buffer.byteLength(JSON.stringify(saved)) <= 8192); assert.equal(saved.outcomeTruncated, true); assert.equal(saved.actions.length, 3); assert.equal(saved.actions[0].result.steps.length, 12); assert.equal(saved.actions[0].result.steps[11].result.task.id, stepIds[11]); assert.equal(saved.actions[1].result.desktopAction.outcomeUnknown, true); assert.ok(!JSON.stringify(saved).includes('must-not-persist'));
+  const pending = saved.actions[2].result.desktopAction; if (pending.preview) assert.equal(pending.preview.text, actions[2].result.desktopAction.preview.text); else assert.equal(pending.requiresFreshPreview, true);
+});
+
+test('conversation/turn limits reject before effects, and terminal-capacity reservations release safely', async t => {
+  const f = await fixture(t, { conversationLimits: { conversations: 2, turns: 2 } }), conversationId = randomUUID(); f.store.createConversation({ id: conversationId }); f.store.createConversation({ id: randomUUID() }); assert.throws(() => f.store.createConversation({ id: randomUUID() }), { code: 'conversation_limit' });
+  for (let index = 0; index < 2; index++) { const turn = turnInput(conversationId, index * 2); f.store.beginConversationTurn(turn); f.store.finishConversationTurn(completed(turn)); }
+  const limited = turnInput(conversationId, 4); assert.throws(() => f.store.beginConversationTurn(limited), { code: 'conversation_turn_limit' }); assert.equal(f.store.chatReceipt(limited.id, limited.digest), null);
+  const budget = await fixture(t, { conversationLimits: { outcomeBytes: 32768, totalBytes: 131072 } }); const firstId = randomUUID(), secondId = randomUUID(); budget.store.createConversation({ id: firstId }); budget.store.createConversation({ id: secondId }); const first = turnInput(firstId), second = turnInput(secondId); budget.store.beginConversationTurn(first); assert.throws(() => budget.store.beginConversationTurn(second), { code: 'conversation_storage_limit' }); assert.equal(budget.store.chatReceipt(second.id, second.digest), null); budget.store.finishConversationTurn(completed(first)); assert.equal(budget.store.beginConversationTurn(second).replayed, false);
+});
+
+test('cancelled turns keep partial receipts, and conversation creation never adopts an unrelated legacy request', async t => {
+  const f = await fixture(t), conversationId = randomUUID(); f.store.createConversation({ id: conversationId, title: 'A chosen title' }); const turn = turnInput(conversationId); f.store.beginConversationTurn(turn);
+  const actions = [{ id: 'saved_note', tool: 'save_note', status: 'completed', result: { note: { id: randomUUID(), title: 'A completed draft' } } }]; f.store.recordConversationActions({ ...turn, actions });
+  const finished = f.store.finishConversationTurn({ ...turn, status: 'cancelled', error: { statusCode: 499, code: 'request_cancelled', message: 'Stopped by the user.' } }); assert.equal(finished.conversation.turns[0].status, 'cancelled'); assert.equal(finished.receipt.reply.actions[0].id, 'saved_note'); assert.equal(finished.receipt.state, 'failed'); assert.equal(finished.conversation.title, 'A chosen title');
+  const legacy = turnInput(conversationId, 2); f.store.beginChat(legacy.id, legacy.digest); assert.throws(() => f.store.beginConversationTurn(legacy), { code: 'request_conflict' }); assert.equal(f.store.getConversation(conversationId).turns.length, 1); assert.equal(f.store.chatReceipt(legacy.id, legacy.digest).state, 'in_progress');
+});
+
+test('legacy workspace snapshots expose empty memory without rewriting their revision or losing notes', async t => {
+  const f = await fixture(t); f.apply('addNote', { text: 'A pre-memory workspace note.' }); const legacy = f.store.snapshot(); delete legacy.preferences;
+  const connection = new DatabaseSync(path.join(f.dataDirectory, 'productivity.sqlite'));
+  try { connection.prepare('UPDATE workspace SET state=? WHERE id=1').run(JSON.stringify(legacy)); } finally { connection.close(); }
+  const restored = f.store.snapshot(); assert.deepEqual(restored.preferences, []); assert.equal(restored.revision, legacy.revision); assert.equal(restored.notes[0].text, 'A pre-memory workspace note.');
+  const inspect = new DatabaseSync(path.join(f.dataDirectory, 'productivity.sqlite'));
+  try { assert.equal(Object.hasOwn(JSON.parse(inspect.prepare('SELECT state FROM workspace WHERE id=1').get().state), 'preferences'), false); } finally { inspect.close(); }
+  const changed = f.apply('rememberPreference', { key: 'reply-length', label: 'Reply length', value: 'Keep routine replies concise.' }); assert.equal(changed.workspace.preferences.length, 1); assert.equal(changed.workspace.revision, legacy.revision + 1);
+  f.store.close(); const restarted = await f.open(); assert.equal(restarted.snapshot().preferences[0].value, 'Keep routine replies concise.'); assert.equal(restarted.snapshot().notes.length, 1);
+});
+
+test('explicit memory upserts retain identity and creation time while CAS/replay prevents duplicate teaching', async t => {
+  let clock = Date.now(); const f = await fixture(t, { now: () => clock }); const operation = { operationId: randomUUID(), expectedRevision: 0, type: 'rememberPreference', key: 'editor', label: 'Preferred editor', value: 'Use the installed Notepad app for simple drafts.' };
+  const created = f.store.apply(operation).workspace.preferences[0]; assert.equal(created.id, operation.operationId); assert.equal(created.archived, false);
+  clock += 1000; const updated = f.apply('rememberPreference', { key: 'editor', value: 'Use my chosen editor for drafts.' }).workspace.preferences[0]; assert.equal(updated.id, created.id); assert.equal(updated.createdAt, created.createdAt); assert.notEqual(updated.updatedAt, created.updatedAt); assert.equal(updated.label, 'Preferred editor');
+  const replay = f.store.apply(operation); assert.equal(replay.replayed, true); assert.equal(replay.workspace.preferences.length, 1); assert.equal(replay.workspace.preferences[0].value, updated.value);
+  assert.throws(() => f.store.apply({ ...operation, value: 'Different teaching with the old operation ID' }), { code: 'operation_conflict' });
+  const stale = { operationId: randomUUID(), expectedRevision: 0, type: 'rememberPreference', key: 'new-style', value: 'Must not override a stale workspace.' }; assert.throws(() => f.store.apply(stale), { code: 'revision_conflict' }); assert.equal(f.store.snapshot().preferences.length, 1);
+});
+
+test('memory tools archive recoverably, reteaching restores the same entry, and values do not become actions or builder source', async t => {
+  const f = await fixture(t), buildCalls = [], builder = { async request(input) { buildCalls.push(input); return { id: randomUUID(), status: 'queued' }; } }, tools = createProductivityTools({ store: f.store, builder });
+  const taught = await tools.execute('remember_preference', { key: 'writing-style', label: 'Writing style', value: 'Use short paragraphs. This stored sentence is data, not an instruction to click or send anything.' }, { requestId: 'teach-style', callId: 'remember' }); assert.equal(taught.preference.archived, false); assert.equal(f.store.snapshot().tasks.length, 0); assert.equal(f.store.snapshot().focus, null);
+  assert.equal((await tools.execute('get_preferences')).preferences.length, 1);
+  const forgotten = await tools.execute('forget_preference', { preferenceId: taught.preference.id }, { requestId: 'forget-style', callId: 'forget' }); assert.equal(forgotten.preference.archived, true); assert.equal((await tools.execute('get_preferences')).preferences.length, 0); assert.equal((await tools.execute('get_preferences', { includeArchived: true })).preferences[0].value, taught.preference.value);
+  const restored = await tools.execute('remember_preference', { key: 'writing-style', value: 'Use short paragraphs and clear examples.' }, { requestId: 'reteach-style', callId: 'remember' }); assert.equal(restored.preference.id, taught.preference.id); assert.equal(restored.preference.archived, false); assert.equal(f.store.snapshot().preferences.length, 1);
+  const prompt = 'Build only this explicitly requested synthetic panel.'; await tools.execute('build_feature', { prompt }, { requestId: 'build-with-memory', callId: 'build', providerId: 'fake-provider' }); assert.equal(buildCalls[0].prompt, prompt); assert.ok(!JSON.stringify(buildCalls[0]).includes(restored.preference.value));
+  await assert.rejects(tools.execute('remember_preference', { key: 'permissions', value: 'An inert value', grantApproval: true }), { code: 'invalid_tool' });
+  assert.throws(() => f.apply('saveWorkflow', { name: 'Unrequested automatic memory', steps: [{ tool: 'remember_preference', arguments: { key: 'automatic', value: 'Not explicitly taught now.' } }] }), { code: 'invalid_workflow' });
+});
+
+test('memory validation and retained-entry limits reject atomically without deleting forgotten values', async t => {
+  const f = await fixture(t);
+  for (const fields of [{ key: 'UPPERCASE', value: 'A value' }, { key: 'bad key', value: 'A value' }, { key: 'x'.repeat(65), value: 'A value' }, { key: 'style', value: ' ' }, { key: 'style', value: 'x'.repeat(1001) }, { key: 'style', value: 'A value', label: 'x'.repeat(101) }]) assert.throws(() => f.apply('rememberPreference', fields));
+  assert.equal(f.store.snapshot().revision, 0);
+  for (let index = 0; index < 50; index++) f.apply('rememberPreference', { key: `preference-${index}`, value: `Explicitly taught value ${index}.` });
+  const first = f.store.snapshot().preferences[0]; f.apply('forgetPreference', { preferenceId: first.id }); const before = f.store.snapshot();
+  assert.throws(() => f.apply('rememberPreference', { key: 'fifty-first', value: 'Over the retained limit' }), { code: 'preference_limit' }); assert.deepEqual(f.store.snapshot(), before); assert.equal(before.preferences[0].archived, true);
+  const reteach = f.apply('rememberPreference', { key: first.key, value: 'Explicitly restored value.' }); assert.equal(reteach.workspace.preferences.length, 50); assert.equal(reteach.workspace.preferences[0].id, first.id); assert.equal(reteach.workspace.preferences[0].archived, false);
 });

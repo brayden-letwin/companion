@@ -91,6 +91,12 @@ test('protected source changes present a concrete review and only explicit activ
   assert.match(await readFile(path.join(f.root, 'server/security.mjs'), 'utf8'), /true/);
 });
 
+test('microphone-session source changes require review before they can affect capture', async t => {
+  const f = await fixture(t, {complete:async()=>({summary:'Prepare a reviewed microphone implementation.',files:[{path:'src/voice-session.mjs',content:'export const microphonePolicy = "review required";\n'}],tests:[]})});
+  const job=await finished(f.builder,(await f.builder.request({prompt:'Prepare the microphone policy change.',providerId:'synthetic',autoApply:true},OWNER)).id);
+  assert.equal(job.status,'review_required'); assert.equal(job.files[0].protected,true); await absent(path.join(f.root,'src/voice-session.mjs'));
+});
+
 test('CAS prevents activation when source changed after the verified snapshot', async t => {
   const f = await fixture(t);
   const ready = await finished(f.builder, (await f.builder.request({ prompt: 'Add focus', providerId: 'synthetic', autoApply: false }, OWNER)).id);

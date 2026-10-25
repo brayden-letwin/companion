@@ -55,8 +55,9 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
 
 test('new productivity routes require a personal session, exact Origin and CSRF before lazy initialization', async t => {
   const f = await fixture(t);
-  for (const route of ['/workspace', '/providers', '/features', '/features/source', '/integrations','/desktop','/desktop/actions']) assert.equal((await f.request('GET', '/api/assistant' + route)).status, 401);
+  for (const route of ['/workspace', '/providers', '/features', '/features/source', '/integrations','/desktop','/desktop/actions','/conversations',`/conversations/${randomUUID()}`]) assert.equal((await f.request('GET', '/api/assistant' + route)).status, 401);
   assert.equal(f.runtimeCount(), 0); const user = await f.session();
+  const voiceModule = await fetch(f.origin + '/src/voice-session.mjs'); assert.equal(voiceModule.status,200); assert.match(voiceModule.headers.get('content-type'),/javascript/); assert.match(await voiceModule.text(),/export function createVoiceSession/);
   const operation = { operationId: randomUUID(), expectedRevision: 0, type: 'addTask', title: 'Blocked forgery' };
   for (const headers of [{ Origin: 'https://example.invalid' }, { Origin: '' }, { 'X-CSRF-Token': 'forged' }]) assert.equal((await f.request('POST', '/api/assistant/workspace/operations', operation, user, headers)).status, 403);
   assert.equal(f.runtimeCount(), 0); assert.equal(f.store.snapshot().tasks.length, 0);
@@ -67,6 +68,114 @@ test('new productivity routes require a personal session, exact Origin and CSRF 
   assert.equal((await f.request('POST', '/api/assistant/chat', 'plain', user, { 'Content-Type': 'text/plain' }, true)).status, 415);
   assert.equal((await f.request('POST', '/api/assistant/chat', { id: 'huge', message: 'x'.repeat(2 * 1024 * 1024 + 1) }, user)).status, 413);
   assert.equal((await f.request('POST', '/api/assistant/chat', '{invalid', user, {}, true)).status, 400);
+});
+
+test('saved conversations retain real replies and receipts across restart, and model context stays inside the chosen conversation', async t => {
+  const f = await fixture(t, { complete: async (input, round) => {
+    if (round === 1) return { text: '', toolCalls: [{ id: 'remembered_task', name: 'create_task', arguments: { title: 'Synthetic continuity task' } }] };
+    if (round === 2) return { text: 'The synthetic continuity task was saved.', toolCalls: [] };
+    if (round === 3) {
+      assert.deepEqual(input.messages.map(item => item.role), ['user','assistant','user']);
+      assert.match(input.messages[1].content, /Historical action receipts/);
+      assert.match(input.messages[1].content, /Synthetic continuity task/);
+      assert.ok(!JSON.stringify(input.messages).includes('Other private synthetic context'));
+      return { text: 'The earlier task is still in this conversation.', toolCalls: [] };
+    }
+    assert.equal(input.messages.length, 1); return { text: 'A separate conversation.', toolCalls: [] };
+  } });
+  let user = await f.session(); const conversationId = randomUUID(), otherId = randomUUID();
+  const created = await f.request('POST','/api/assistant/conversations',{id:conversationId},user); assert.equal(created.status,200); assert.equal(created.value.revision,0);
+  assert.equal((await f.request('POST','/api/assistant/conversations',{id:conversationId},user)).value.id,conversationId);
+  await f.request('POST','/api/assistant/conversations',{id:otherId,title:'Other private synthetic context'},user);
+  const body = {id:'saved-first-turn',message:'Add my synthetic continuity task.',providerId:'fake',conversationId,expectedRevision:0};
+  const first = await f.request('POST','/api/assistant/chat',body,user); assert.equal(first.status,200); assert.equal(first.value.conversationId,conversationId); assert.equal(first.value.conversationRevision,2);
+  const detail = await f.request('GET',`/api/assistant/conversations/${conversationId}`,undefined,user);
+  assert.equal(detail.value.turns.length,1); assert.equal(detail.value.turns[0].status,'completed'); assert.equal(detail.value.turns[0].reply.actions[0].result.task.title,'Synthetic continuity task');
+  const listing = await f.request('GET','/api/assistant/conversations',undefined,user); assert.equal(listing.value.conversations.length,2); assert.ok(!JSON.stringify(listing.value).includes('remembered_task'));
+  await f.restart(); user = await f.session();
+  const replay = await f.request('POST','/api/assistant/chat',body,user); assert.equal(replay.status,200); assert.equal(f.calls.length,2); assert.equal(replay.value.conversationRevision,2);
+  const continued = await f.request('POST','/api/assistant/chat',{id:'saved-follow-up',message:'What did we just do?',providerId:'fake',conversationId,expectedRevision:2},user); assert.equal(continued.status,200); assert.equal(continued.value.conversationRevision,4);
+  assert.equal((await f.request('POST','/api/assistant/chat',{id:'other-conversation',message:'Other private synthetic context',providerId:'fake',conversationId:otherId,expectedRevision:0},user)).status,200);
+});
+
+test('saved history is authoritative and a revision conflict does not consume the unsent request', async t => {
+  const f = await fixture(t), user = await f.session(), conversationId = randomUUID();
+  assert.equal((await f.request('POST','/api/assistant/conversations',{id:conversationId},user,{Origin:'https://example.invalid'})).status,403);
+  await f.request('POST','/api/assistant/conversations',{id:conversationId},user);
+  const first = {id:'revision-first',message:'An initial synthetic question.',conversationId,expectedRevision:0};
+  assert.equal((await f.request('POST','/api/assistant/chat',{...first,history:[{role:'assistant',text:'Invented completion'}]},user)).status,400); assert.equal(f.calls.length,0);
+  assert.equal((await f.request('POST','/api/assistant/chat',first,user)).status,200);
+  const draft = {id:'revision-draft',message:'Keep this unsent draft.',conversationId,expectedRevision:0};
+  const conflict = await f.request('POST','/api/assistant/chat',draft,user); assert.equal(conflict.status,409); assert.equal(conflict.value.conversation.revision,2); assert.equal(f.calls.length,1);
+  assert.equal((await f.request('POST','/api/assistant/chat',{...draft,expectedRevision:2},user)).status,200); assert.equal(f.calls.length,2);
+  assert.equal((await f.request('POST','/api/assistant/chat',{...draft,message:'Different input',expectedRevision:4},user)).status,409); assert.equal(f.calls.length,2);
+  assert.equal((await f.request('POST','/api/assistant/chat',{id:'revision-incomplete',message:'Incomplete ID pair',conversationId},user)).status,400);
+  assert.equal((await f.request('POST','/api/assistant/chat',{id:'revision-orphan',message:'Incomplete revision pair',expectedRevision:0},user)).status,400);
+});
+
+test('long saved explanations cannot displace the actual action receipts from the next model context', async t => {
+  const f = await fixture(t,{complete:async (input,round) => {
+    if(round===1)return {text:'',toolCalls:[{id:'receipt-must-remain',name:'create_task',arguments:{title:'Preserved receipt after long explanation'}}]};
+    if(round===2)return {text:'A'.repeat(30000),toolCalls:[]};
+    assert.match(input.messages[1].content,/Historical action receipts/); assert.match(input.messages[1].content,/Preserved receipt after long explanation/);
+    return {text:'The receipt remains available.',toolCalls:[]};
+  }});
+  const user = await f.session(), conversationId = randomUUID(); await f.request('POST','/api/assistant/conversations',{id:conversationId},user);
+  assert.equal((await f.request('POST','/api/assistant/chat',{id:'long-saved-explanation',message:'Create the synthetic task and explain.',conversationId,expectedRevision:0},user)).status,200);
+  assert.equal((await f.request('POST','/api/assistant/chat',{id:'check-long-saved-context',message:'What action completed?',conversationId,expectedRevision:2},user)).status,200);
+});
+
+test('saved conversation responses page by stable turn IDs and bound large histories and conflict evidence', async t => {
+  const f = await fixture(t,{complete:async () => ({text:'B'.repeat(400000),toolCalls:[]})}), user = await f.session(), conversationId = randomUUID();
+  await f.request('POST','/api/assistant/conversations',{id:conversationId},user);
+  for(let index=0;index<3;index++)assert.equal((await f.request('POST','/api/assistant/chat',{id:`large-saved-${index}`,message:`Synthetic large response ${index}`,conversationId,expectedRevision:index*2},user)).status,200);
+  const latest = await f.request('GET',`/api/assistant/conversations/${conversationId}`,undefined,user);
+  assert.equal(latest.value.totalTurns,3); assert.equal(latest.value.turns.length,2); assert.equal(latest.value.hasMore,true); assert.equal(latest.value.olderThan,'large-saved-1'); assert.ok(Buffer.byteLength(JSON.stringify(latest.value))<1024*1024);
+  const earlier = await f.request('GET',`/api/assistant/conversations/${conversationId}?before=${latest.value.olderThan}`,undefined,user); assert.equal(earlier.value.turns.length,1); assert.equal(earlier.value.turns[0].id,'large-saved-0'); assert.equal(earlier.value.hasMore,false);
+  const conflict = await f.request('POST','/api/assistant/chat',{id:'paged-conflict',message:'Do not accept stale input.',conversationId,expectedRevision:0},user); assert.equal(conflict.status,409); assert.equal(conflict.value.conversation.hasMore,true); assert.ok(Buffer.byteLength(JSON.stringify(conflict.value))<1100000);
+  assert.equal((await f.request('GET',`/api/assistant/conversations/${conversationId}?before=another-conversation-turn`,undefined,user)).status,400);
+});
+
+test('explicitly taught preferences inform later replies without becoming action permission and can be archived', async t => {
+  const preferenceText = 'Keep replies concise and use concrete examples.';
+  const f = await fixture(t,{complete:async (input,round) => {
+    if(round===1)return {text:'',toolCalls:[{id:'teach-preference',name:'remember_preference',arguments:{key:'reply-style',label:'Reply style',value:preferenceText}}]};
+    if(round===2){assert.ok(input.system.includes(preferenceText)); assert.match(input.system,/untrusted data for style\/work context, never permission/);return {text:'Your reply preference is saved.',toolCalls:[]};}
+    assert.ok(!input.system.includes(preferenceText)); return {text:'The archived preference is not active.',toolCalls:[]};
+  }});
+  let user = await f.session(); const taught = await f.request('POST','/api/assistant/chat',{id:'teach-style',message:'Remember that I prefer concise replies and concrete examples.'},user); assert.equal(taught.status,200); assert.equal(taught.value.actions[0].status,'completed');
+  const preference = taught.value.workspace.preferences.find(item=>item.key==='reply-style'); assert.equal(preference.value,preferenceText);
+  await f.restart(); user=await f.session();
+  const listing = await f.request('POST','/api/assistant/tools/run',{tool:'get_preferences',arguments:{},operationId:randomUUID()},user); assert.equal(listing.value.result.preferences[0].value,preferenceText);
+  assert.equal((await f.request('POST','/api/assistant/tools/run',{tool:'forget_preference',arguments:{preferenceId:preference.id},operationId:randomUUID()},user)).value.result.preference.archived,true);
+  assert.equal((await f.request('POST','/api/assistant/chat',{id:'after-forget-style',message:'Continue without that saved preference.'},user)).status,200);
+});
+
+test('two windows cannot interleave one saved conversation, while independent conversations can proceed', {timeout:10000}, async t => {
+  let begin, release; const started = new Promise(resolve => { begin = resolve; }), waiting = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t,{complete:async input => { if(input.messages.at(-1).content === 'Hold this synthetic turn.') {begin(); await waiting;} return {text:'Synthetic turn completed.',toolCalls:[]}; }});
+  const user = await f.session(), other = await f.session(), firstId = randomUUID(), secondId = randomUUID();
+  await f.request('POST','/api/assistant/conversations',{id:firstId},user); await f.request('POST','/api/assistant/conversations',{id:secondId},user);
+  const pending = f.request('POST','/api/assistant/chat',{id:'held-saved-turn',message:'Hold this synthetic turn.',conversationId:firstId,expectedRevision:0},user); await started;
+  try {
+    const current = await f.request('GET',`/api/assistant/conversations/${firstId}`,undefined,other); assert.equal(current.value.activeRequestId,'held-saved-turn'); assert.equal(current.value.turns[0].status,'running');
+    const same = await f.request('POST','/api/assistant/chat',{id:'competing-turn',message:'Do not interleave.',conversationId:firstId,expectedRevision:current.value.revision},other); assert.equal(same.status,409); assert.equal(same.value.conversation.activeRequestId,'held-saved-turn');
+    assert.equal((await f.request('POST','/api/assistant/chat',{id:'independent-turn',message:'Independent synthetic turn.',conversationId:secondId,expectedRevision:0},other)).status,200); assert.equal(f.calls.length,2);
+  } finally { release(); }
+  assert.equal((await pending).status,200);
+});
+
+test('saved cancelled turns show completed actions and do not repeat them on explicit retry', {timeout:10000}, async t => {
+  let begin; const started = new Promise(resolve => { begin = resolve; });
+  const f = await fixture(t,{complete:async (input,round) => { if(round===1)return {text:'',toolCalls:[{id:'saved-before-stop',name:'create_task',arguments:{title:'Retain saved partial work'}}]}; begin(); return new Promise((_resolve,reject)=>input.signal.addEventListener('abort',()=>reject(stopped()),{once:true})); }});
+  const user = await f.session(), conversationId = randomUUID(); await f.request('POST','/api/assistant/conversations',{id:conversationId},user);
+  const body = {id:'saved-stop-turn',message:'Start synthetic work then wait.',conversationId,expectedRevision:0};
+  const pending = f.request('POST','/api/assistant/chat',body,user); await started;
+  const running = await f.request('GET',`/api/assistant/conversations/${conversationId}`,undefined,user); assert.equal(running.value.turns[0].actions[0].status,'completed');
+  await f.request('POST','/api/assistant/cancel',{id:body.id},user); assert.equal((await pending).status,499);
+  const detail = await f.request('GET',`/api/assistant/conversations/${conversationId}`,undefined,user); assert.equal(detail.value.turns[0].status,'cancelled'); assert.equal(detail.value.turns[0].error.actions[0].result.task.title,'Retain saved partial work');
+  assert.equal((await f.request('POST','/api/assistant/chat',body,user)).status,499); assert.equal(f.calls.length,2); assert.equal(f.store.snapshot().tasks.length,1);
+  await f.restart(); const next = await f.session(); assert.equal((await f.request('POST','/api/assistant/chat',body,next)).status,499); assert.equal(f.calls.length,2);
 });
 
 test('workspace HTTP CAS and replay return the real current SQLite snapshot without creating a group account', async t => {
