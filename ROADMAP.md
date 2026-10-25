@@ -79,7 +79,7 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 - [x] Run concrete registered-capability acceptance cases in guarded children with fixture-only host effects.
 - [ ] Add acceptance checks for generated interactions, not just syntax and module loading.
 - [ ] Make missing-capability requests produce useful, scoped plans, with progress that reflects actual work.
-- [x] Work with explicitly chosen project files; broader binary formats and multi-file search remain separate work.
+- [x] Work with explicitly chosen project files, including literal multi-file text search with exact result hashes, native directory continuation, truthful limits and read-only cursor recovery. Broader binary formats remain separate work.
 - [ ] Add project organization and better task scheduling; extend the retained conversation/context foundation where real use needs it.
 - [x] Paginated task reads, explicit completeness metadata, complete detail sections, and actual full-set/project counts for larger workspaces.
 - [x] Edit existing routines through voice/chat with actual IDs, bounded exact-definition reads, revision/hash checks, preserved disabled state and capability pins. Explicit UI enable/disable and failed-step receipts keep outcomes visible; new runs still start at step one.
