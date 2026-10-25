@@ -10,7 +10,7 @@ A quiet, voice-first workspace for getting things done—and adding the tools yo
 
 No group account is needed. The existing development PC has a working Codex sign-in. On another PC, install **Node.js 24.15 or newer**, then use an existing Codex CLI sign-in or connect a provider in Settings. API keys belong in the app's password field, never in a chat or a Git commit.
 
-The full workspace is at **http://127.0.0.1:4174/assistant.html**. It runs on this computer; it is not a hosted service. Closing a page or hiding the corner leaves the local server running. Double-click the same launcher next time. The main local service was upgraded to 0.9.1 after a consistent private SQLite backup. [QA.md](QA.md) records live checks separately from automated tests and remaining hardware checks.
+The full workspace is at **http://127.0.0.1:4174/assistant.html**. It runs on this computer; it is not a hosted service. Closing a page or hiding the corner leaves the local server running. Double-click the same launcher next time. The main local service was upgraded to 0.10 after a consistent private SQLite backup. [QA.md](QA.md) records live checks separately from automated tests and remaining hardware checks.
 
 Try a concrete request:
 
@@ -37,7 +37,7 @@ Each workflow run retains its original definition and real partial results. An e
 | View | What works now |
 | --- | --- |
 | **Chat** | Saved conversations, actual action receipts, and a typing/manual-microphone fallback. |
-| **Tasks** | Create, edit, complete, and reopen persistent tasks, with details, priority, projects, and optional due dates in the underlying tools. |
+| **Tasks** | Search the full list, filter projects, sort by priority or due date, read complete instructions, and load more results. Create, edit, complete, and reopen persistent tasks. |
 | **Notes** | Save, search, edit, and archive persistent notes. Keeping an AI reply is an explicit action. |
 | **Workflows** | Save a sequence of supported local actions and run it with actual step results. |
 | **Computer** | Search/open installed apps, list/focus windows, explicitly read a selected window, and review prepared input. |
@@ -47,6 +47,8 @@ Each workflow run retains its original definition and real partial results. An e
 Workflows currently use registered Companion actions such as creating tasks, saving notes, and starting focus time. They do not send email or operate other applications. A focus session is an in-app timer; it does not block applications or guarantee a system notification.
 
 Changes persist on the local server. If a concurrent edit changes the workspace, your draft remains available for an explicit retry. If a save response is lost, **Confirm last change** resends the original operation receipt rather than creating a duplicate.
+
+Ask “How many open, high-priority, and overdue tasks do I have?” for actual counts across all matching tasks. Task-list results are pages with explicit totals and continuation offsets; they no longer silently omit older records. Long instructions have a short list preview and complete detail reads. The Tasks view searches titles, full details, and projects, while showing 50 matches at a time. **No project** and a project literally named **Unassigned** remain separate choices.
 
 ## The native corner
 
@@ -127,7 +129,9 @@ npm test
 npm run check
 ```
 
-The 0.9.1 update passed 320 Node tests and 39 JavaScript syntax checks. Real GPT inspected a retained failed build, read its complete original request through paged inspection, and generated a Project board candidate that passed its nine builder checks plus four independent fixture checks. It remains awaiting protected-code activation in the isolated test app. Source planning now fits complete reference files within measured fixed context limits, with one bounded re-selection. Build headings stay concise while the full request remains expandable. See QA.md for live outcomes and remaining generated-feature checks.
+The 0.10 update passed 342 Node tests and 40 JavaScript syntax checks. Real GPT retrieved complete older-task instructions and accurate counts in a 147-task synthetic workspace. A real MCP client read every task and ran the new reads in a workflow. Browser checks verified search, project distinctions, sorting, progressive display, full details, and completion/reopening. See QA.md for the exact scope; the pure query tests additionally cover 2,000-record bounds.
+
+The 0.9.1 checkpoint passed 320 Node tests and 39 JavaScript syntax checks. Real GPT inspected a retained failed build, read its complete original request through paged inspection, and generated a Project board candidate that passed its nine builder checks plus four independent fixture checks. It remains awaiting protected-code activation in the isolated test app. Source planning now fits complete reference files within measured fixed context limits, with one bounded re-selection. Build headings stay concise while the full request remains expandable. See QA.md for live outcomes and remaining generated-feature checks.
 
 The 0.9 checkpoint passed 300 Node tests and 39 JavaScript syntax checks. Real GPT, MCP, an actual panel and a saved workflow used one isolated synthetic capability through the same executor. Exact edited-workflow retries did not execute newly appended steps. Check last run retains the original run ID after a lost response, including after reload, and requires an explicit click. Global Stop also reaches direct tool and workflow requests. See QA.md for the distinction between fixture, live, and generated-feature evidence.
 

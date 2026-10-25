@@ -16,6 +16,7 @@ Companion's current direction is a minimal general productivity assistant in the
 - [x] Retained conversations shared across Companion windows and MCP clients, revision guards, partial action checkpoints, explicit interruption, and bounded earlier-message pages.
 - [x] Reviewable explicitly taught preferences with archiving/reteaching; preferences shape context and never grant action permission.
 - [x] Direct task/note editing, completion/reopening, note archiving, and search.
+- [x] Full-list task search, exact project filters, priority/due sorting, progressive rendering, and expandable complete instructions.
 - [x] Real allowlisted tools read and change the saved workspace; responses carry actual receipts.
 - [x] Explicit reusable workflows execute supported actions in order and report completed steps or failure.
 - [x] Revision checks preserve drafts; uncertain workspace sends can confirm the same operation receipt.
@@ -69,7 +70,7 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 - [ ] Add acceptance checks for generated interactions, not just syntax and module loading.
 - [ ] Make missing-capability requests produce useful, scoped plans, with progress that reflects actual work.
 - [ ] Add project organization and better task scheduling; extend the retained conversation/context foundation where real use needs it.
-- [ ] Add paginated task reads and explicit completeness metadata for large workspaces; `list_tasks` currently returns the latest 100 matching tasks, so a generated overview must not imply that this proves a complete larger workspace total.
+- [x] Paginated task reads, explicit completeness metadata, complete detail sections, and actual full-set/project counts for larger workspaces.
 - [ ] Improve workflow editing and failure recovery while keeping each action's outcome visible.
 - [ ] Add export, backup, restore, and migration for productivity data and build history.
 - [ ] Keep the main interface simple as new tools are added; test whether people can find and use them by voice.
