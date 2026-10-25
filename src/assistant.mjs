@@ -1,3 +1,4 @@
+import { createWorkspaceBackupsUI } from './workspace-backups.mjs';
 import { normalizeDeadline } from './core/productivity-deadlines.mjs';
 import { createVoiceSession } from './voice-session.mjs';
 import { createProjectFilesUI } from './project-files.mjs';
@@ -29,6 +30,7 @@ let selectedWindowContext=null,windowContextGeneration=0,windowContextRenderKey=
 let projectFilesUI=null,selectedProject=null,projectSelectionGeneration=0,projectAccessPending=null,projectRestored=false;
 let buildContinuationUI=null,continuationBuildId=null,continuationSelectionGeneration=0;
 let buildAttemptsUI=null;
+let workspaceBackupsUI=null;
 let providerChecksUI=null,connectionChecksAvailable=false,providerCheckSelectionGeneration=0,providerCheckRouteKey='';
 let voiceDialogOverride=false;
 let voiceSession=null,voiceSessionState={enabled:false,optedIn:false,visible:true,status:'off'},voiceCaptureContext=null,voiceFirstContext=null,activeVoiceSegment=null,voiceOwnershipRequest=null,voiceOwnsCapture=false;
@@ -238,7 +240,7 @@ async function api(path,options={}) {
   try{response=await fetch('/api/assistant/'+path,{...rest,headers,credentials:'same-origin',cache:'no-store',redirect:'error',signal});}
   catch(error){if(error.name==='AbortError')throw error;throw new Error('Companion’s service could not be reached. Double-click Start Companion.cmd, then check again.');}
   let data;try{data=await response.json();}catch{throw new Error('The service returned an unreadable response. Check the connection and try again.');}
-  if(!response.ok){const error=new Error(data?.error?.message||'This request could not be completed.');error.code=data?.error?.code;error.status=response.status;error.workspace=data?.workspace;error.actions=data?.actions;error.conversation=data?.conversation;error.conversationId=data?.conversationId;error.hostActions=data?.hostActions;error.capability=data?.capability;error.workJob=data?.workJob;error.projectFileEdit=data?.projectFileEdit;error.projectContext=data?.projectContext;error.continuation=data?.continuation;throw error;}
+  if(!response.ok){const error=new Error(data?.error?.message||'This request could not be completed.');error.code=data?.error?.code;error.status=response.status;error.workspace=data?.workspace;error.actions=data?.actions;error.conversation=data?.conversation;error.conversationId=data?.conversationId;error.hostActions=data?.hostActions;error.capability=data?.capability;error.workJob=data?.workJob;error.projectFileEdit=data?.projectFileEdit;error.projectContext=data?.projectContext;error.continuation=data?.continuation;error.receipt=data?.receipt;throw error;}
   return data;
 }
 async function boundedApi(path,options={},milliseconds=15000){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),milliseconds);try{return await api(path,{...options,signal:controller.signal});}catch(error){if(error.name==='AbortError')throw new Error('This request took too long. Check the connection and try again.');throw error;}finally{clearTimeout(timeout);}}
@@ -298,6 +300,12 @@ function syncProviderCheckSelection(){const provider=activeProvider(),key=JSON.s
 function captureProviderCheckContext(){syncProviderCheckSelection();const provider=activeProvider();return {providerId:currentView==='settings'?provider?.id||null:null,revision:currentView==='settings'?provider?.revision||null:null,generation:providerCheckSelectionGeneration};}
 function currentProviderCheckContext(context){syncProviderCheckSelection();const provider=activeProvider();return !!context&&currentView==='settings'&&context.providerId===provider?.id&&context.revision===provider?.revision&&context.generation===providerCheckSelectionGeneration;}
 async function testSelectedProvider(context){if(!context?.providerId||!currentProviderCheckContext(context))throw new Error('Open Settings with the intended AI selected, then say “test connection”.');const result=await providerChecksUI.startCheck(context.providerId,context.revision);if(!result)throw new Error('The connection test response was not confirmed. Use Check test before trying again.');return result;}
+async function workspaceBackupApi(path,options={},milliseconds=20000){
+  if(runtimeReconnectPromise||runtimeRestartSubmitting)throw Object.assign(new Error('Companion is reconnecting. Wait, then check any unconfirmed import.'),{status:409});
+  if(path==='backup-recovery/import'&&pendingWorkspaceRequest)throw Object.assign(new Error('Confirm the previous workspace change before importing. Your selected copies are kept.'),{status:409});
+  try{return await continuationApi(path,options,milliseconds);}catch(error){if(error.workspace)applyWorkspace(error.workspace);throw error;}
+}
+function initWorkspaceBackups(){workspaceBackupsUI=createWorkspaceBackupsUI({container:$('workspace-backups-container'),api:workspaceBackupApi,getRevision:()=>workspace?.revision??null,onImported:async(_receipt,value)=>{if(value)applyWorkspace(value);else await refreshWorkspace();},notify:toast});}
 function initProviderChecksUI(){providerChecksUI=createProviderChecksUI({api:continuationApi,onCheck:applyProviderCheck});}
 function applyProviderCheck(check){providers=providers.map(provider=>provider.id===check.providerId&&!(provider.connectionCheck&&Date.parse(provider.connectionCheck.createdAt)>Date.parse(check.createdAt))?{...provider,connectionCheck:check,verified:provider.ready===true&&provider.revision===check.revision&&check.configurationMatches&&check.observedThisSession&&check.status==='passed'}:provider);renderProviders();renderService();}
 function activeProvider(){return providers.find(provider=>provider.id===activeProviderId);}
@@ -1341,9 +1349,9 @@ $('hands-free').addEventListener('change',()=>{if($('hands-free').checked)void s
 $('settings-read-aloud').addEventListener('change',()=>{$('read-aloud').checked=$('settings-read-aloud').checked;$('read-aloud').dispatchEvent(new Event('change'));});
 $('read-aloud').addEventListener('change',()=>{$('settings-read-aloud').checked=$('read-aloud').checked;});
 document.addEventListener('visibilitychange',()=>{if(document.hidden){setVoiceVisible(false);if(voicePipeline||recording||microphoneOpening)cancelTurn(false,{preserveVoice:true});else{disableHandsFree();stopSpeech();}$('provider-key').value='';}else{void setVoiceVisible(true);void checkService();void refreshConversations({initialize:true,quiet:true});}});
-window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;projectFilesUI?.close();buildContinuationUI?.close();buildAttemptsUI?.close();providerChecksUI?.close();for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
+window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;projectFilesUI?.close();buildContinuationUI?.close();buildAttemptsUI?.close();providerChecksUI?.close();workspaceBackupsUI?.close();for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
 window.addEventListener('pageshow',event=>{if(!event.persisted)return;destroyed=false;setBusy(false);setState('idle');updateVoiceHelp();void setVoiceVisible(true);void checkService();void loadExtensions();});
-initProjectFiles();initBuildContinuationUI();initBuildAttemptsUI();initProviderChecksUI();initNativeShell();initVoiceSession();renderWindowContext();renderProjectContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
+initProjectFiles();initBuildContinuationUI();initBuildAttemptsUI();initProviderChecksUI();initWorkspaceBackups();initNativeShell();initVoiceSession();renderWindowContext();renderProjectContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
 void checkService();void loadExtensions();
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;renderFocus();if(currentView==='tasks')refreshTaskClock();if(currentView==='build')void buildContinuationUI?.refresh();if(jobs.some(job=>ACTIVE_JOBS.has(job.status))||currentView==='build')void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});},2000);
 setInterval(()=>{if(!document.hidden&&!destroyed&&!operationBusy&&!runtimeReconnectPromise)void refreshWorkspace().catch(error=>{$('connection-label').textContent=error.message;});},5000);
