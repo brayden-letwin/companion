@@ -16,6 +16,8 @@ import { normalizeProjectBinding, projectReference, projectEditReference } from 
 import {createContinuationRuntime} from './continuation-runtime.mjs';
 import {continuationReference} from './continuation-context.mjs';
 import {createProviderCheckService} from './provider-checks.mjs';
+import {createDeadlineContext,resolveLocalDeadline} from '../src/core/productivity-deadlines.mjs';
+import {taskDeadlineView,formatDeadlineInstant} from './task-deadline-view.mjs';
 
 const OWNER = 'local-workspace';
 const BASE = '/api/assistant';
@@ -51,7 +53,16 @@ async function readJson(req, limit = 2 * 1024 * 1024) {
   let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw fail(400, 'invalid_json', 'Provide a JSON object.'); }
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw fail(400, 'invalid_json', 'Provide a JSON object.'); return body;
 }
-const routeMatches = route => ['/chat','/work','/continuations','/context','/projects','/projects/choose','/conversations','/providers','/provider-checks','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
+function deadlineQuery(req,allowed){
+ const params=new URL(req.url,'http://localhost').searchParams,result={};
+ for(const key of params.keys()){
+  const value=params.get(key);if(!allowed.includes(key)||params.getAll(key).length!==1)throw fail(400,'invalid_deadline_query','Use only the named deadline query fields once.');
+  if(key==='expectedRevision'){if(!/^(0|[1-9]\d{0,15})$/.test(value)||!Number.isSafeInteger(Number(value)))throw fail(400,'invalid_revision','Use the current workspace revision.');result[key]=Number(value);}
+  else{if(!value||value.length>(key==='timezone'?100:40))throw fail(400,'invalid_deadline_query','Use bounded timezone and date/time values.');result[key]=value;}
+ }
+ return result;
+}
+const routeMatches = route => ['/chat','/work','/continuations','/context','/projects','/projects/choose','/conversations','/providers','/provider-checks','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/deadline-context','/deadline-resolve','/task-deadlines','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
   || /^\/api\/assistant\/provider-checks\/[a-f\d-]+(?:\/cancel)?$/i.test(route)
   || /^\/api\/assistant\/features\/[a-f\d-]+\/attempts\/[0-9]+$/i.test(route)
   || /^\/api\/assistant\/continuations\/[a-f\d-]+(?:\/(?:continue|cancel))?$/i.test(route)
@@ -234,11 +245,19 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         if (++window.count > 240) throw fail(429, 'rate_limited', 'Too many workspace requests. Try again in a minute.');
         session.windows?.set('productivity', window);
         const services = await runtime();
+        if(['/deadline-context','/deadline-resolve','/task-deadlines'].some(suffix=>route===BASE+suffix)&&req.method!=='GET')throw fail(405,'method_not_allowed','Use GET to inspect deadline context and civil time.');
         if(route===BASE+'/provider-checks'||/^\/api\/assistant\/provider-checks\//i.test(route)){
           if(!services.providerChecks||services.providerChecks.unavailable)throw fail(503,'provider_checks_unavailable','Connection tests are unavailable in this runtime.');
         }
         if(req.method!=='GET'&&/^\/api\/assistant\/features\/[a-f\d-]+\/attempts\/[0-9]+$/i.test(route))throw fail(405,'method_not_allowed','Use GET to inspect retained build attempts.');
         if (req.method === 'GET') {
+          if(route===BASE+'/deadline-context'){deadlineQuery(req,[]);json(res,200,createDeadlineContext({asOf:now}));return true;}
+          if(route===BASE+'/deadline-resolve'){
+            const query=deadlineQuery(req,['timezone','localDateTime','dueAt']);
+            if((query.localDateTime===undefined)===(query.dueAt===undefined)||query.timezone===undefined)throw fail(400,'invalid_deadline_query','Supply a timezone and exactly one localDateTime or qualified dueAt.');
+            json(res,200,query.localDateTime!==undefined?resolveLocalDeadline({localDateTime:query.localDateTime,timezone:query.timezone}):formatDeadlineInstant(query.dueAt,query.timezone,now));return true;
+          }
+          if(route===BASE+'/task-deadlines'){const query=deadlineQuery(req,['timezone','expectedRevision']);json(res,200,taskDeadlineView(services.store.snapshot(),query,now));return true;}
           if(route===BASE+'/provider-checks'){projectQuery(req,[]);json(res,200,await services.providerChecks.list());return true;}
           const providerCheck=/^\/api\/assistant\/provider-checks\/([a-f\d-]+)$/i.exec(route);
           if(providerCheck){projectQuery(req,[]);if(!UUID.test(providerCheck[1]))throw fail(400,'invalid_provider_check','Choose an actual connection test UUID.');json(res,200,await services.providerChecks.get(providerCheck[1]));return true;}

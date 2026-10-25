@@ -1,4 +1,7 @@
+import { createDeadlineContext, matchesDeadline, taskDeadline, normalizeDeadline } from '../src/core/productivity-deadlines.mjs';
+
 const MAX_BYTES = 48 * 1024;
+const QUERY_FIELDS = ['status', 'priority', 'project', 'unassigned', 'dueBefore', 'deadline', 'timezone', 'asOf', 'offset', 'limit', 'expectedRevision'];
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const fail = (message, code = 'invalid_tool', statusCode = 400) => Object.assign(new Error(message), { code, statusCode });
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -21,33 +24,37 @@ function snapshot(state, args) {
   return state;
 }
 function timestamp(value) {
-  if (typeof value !== 'string' || value.length > 40) throw fail('dueBefore needs a timezone-explicit ISO timestamp.');
-  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
-  const milliseconds = Date.parse(value);
-  if (!match || !Number.isFinite(milliseconds) || Number(match[2]) > 23 || Number(match[3]) > 59 || Number(match[4]) > 59 || Number(match[5] || 0) > 23 || Number(match[6] || 0) > 59) throw fail('dueBefore needs a valid timezone-explicit ISO timestamp.');
-  const day = new Date(match[1] + 'T00:00:00.000Z');
-  if (!Number.isFinite(day.getTime()) || day.toISOString().slice(0, 10) !== match[1]) throw fail('dueBefore needs a valid calendar date.');
-  return milliseconds;
+  if (typeof value !== 'string' || !value.length || value.length > 40) throw fail('dueBefore needs a timezone-explicit ISO timestamp.');
+  try { return Date.parse(normalizeDeadline({ dueAt: value }).dueAt); }
+  catch { throw fail('dueBefore needs an exact timezone-explicit ISO timestamp with at most three fractional digits.'); }
 }
-function filters(args) {
+function queryContext(args, now) {
+  if (typeof now !== 'number' || !Number.isFinite(now)) throw fail('Use a finite timestamp for task queries.');
+  if ((args.offset ?? 0) > 0 && ['today','overdue','upcoming'].includes(args.deadline) && (args.asOf === undefined || args.timezone === undefined)) throw fail('Continue a relative deadline query with the original asOf and timezone.', 'deadline_context_required');
+  return createDeadlineContext({ timezone: args.timezone, asOf: args.asOf === undefined ? now : args.asOf });
+}
+function filters(args, context) {
   if (args.status !== undefined && !['todo', 'done'].includes(args.status)) throw fail('Choose todo or done, or omit status for all tasks.');
   if (args.priority !== undefined && !['normal', 'high'].includes(args.priority)) throw fail('Choose normal or high priority.');
   if (args.project !== undefined && (typeof args.project !== 'string' || !args.project.trim() || args.project.length > 100)) throw fail('Use a nonblank project name, or unassigned for tasks without a project.');
   if (args.unassigned !== undefined && typeof args.unassigned !== 'boolean') throw fail('unassigned must be true or false.');
   if (args.project !== undefined && args.unassigned !== undefined) throw fail('Use project or unassigned, not both.');
+  if (args.deadline !== undefined && !['all','today','overdue','upcoming','none'].includes(args.deadline)) throw fail('Choose all, today, overdue, upcoming or none.', 'invalid_deadline_filter');
   const before = args.dueBefore === undefined ? null : timestamp(args.dueBefore);
+  const beforeInstant = task => { const deadline = taskDeadline(task, context); return deadline.kind === 'instant' && Date.parse(deadline.instant) < before; };
   return task => (!args.status || task.status === args.status)
     && (!args.priority || task.priority === args.priority)
     && (args.project === undefined || typeof projectName(task) === 'string' && projectName(task).toLowerCase() === args.project.toLowerCase())
     && (args.unassigned === undefined || (projectName(task) === '') === args.unassigned)
-    && (before === null || task.dueAt != null && task.dueAt !== '' && Number.isFinite(Date.parse(task.dueAt)) && Date.parse(task.dueAt) < before);
+    && (before === null || beforeInstant(task))
+    && matchesDeadline(task, args.deadline ?? 'all', context);
 }
 function metadata(task) {
   const project = projectName(task);
   if (!object(task) || typeof task.id !== 'string' || task.id.length > 80 || typeof task.title !== 'string' || task.title.length > 300 || typeof project !== 'string' || project.length > 100 || !['todo', 'done'].includes(task.status)
     || task.priority != null && (typeof task.priority !== 'string' || task.priority.length > 40)
-    || [task.dueAt, task.createdAt, task.updatedAt].some(date => date != null && (typeof date !== 'string' || date.length > 100))) throw fail('A saved task has invalid metadata.', 'invalid_task_state', 500);
-  return { id: task.id, title: task.title, status: task.status, priority: task.priority, project, dueAt: task.dueAt, createdAt: task.createdAt, updatedAt: task.updatedAt };
+    || [task.dueDate, task.dueAt, task.createdAt, task.updatedAt].some(date => date != null && (typeof date !== 'string' || date.length > 100))) throw fail('A saved task has invalid metadata.', 'invalid_task_state', 500);
+  return { id: task.id, title: task.title, status: task.status, priority: task.priority, project, dueDate: task.dueDate ?? null, dueAt: task.dueAt, createdAt: task.createdAt, updatedAt: task.updatedAt };
 }
 function details(task) {
   const value = task.details ?? '';
@@ -73,10 +80,10 @@ function boundedPage(items, args, base, key, map = value => value) {
 }
 
 /** The store appends tasks in creation order; page that stable insertion order without a newest-only slice. */
-export function listTasks(state, args = {}) {
-  fields(args, ['status', 'priority', 'project', 'unassigned', 'dueBefore', 'offset', 'limit', 'expectedRevision']); snapshot(state, args);
-  const matching = state.tasks.filter(filters(args));
-  return boundedPage(matching, args, { total: matching.length, revision: state.revision }, 'tasks', preview);
+export function listTasks(state, args = {}, now = Date.now()) {
+  fields(args, QUERY_FIELDS); snapshot(state, args);
+  const context = queryContext(args, now), matching = state.tasks.filter(filters(args, context));
+  return boundedPage(matching, args, { total: matching.length, revision: state.revision, asOf: context.asOf, timezone: context.timezone, today: context.today }, 'tasks', preview);
 }
 
 export function readTask(state, args = {}) {
@@ -92,27 +99,30 @@ export function readTask(state, args = {}) {
   return result;
 }
 
-const counts = () => ({ totalTasks: 0, openTasks: 0, completedTasks: 0, highPriorityOpenTasks: 0, overdueOpenTasks: 0 });
-function count(result, task, now) {
+const counts = () => ({ totalTasks: 0, openTasks: 0, completedTasks: 0, highPriorityOpenTasks: 0, overdueOpenTasks: 0, todayOpenTasks: 0, upcomingOpenTasks: 0, noDeadlineOpenTasks: 0 });
+function count(result, task, context) {
   result.totalTasks += 1;
   if (task.status === 'done') result.completedTasks += 1;
   if (task.status === 'todo') {
     result.openTasks += 1;
     if (task.priority === 'high') result.highPriorityOpenTasks += 1;
-    if (task.dueAt != null && task.dueAt !== '' && Number.isFinite(Date.parse(task.dueAt)) && Date.parse(task.dueAt) < now) result.overdueOpenTasks += 1;
+    const deadline = taskDeadline(task, context);
+    if (deadline.overdue) result.overdueOpenTasks += 1;
+    if (deadline.today) result.todayOpenTasks += 1;
+    if (deadline.upcoming) result.upcomingOpenTasks += 1;
+    if (deadline.kind === 'none') result.noDeadlineOpenTasks += 1;
   }
 }
 const compare = (left, right) => left.localeCompare(right, 'en') || (left < right ? -1 : left > right ? 1 : 0);
 
 export function summarizeTasks(state, args = {}, now = Date.now()) {
-  fields(args, ['status', 'priority', 'project', 'unassigned', 'dueBefore', 'offset', 'limit', 'expectedRevision']); snapshot(state, args);
-  if (typeof now !== 'number' || !Number.isFinite(now)) throw fail('Use a finite timestamp for task summaries.');
-  const matching = state.tasks.filter(filters(args)), totals = counts(), groups = new Map();
+  fields(args, QUERY_FIELDS); snapshot(state, args);
+  const context = queryContext(args, now), matching = state.tasks.filter(filters(args, context)), totals = counts(), groups = new Map();
   for (const task of matching) {
-    metadata(task); count(totals, task, now); const project = projectName(task);
+    metadata(task); count(totals, task, context); const project = projectName(task);
     if (!groups.has(project)) groups.set(project, { project, ...counts() });
-    count(groups.get(project), task, now);
+    count(groups.get(project), task, context);
   }
   const projects = [...groups.values()].sort((left, right) => compare(left.project, right.project));
-  return boundedPage(projects, args, { ...totals, projectCount: projects.length, asOf: new Date(now).toISOString(), revision: state.revision }, 'projects');
+  return boundedPage(projects, args, { ...totals, projectCount: projects.length, asOf: context.asOf, timezone: context.timezone, today: context.today, revision: state.revision }, 'projects');
 }

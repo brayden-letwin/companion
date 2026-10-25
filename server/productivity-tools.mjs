@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { BUILTIN_TOOL_DEFINITIONS, builtinCatalog, validateToolArguments, capabilityHash, validateWorkflowSteps } from './capability-registry.mjs';
 import { listTasks, readTask, summarizeTasks } from './task-queries.mjs';
 import { listWorkflows, readWorkflow } from './workflow-queries.mjs';
+import { createDeadlineContext, taskDeadline, resolveLocalDeadline } from '../src/core/productivity-deadlines.mjs';
 import { PROJECT_FILES_TOOL_NAME, projectFilesCatalogEntry } from './project-files-tool.mjs';
 import {continuationReference,continuationPriorEffect} from './continuation-context.mjs';
 const defaultExecuteCapability=async options=>(await import('./capability-runtime.mjs')).executeCapability(options);
@@ -11,6 +12,16 @@ const fail = (message, code = 'invalid_tool') => Object.assign(new Error(message
 function operationId(requestId, callId) { const h = createHash('sha256').update(`${requestId}:${callId}`).digest('hex').slice(0, 32); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`; }
 function executionBudget(context){if(!context.executionBudget)context.executionBudget={remaining:48};const budget=context.executionBudget;if(!budget||!Number.isInteger(budget.remaining)||budget.remaining<0||budget.remaining>48)throw fail('Use a bounded shared execution budget.');return budget;}
 function validateArguments(name,value,registry) { const definition=registry.get(name); if(!definition)throw fail('That tool is not registered. Ask Companion to build the missing feature.'); return validateToolArguments(definition,value); }
+function taskMutationResult(result, id) {
+  const receipt = { task: result.task || { id }, appliedRevision: result.appliedRevision ?? null, replayed: result.replayed,
+    ...(!result.task || result.originalTaskUnavailable ? { originalTaskUnavailable: true } : {}) };
+  if (result.task && !result.originalTaskUnavailable && Buffer.byteLength(JSON.stringify(receipt)) > 16 * 1024) {
+    const { details, ...metadata } = result.task;
+    receipt.task = { ...metadata, detailsOmitted: true, detailsLength: typeof details === 'string' ? details.length : 0 };
+    receipt.detailsOmitted = true;
+  }
+  return receipt;
+}
 
 function inspectFeatureBuild(job, requestedId, requestOffset = 0, selectedAttempt) {
   const currentStatus=job?.status;
@@ -211,11 +222,11 @@ export function createProductivityTools({ store, builder, desktop, root, work, p
     switch (name) {
       case 'list_capabilities': return {capabilities:catalog().filter(item=>item.kind==='capability'||item.name===PROJECT_FILES_TOOL_NAME),ready:capabilityStatus.ready!==false,...(capabilityStatus.ready===false?{unavailableReason:capabilityStatus.unavailableReason||capabilityStatus.message||'The capability registry could not be loaded.'}:{})};
       case 'run_capability': return runCapability(args.name,args.arguments,context);
-      case 'list_tasks': return listTasks(state,args);
+      case 'list_tasks': return listTasks(state,args,now());
       case 'read_task': return readTask(state,args);
       case 'summarize_tasks': return summarizeTasks(state,args,now());
-      case 'create_task': { const result = mutate('addTask', args); return { task: result.workspace.tasks.find(item => item.id === result.entityId), replayed: result.replayed }; }
-      case 'update_task': case 'complete_task': { const result = mutate(name === 'update_task' ? 'updateTask' : 'completeTask', args); return { task: result.workspace.tasks.find(task => task.id === args.taskId), replayed: result.replayed }; }
+      case 'create_task': { const result = mutate('addTask', args); return taskMutationResult(result, result.entityId); }
+      case 'update_task': case 'complete_task': { const result = mutate(name === 'update_task' ? 'updateTask' : 'completeTask', args); return taskMutationResult(result, args.taskId); }
       case 'list_notes': case 'search_notes': {
         const terms = (args.query || '').toLowerCase().split(/\s+/).filter(Boolean);
         return { notes: state.notes.filter(note => (args.includeArchived || !note.archived) && terms.every(term => `${note.title}\n${note.text}\n${note.tags.join(' ')}`.toLowerCase().includes(term))).slice(-30).map(note => ({ ...note, text: note.text.slice(0, 1200), truncated: note.text.length > 1200 })), revision: state.revision };
@@ -230,8 +241,14 @@ export function createProductivityTools({ store, builder, desktop, root, work, p
       case 'start_focus': return { focus: mutate('startFocus', args).workspace.focus };
       case 'stop_focus': return { focus: mutate('stopFocus', {}).workspace.focus };
       case 'get_time': {
-        let formatted; try { formatted = new Intl.DateTimeFormat('en-CA', { dateStyle: 'full', timeStyle: 'long', timeZone: args.timezone }).format(new Date(now())); } catch { throw fail('Choose a valid IANA timezone.', 'invalid_timezone'); }
-        return { iso: new Date(now()).toISOString(), formatted, timezone: args.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone };
+        if (args.action === 'resolve') {
+          if (args.timezone === undefined) throw fail('Choose an explicit IANA timezone before resolving a local time.', 'invalid_timezone');
+          return resolveLocalDeadline(args);
+        }
+        if (args.localDateTime !== undefined) throw fail('Use action resolve to convert a local wall time.');
+        const context = createDeadlineContext({ timezone: args.timezone, asOf: now() });
+        const formatted = new Intl.DateTimeFormat('en-CA', { dateStyle: 'full', timeStyle: 'long', timeZone: context.timezone }).format(new Date(context.now));
+        return { iso: context.asOf, formatted, timezone: context.timezone, localDate: context.today, localTime: taskDeadline({ dueAt: context.asOf }, context).time };
       }
       case 'list_workflows': return args.action === 'read' ? readWorkflow(state, args) : listWorkflows(state, args);
       case 'save_workflow': {

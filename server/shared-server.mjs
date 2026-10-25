@@ -35,6 +35,7 @@ const ASSETS = new Map([
   ['/src/provider-checks.mjs', ['src/provider-checks.mjs', 'text/javascript; charset=utf-8']],
   ['/src/assistant.css', ['src/assistant.css', 'text/css; charset=utf-8']],
   ['/src/core/assistant.mjs', ['src/core/assistant.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/core/productivity-deadlines.mjs', ['src/core/productivity-deadlines.mjs', 'text/javascript; charset=utf-8']],
   ['/src/core/discussion.mjs', ['src/core/discussion.mjs', 'text/javascript; charset=utf-8']],
   ['/src/core/math.mjs', ['src/core/math.mjs', 'text/javascript; charset=utf-8']],
   ['/src/core/tutor.mjs', ['src/core/tutor.mjs', 'text/javascript; charset=utf-8']],
