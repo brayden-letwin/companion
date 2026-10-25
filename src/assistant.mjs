@@ -29,6 +29,9 @@ let generation = 0, activeRequest = null, recording = null, microphoneOpening = 
 let speechGeneration = 0, speechResolve = null, voicePipeline = false, destroyed = false, messages = [], latestAnswer = null, toastTimer = null;
 let workflowEditingId = null, workflowEditingRevision = null, workflowDraft = [], featureRenderKey = '', extensionRefreshKey = '', extensionGeneration = 0;
 const extensions = new Map();
+let extensionProblems=[],toolCatalog=[],toolCatalogReady=false,toolCatalogError='',toolCatalogPending=null,capabilityStatus=null;
+const knownFeatureNames=new Set();
+const workflowFieldDrafts=new WeakMap();
 const runningWorkflows = new Set(), workflowResults = new Map();
 const jobDetails = new Map(), jobDetailPending = new Set();
 const jobDetailRetryAt = new Map();
@@ -84,10 +87,10 @@ function adoptConversation(detail,context){
   if(localChatTurn?.conversationId===detail.id&&detail.turns.some(turn=>turn.id===localChatTurn.id))clearAcceptedDraft(localChatTurn);
   renderSavedConversation();renderConversationControls();return true;
 }
-function attachSavedFeatureLink(article,featureJob){const job=featureJob?.job||featureJob;if(!job?.id)return;article.append(button('View feature build ↗','quiet-button',()=>{selectedJobId=job.id;showView('build');}));}
+function attachSavedFeatureLink(article,featureJob){const job=featureJob?.job||featureJob;if(!job?.id)return;article.append(button('View feature build ↗','quiet-button',()=>{selectedJobId=job.id;showView('build');}));appendInstalledFeatureReady(article,jobDetails.get(job.id)||jobs.find(item=>item.id===job.id));}
 function renderSavedConversation(){
   const merged=new Map([...conversationEarlierTurns,...(conversationDetail?.turns||[])].map(turn=>[turn.id,turn]));const turns=[...merged.values()];if(localChatTurn?.conversationId===conversationId&&!turns.some(turn=>turn.id===localChatTurn.id))turns.push(localChatTurn);
-  const key=JSON.stringify([conversationId,conversationDetail?.revision,turns,desktopActions.map(action=>[action.id,action.status])]);if(key===conversationRenderKey)return;conversationRenderKey=key;
+  const key=JSON.stringify([conversationId,conversationDetail?.revision,turns,desktopActions.map(action=>[action.id,action.status]),jobs.map(job=>[job.id,job.status,job.updatedAt]),[...extensions.values()].map(entry=>[entry.featureId,entry.ready])]);if(key===conversationRenderKey)return;conversationRenderKey=key;
   const scroll=$('content-scroll'),previousTop=scroll.scrollTop,nearBottom=scroll.scrollHeight-scroll.scrollTop-(scroll.clientHeight||0)<120;
   messages=[];latestAnswer=null;$('messages').replaceChildren();$('welcome-card').hidden=turns.length>0;$('today-summary').hidden=turns.length>0;$('today-bottom').hidden=turns.length>0;
   const labels={running:'Working…',failed:'Could not finish',cancelled:'Stopped',interrupted:'Interrupted'};
@@ -188,6 +191,7 @@ function showView(view) {
   $('content-scroll').scrollTop=0;
   if(view==='settings'){renderMemory();renderProviders();renderRuntime();if(!mcpConfiguration)void loadIntegrations();void refreshDesktop().catch(error=>{$('desktop-settings-status').textContent=error.message;});}
   if(view==='build'){renderJobs();refreshJobsSafely();}
+  if(view==='workflows')void refreshToolCatalog({quiet:true});
   if(view==='desktop')void refreshDesktop().catch(error=>{$('desktop-error').textContent=error.message;});
   if(view!=='settings')$('provider-key').value='';
 }
@@ -201,7 +205,7 @@ async function api(path,options={}) {
   try{response=await fetch('/api/assistant/'+path,{...rest,headers,credentials:'same-origin',cache:'no-store',redirect:'error',signal});}
   catch(error){if(error.name==='AbortError')throw error;throw new Error('Companion’s service could not be reached. Double-click Start Companion.cmd, then check again.');}
   let data;try{data=await response.json();}catch{throw new Error('The service returned an unreadable response. Check the connection and try again.');}
-  if(!response.ok){const error=new Error(data?.error?.message||'This request could not be completed.');error.code=data?.error?.code;error.status=response.status;error.workspace=data?.workspace;error.actions=data?.actions;error.conversation=data?.conversation;error.conversationId=data?.conversationId;throw error;}
+  if(!response.ok){const error=new Error(data?.error?.message||'This request could not be completed.');error.code=data?.error?.code;error.status=response.status;error.workspace=data?.workspace;error.actions=data?.actions;error.conversation=data?.conversation;error.conversationId=data?.conversationId;error.hostActions=data?.hostActions;error.capability=data?.capability;throw error;}
   return data;
 }
 async function boundedApi(path,options={},milliseconds=15000){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),milliseconds);try{return await api(path,{...options,signal:controller.signal});}catch(error){if(error.name==='AbortError')throw new Error('This request took too long. Check the connection and try again.');throw error;}finally{clearTimeout(timeout);}}
@@ -225,7 +229,7 @@ async function checkService({reconnecting=false,force=false,deadline=Infinity}={
       if(results[3].status==='fulfilled'&&Array.isArray(results[3].value.jobs)){jobs=results[3].value.jobs;if(!selectedJobId&&jobs.length)selectedJobId=jobs[0].id;renderJobs();}else if(results[3].status==='rejected')serviceError||=results[3].reason.message;
       if(results[4].status==='fulfilled')applyRuntime(results[4].value);
       if(results[5].status==='fulfilled')applyDesktopStatus(results[5].value);
-      void refreshConversations({initialize:true,quiet:true});
+      void refreshConversations({initialize:true,quiet:true});void refreshToolCatalog({quiet:true});
       return {workspaceReady:results[2].status==='fulfilled',jobsReady:results[3].status==='fulfilled',runtimeReady:results[4].status==='fulfilled'};
     }catch(error){if(check===serviceCheckGeneration){serviceError=error.message;providers=[];activeProviderId='';service={transcriptionReady:false};}return {workspaceReady:false,jobsReady:false,runtimeReady:false};}
     finally{if(check===serviceCheckGeneration){renderProviders();renderService();renderRuntime();$('connection-refresh').disabled=!!runtimeReconnectPromise;$('retry-service').disabled=!!runtimeReconnectPromise;checkingService=null;}}
@@ -314,12 +318,48 @@ async function reconnectAfterRestart(metadata,{jobId=null,action='restart'}={}){
 }
 $('runtime-retry').addEventListener('click',()=>{if(!runtimeRetry||runtimeReconnectPromise)return;const retry={...runtimeRetry};void reconnectAfterRestart({managed:true,restartRequested:true,workerPid:retry.baselinePid},retry).catch(error=>toast(error.message));});
 $('restart-runtime').addEventListener('click',async()=>{if(runtimeReconnectPromise||!runtimeInfo?.managed)return;$('restart-runtime').disabled=true;try{const value=await boundedApi('runtime/restart',{method:'POST',body:JSON.stringify({})},15000);await reconnectAfterRestart(value);}catch(error){toast(error.message);}finally{renderRuntime();}});
+function humanLabel(value){return String(value||'').replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/[_-]+/g,' ').replace(/^./,letter=>letter.toUpperCase());}
+function toolLabel(name){const meta=toolCatalog.find(item=>item.name===name);return meta?.title||humanLabel(name);}
+function applyToolCatalog(value){
+  if(!Array.isArray(value?.tools)||value.tools.length>512)throw new Error('Available actions could not be read.');
+  const counts=new Map();for(const item of value.tools)if(item?.name)counts.set(item.name,(counts.get(item.name)||0)+1);
+  toolCatalog=value.tools.filter(item=>item&&/^[a-z][a-z0-9_]{0,99}$/.test(item.name)&&counts.get(item.name)===1&&item.parameters&&typeof item.parameters==='object').map(item=>clone(item));
+  capabilityStatus=value.capabilityStatus||null;toolCatalogReady=true;toolCatalogError='';renderToolsCatalog();renderWorkflows();if($('workflow-dialog').open)renderWorkflowSteps();
+}
+async function refreshToolCatalog({quiet=false}={}){
+  if(toolCatalogPending)return toolCatalogPending;
+  toolCatalogPending=(async()=>{try{const value=await boundedApi('integrations');applyToolCatalog(value);return value;}catch(error){toolCatalogError=error.message;renderToolsCatalog();if($('workflow-dialog').open)renderWorkflowSteps();if(!quiet)throw error;return null;}finally{toolCatalogPending=null;}})();return toolCatalogPending;
+}
+function normalizedFeatureName(value){return String(value||'').normalize('NFKC').trim().toLocaleLowerCase().replace(/\s+/g,' ');}
+function featureNames(entry){return [...new Set([entry.title,...(entry.aliases||[])].map(normalizedFeatureName).filter(Boolean))];}
+function showToolsList(message=''){ensureCornerExpanded();$('tools-menu').open=true;$('tools-message').textContent=message;$('tools-message').hidden=!message;renderToolsCatalog();}
+function openInstalledFeature(id){const entry=extensions.get('extension-'+id);if(!entry?.ready){showToolsList(entry?.error?entry.title+' could not open. Review its status below.':'That tool is not available in this interface.');return false;}showView('extension-'+id);$('tools-menu').open=false;return true;}
+function openFeatureByName(name,{unknown=true}={}){
+  const normalized=normalizedFeatureName(name),matches=[...extensions.values()].filter(entry=>featureNames(entry).includes(normalized));
+  if(matches.length>1){showToolsList('More than one tool matches “'+name+'”. Choose the tool below.');return true;}
+  if(matches.length===1){openInstalledFeature(matches[0].featureId);return true;}
+  const capability=toolCatalog.find(item=>item.kind==='capability'&&[item.title,item.name].some(value=>normalizedFeatureName(value)===normalized));
+  if(capability){showToolsList((capability.title||humanLabel(capability.name))+' is available by voice. Tell Companion what you want it to do.');return true;}
+  if(unknown||knownFeatureNames.has(normalized)){showToolsList('That tool is not available. Choose an installed tool below.');return true;}return false;
+}
+function renderToolsCatalog(){
+  const list=$('extension-nav');list.replaceChildren();list.hidden=false;
+  for(const entry of extensions.values()){
+    const row=element('div','installed-tool'),open=button(entry.title,'nav-item',()=>openInstalledFeature(entry.featureId));open.setAttribute('aria-label','Open '+entry.title);open.disabled=!entry.ready;row.append(open,element('small','',entry.ready?'Say “open '+entry.title+'”':entry.error?'Could not open':'Loading…'));if(entry.error)row.append(element('p','tool-unavailable',entry.error));list.append(row);
+  }
+  for(const problem of extensionProblems)list.append(element('p','tool-unavailable',problem));
+  const panels=new Set([...extensions.values()].map(entry=>entry.capabilityId).filter(Boolean));
+  for(const meta of toolCatalog.filter(item=>item.kind==='capability'&&!panels.has(item.capabilityId)&&!extensions.has('extension-'+item.featureId))){const row=element('div','installed-tool capability-tool');row.append(element('strong','',meta.title||humanLabel(meta.name)),element('small','','Available by voice'));if(meta.description)row.append(element('p','',meta.description));list.append(row);}
+  if(capabilityStatus?.ready===false)list.append(element('p','tool-unavailable',capabilityStatus.message||'Installed actions are unavailable. Your saved work is still available.'));
+  else if(toolCatalogError)list.append(element('p','tool-unavailable',toolCatalogError));
+  if(!extensions.size&&!toolCatalog.some(item=>item.kind==='capability')&&!extensionProblems.length&&capabilityStatus?.ready!==false&&!toolCatalogError)list.append(element('p','tools-empty','No installed tools yet. Ask Companion to build one.'));
+}
 async function loadIntegrations(){
   if(integrationsPending||destroyed||runtimeReconnectPromise)return;integrationsPending=true;$('mcp-load').disabled=true;$('mcp-error').textContent='';
   mcpConfiguration='';$('mcp-copy').disabled=true;$('mcp-config-panel').hidden=true;
   try{
     if(!csrfToken)await checkService();
-    const value=await boundedApi('integrations');
+    const value=await boundedApi('integrations');applyToolCatalog(value);
     if(typeof value.mcp?.command!=='string'||!value.mcp.command||!Array.isArray(value.mcp.args)||value.mcp.args.some(arg=>typeof arg!=='string'))throw new Error('The AI tool configuration could not be read.');
     const configuration={command:value.mcp.command,args:value.mcp.args};
     if(value.mcp.env!==undefined){
@@ -565,17 +605,79 @@ $('notes-search').addEventListener('input',renderNotes);
 $('note-form').addEventListener('submit',async event=>{event.preventDefault();const text=$('new-note').value.trim(),title=$('note-title').value.trim();if(!text)return;$('note-error').textContent='';const submit=event.submitter;submit.disabled=true;try{await workspaceOperation('addNote',{text,...(title?{title}:{})});if($('new-note').value.trim()===text){$('new-note').value='';$('note-title').value='';}}catch(error){$('note-error').textContent=error.message;}finally{submit.disabled=false;}});
 function openEditor(kind,item){editingTarget={kind,id:item.id,revision:workspace.revision};$('edit-title').textContent=kind==='task'?'Edit task':'Edit note';$('edit-name').value=item.title||'';$('edit-name').required=true;$('edit-name').maxLength=kind==='task'?300:200;$('edit-text').value=kind==='task'?item.details||'':item.text;$('edit-text').maxLength=kind==='task'?12000:40000;$('task-edit-fields').hidden=kind!=='task';$('edit-priority').value=item.priority||'normal';$('edit-project').value=item.project||'';$('edit-error').textContent='';showDialog('edit-dialog');}
 $('edit-form').addEventListener('submit',async event=>{event.preventDefault();if(!editingTarget)return;const target={...editingTarget};$('edit-error').textContent='';$('edit-save').disabled=true;try{if(workspace.revision!==target.revision){editingTarget.revision=workspace.revision;throw new Error('Your workspace changed while this editor was open. Review your draft, then save again.');}await workspaceOperation(target.kind==='task'?'updateTask':'updateNote',target.kind==='task'?{taskId:target.id,title:$('edit-name').value.trim(),details:$('edit-text').value,priority:$('edit-priority').value,project:$('edit-project').value.trim()}:{noteId:target.id,title:$('edit-name').value.trim(),text:$('edit-text').value});$('edit-dialog').close();}catch(error){$('edit-error').textContent=error.message;if(editingTarget)editingTarget.revision=workspace.revision;}finally{$('edit-save').disabled=false;}});
-function renderWorkflows(){const list=$('workflow-list');list.replaceChildren();if(!workspace?.workflows.length)list.append(emptyState('No workflows yet.','Create a workflow from the actions you use often.'));
-  for(const flow of workspace?.workflows||[]){const wrapper=element('div'),card=element('article','workflow-card'),info=element('div','workflow-info');info.append(element('h2','',flow.name),element('p','',flow.description||'Saved actions, ready to run.'),element('small','',`${flow.steps?.length||0} steps${flow.enabled===false?' · Disabled':''}`));const actions=element('div','workflow-actions');const run=button(runningWorkflows.has(flow.id)?'Running…':'Run workflow ↗','secondary-button',()=>void runWorkflow(flow));run.disabled=flow.enabled===false||runningWorkflows.has(flow.id);actions.append(run,button('Edit','quiet-button',()=>openWorkflow(flow)));card.append(element('span','workflow-icon','↳'),info,actions);wrapper.append(card);const result=workflowResults.get(flow.id);if(result){const receipt=element('div','workflow-result');receipt.append(element('strong','',result.status==='completed'?'Workflow finished.':'Workflow stopped: '+(result.error||'A step could not finish.')));for(const [index,step]of(result.steps||[]).entries())receipt.append(element('div','',`${index+1}. ${STEP_TYPES[step.tool]||step.tool} · completed`));wrapper.append(receipt);}list.append(wrapper);}
+function workflowMeta(step){return toolCatalog.find(item=>item.name===step.tool);}
+function workflowAvailability(step){
+  const meta=workflowMeta(step);if(!toolCatalogReady)return {available:false,reason:toolCatalogError||'Checking available actions…',meta};
+  if(!meta)return {available:false,reason:capabilityStatus?.ready===false?'Installed actions are unavailable. Your saved step is preserved.':'This saved action is not installed. Your step is preserved.',meta};
+  if(meta.workflowAllowed!==true)return {available:false,reason:'This action is not available in workflows.',meta};
+  if(step.capability&&(meta.capabilityId!==step.capability.id||meta.version!==step.capability.version||meta.hash!==step.capability.hash))return {available:false,changed:true,reason:'This tool changed. Review the values, then choose Use updated action.',meta};
+  return {available:true,meta};
 }
-async function runWorkflow(flow){if(runningWorkflows.has(flow.id)||runtimeReconnectPromise)return;runningWorkflows.add(flow.id);renderWorkflows();$('workflow-error').textContent='';try{const result=await boundedApi(`workspace/workflows/${encodeURIComponent(flow.id)}/run`,{method:'POST',body:JSON.stringify({operationId:crypto.randomUUID()})},45000);workflowResults.set(flow.id,result);if(result.workspace)applyWorkspace(result.workspace);toast(result.status==='completed'?'Workflow finished.':'The workflow stopped before all steps finished.');}catch(error){$('workflow-error').textContent=error.message;}finally{runningWorkflows.delete(flow.id);renderWorkflows();}}
-function openWorkflow(flow=null){workflowEditingId=flow?.id||null;workflowEditingRevision=workspace?.revision;$('workflow-name').value=flow?.name||'';$('workflow-description').value=flow?.description||'';workflowDraft=clone(flow?.steps||[{tool:'create_task',arguments:{title:''}}]);$('workflow-form-error').textContent='';renderWorkflowSteps();showDialog('workflow-dialog');}
-const STEP_TYPES={create_task:'Create a task',save_note:'Save a note',start_focus:'Start focus time',stop_focus:'End focus time',list_tasks:'List tasks',list_notes:'List notes',search_notes:'Search notes'};
-function renderWorkflowSteps(){const list=$('workflow-steps');list.replaceChildren();workflowDraft.forEach((step,index)=>{const row=element('div','workflow-step'),header=element('div','workflow-step-header'),select=element('select');select.setAttribute('aria-label',`Action for step ${index+1}`);for(const [value,label] of Object.entries(STEP_TYPES)){const option=element('option','',label);option.value=value;select.append(option);}if(!STEP_TYPES[step.tool]){const option=element('option','',step.tool);option.value=step.tool;select.append(option);}select.value=step.tool;select.addEventListener('change',()=>{workflowDraft[index]={tool:select.value,arguments:{}};renderWorkflowSteps();});header.append(element('span','',String(index+1).padStart(2,'0')),select,button('Remove','quiet-button',()=>{workflowDraft.splice(index,1);renderWorkflowSteps();}));row.append(header);
-    if(['create_task','save_note','start_focus','search_notes'].includes(step.tool)){const field=element(step.tool==='save_note'?'textarea':'input');field.setAttribute('aria-label',step.tool==='start_focus'?'Focus minutes':`Content for step ${index+1}`);if(step.tool==='start_focus'){field.type='number';field.min='1';field.max='240';field.value=step.arguments?.minutes||25;}else{field.maxLength=step.tool==='save_note'?12000:300;field.placeholder=step.tool==='create_task'?'Task title':step.tool==='save_note'?'The note to save':'Words to search for';field.value=step.arguments?.title||step.arguments?.text||step.arguments?.query||'';}field.addEventListener('input',()=>{const key=step.tool==='create_task'?'title':step.tool==='save_note'?'text':step.tool==='start_focus'?'minutes':'query';workflowDraft[index].arguments={...workflowDraft[index].arguments,[key]:step.tool==='start_focus'?Number(field.value):field.value};});row.append(field);if(step.tool==='start_focus')workflowDraft[index].arguments={...step.arguments,minutes:Number(field.value)};}
-    list.append(row);});}
-$('new-workflow').addEventListener('click',()=>openWorkflow());$('add-workflow-step').addEventListener('click',()=>{if(workflowDraft.length>=12){toast('Keep this workflow to 12 steps.');return;}workflowDraft.push({tool:'create_task',arguments:{title:''}});renderWorkflowSteps();});
-$('workflow-form').addEventListener('submit',async event=>{event.preventDefault();$('workflow-form-error').textContent='';$('workflow-save').disabled=true;try{if(!workflowDraft.length)throw new Error('Add at least one step.');if(workflowEditingId&&workflowEditingRevision!==workspace.revision){workflowEditingRevision=workspace.revision;throw new Error('Your workspace changed. Review these steps, then save again.');}for(const[index,step]of workflowDraft.entries()){const required={create_task:'title',save_note:'text',search_notes:'query'}[step.tool];if(required&&!String(step.arguments?.[required]||'').trim())throw new Error(`Add the content for step ${index+1}.`);if(step.tool==='start_focus'&&(!Number.isInteger(step.arguments?.minutes)||step.arguments.minutes<1||step.arguments.minutes>240))throw new Error(`Choose 1 to 240 focus minutes for step ${index+1}.`);}await workspaceOperation('saveWorkflow',{...(workflowEditingId?{workflowId:workflowEditingId}:{}),name:$('workflow-name').value.trim(),description:$('workflow-description').value.trim(),steps:clone(workflowDraft),enabled:true});$('workflow-dialog').close();}catch(error){$('workflow-form-error').textContent=error.message;workflowEditingRevision=workspace?.revision;}finally{$('workflow-save').disabled=false;}});
+function schemaType(schema){return Array.isArray(schema?.type)?schema.type.find(type=>type!=='null'):schema?.type;}
+function validateWorkflowValue(value,schema={},label='Value',depth=0){
+  if(depth>8)throw new Error(label+' has too many nested details.');
+  if(value===null&&Array.isArray(schema.type)&&schema.type.includes('null'))return;
+  if(Array.isArray(schema.enum)&&!schema.enum.some(item=>JSON.stringify(item)===JSON.stringify(value)))throw new Error('Choose a listed value for '+label+'.');
+  const type=schemaType(schema);
+  if(type==='string'){if(typeof value!=='string')throw new Error(label+' must be text.');if(value.length<(schema.minLength??0)||value.length>(schema.maxLength??24000))throw new Error('Check the length of '+label+'.');}
+  else if(type==='number'||type==='integer'){if(typeof value!=='number'||!Number.isFinite(value)||(type==='integer'&&!Number.isInteger(value)))throw new Error(label+' must be '+(type==='integer'?'a whole number.':'a number.'));if(schema.minimum!==undefined&&value<schema.minimum||schema.maximum!==undefined&&value>schema.maximum||schema.exclusiveMinimum!==undefined&&value<=schema.exclusiveMinimum||schema.exclusiveMaximum!==undefined&&value>=schema.exclusiveMaximum)throw new Error(label+' is outside its allowed range.');}
+  else if(type==='boolean'){if(typeof value!=='boolean')throw new Error('Choose Yes or No for '+label+'.');}
+  else if(type==='array'){if(!Array.isArray(value))throw new Error(label+' must be a list.');if(value.length<(schema.minItems??0)||value.length>(schema.maxItems??1000))throw new Error('Check the number of items in '+label+'.');for(const item of value)validateWorkflowValue(item,schema.items||{},label+' item',depth+1);}
+  else if(type==='object'||schema.properties){if(!value||typeof value!=='object'||Array.isArray(value))throw new Error(label+' must contain details in braces.');const properties=schema.properties||{};for(const key of schema.required||[])if(value[key]===undefined||(typeof value[key]==='string'&&!value[key].trim()))throw new Error('Add '+humanLabel(key)+' for '+label+'.');for(const[key,item]of Object.entries(value)){if(!Object.hasOwn(properties,key)&&schema.additionalProperties===false)throw new Error(label+' contains an unsupported field: '+humanLabel(key)+'.');if(Object.hasOwn(properties,key))validateWorkflowValue(item,properties[key],humanLabel(key),depth+1);else if(schema.additionalProperties&&typeof schema.additionalProperties==='object')validateWorkflowValue(item,schema.additionalProperties,humanLabel(key),depth+1);}}
+  if(JSON.stringify(value)?.length>80000)throw new Error(label+' is too large.');
+}
+function workflowRawFields(step){let fields=workflowFieldDrafts.get(step);if(!fields){fields=new Map();workflowFieldDrafts.set(step,fields);}return fields;}
+function validateWorkflowSteps(steps){
+  if(!steps.length)throw new Error('Add at least one step.');
+  for(const[index,step]of steps.entries()){
+    if(!step.tool)throw new Error('Choose an action for step '+(index+1)+'.');
+    const state=workflowAvailability(step);if(!state.available)throw new Error('Step '+(index+1)+': '+state.reason);
+    for(const draft of workflowRawFields(step).values())if(draft.error)throw new Error('Step '+(index+1)+': '+draft.error);
+    validateWorkflowValue(step.arguments||{},state.meta.parameters,'step '+(index+1));
+  }
+}
+function renderWorkflows(){
+  const list=$('workflow-list');list.replaceChildren();if(!workspace?.workflows.length)list.append(emptyState('No workflows yet.','Create a workflow from the actions you use often.'));
+  for(const flow of workspace?.workflows||[]){const wrapper=element('div'),card=element('article','workflow-card'),info=element('div','workflow-info');info.append(element('h2','',flow.name),element('p','',flow.description||'Saved actions, ready to run.'),element('small','',(flow.steps?.length||0)+' steps'+(flow.enabled===false?' · Disabled':'')));const unavailable=toolCatalogReady&&(flow.steps||[]).find(step=>!workflowAvailability(step).available);if(unavailable)info.append(element('p','workflow-unavailable',workflowAvailability(unavailable).reason));
+    const actions=element('div','workflow-actions'),run=button(runningWorkflows.has(flow.id)?'Running…':'Run workflow ↗','secondary-button',()=>void runWorkflow(flow));run.disabled=flow.enabled===false||runningWorkflows.has(flow.id)||!!unavailable;actions.append(run,button('Edit','quiet-button',()=>openWorkflow(flow)));card.append(element('span','workflow-icon','↳'),info,actions);wrapper.append(card);
+    const result=workflowResults.get(flow.id);if(result){const receipt=element('div','workflow-result');receipt.append(element('strong','',result.status==='completed'?'Workflow finished.':'Workflow stopped: '+(result.error||'A step could not finish.')));for(const[index,step]of(result.steps||[]).entries()){const failed=step.status==='failed'||!!step.error||!!step.result?.error,pending=step.status==='pending';receipt.append(element('div','',(index+1)+'. '+toolLabel(step.tool)+' · '+(failed?'could not finish':pending?'needs review':'completed')));if(step.result?.capability&&step.result.value)receipt.append(element('pre','capability-output',JSON.stringify(step.result.value,null,2).slice(0,4000)));}wrapper.append(receipt);}list.append(wrapper);
+  }
+}
+async function runWorkflow(flow){
+  if(runningWorkflows.has(flow.id)||runtimeReconnectPromise)return;runningWorkflows.add(flow.id);renderWorkflows();$('workflow-error').textContent='';
+  try{await refreshToolCatalog();validateWorkflowSteps(flow.steps||[]);const result=await boundedApi('workspace/workflows/'+encodeURIComponent(flow.id)+'/run',{method:'POST',body:JSON.stringify({operationId:crypto.randomUUID()})},45000);workflowResults.set(flow.id,result);if(result.workspace)applyWorkspace(result.workspace);toast(result.status==='completed'?'Workflow finished.':'The workflow stopped before all steps finished.');}
+  catch(error){$('workflow-error').textContent=error.message;}finally{runningWorkflows.delete(flow.id);renderWorkflows();}
+}
+function openWorkflow(flow=null){workflowEditingId=flow?.id||null;workflowEditingRevision=workspace?.revision;$('workflow-name').value=flow?.name||'';$('workflow-description').value=flow?.description||'';workflowDraft=clone(flow?.steps||[{tool:'',arguments:{}}]);$('workflow-form-error').textContent='';renderWorkflowSteps();showDialog('workflow-dialog');void refreshToolCatalog({quiet:true});}
+function replaceWorkflowArgument(step,name,value){const args={...(step.arguments||{})};if(value===undefined)delete args[name];else args[name]=value;step.arguments=args;}
+function renderWorkflowField(step,index,name,schema,required){
+  const label=element('label','workflow-field field-label'),title=schema.title||humanLabel(name);label.append(element('span','',title+(required?'':' · optional')));
+  const type=schemaType(schema),value=step.arguments?.[name],draft=workflowRawFields(step).get(name);let field;
+  if(Array.isArray(schema.enum)&&schema.enum.every(item=>item===null||['string','number','boolean'].includes(typeof item))){field=element('select');const empty=element('option','',required?'Choose a value':'Not set');empty.value='';field.append(empty);schema.enum.forEach((item,position)=>{const option=element('option','',String(item));option.value=String(position);field.append(option);});const position=schema.enum.findIndex(item=>JSON.stringify(item)===JSON.stringify(value));field.value=position<0?'':String(position);field.addEventListener('change',()=>replaceWorkflowArgument(step,name,field.value===''?undefined:clone(schema.enum[Number(field.value)])));}
+  else if(type==='boolean'){field=element('select');for(const[choice,text]of[['',required?'Choose Yes or No':'Not set'],['true','Yes'],['false','No']]){const option=element('option','',text);option.value=choice;field.append(option);}field.value=typeof value==='boolean'?String(value):'';field.addEventListener('change',()=>replaceWorkflowArgument(step,name,field.value===''?undefined:field.value==='true'));}
+  else if(type==='array'||type==='object'||schema.properties||!['string','number','integer'].includes(type)){
+    field=element('textarea');field.rows=4;field.maxLength=24000;field.value=draft?.text??(value===undefined?'':JSON.stringify(value,null,2));field.placeholder=type==='array'?'[ ]':'{ }';const error=element('small','workflow-field-error',draft?.error||'');
+    field.addEventListener('input',()=>{let message='';try{if(!field.value.trim()){replaceWorkflowArgument(step,name,undefined);}else{const parsed=JSON.parse(field.value);validateWorkflowValue(parsed,schema,title);replaceWorkflowArgument(step,name,parsed);}}catch(problem){message=problem instanceof SyntaxError?'Use a valid list or details with quoted field names.':problem.message;}workflowRawFields(step).set(name,{text:field.value,error:message});error.textContent=message;});label.append(field,element('small','workflow-field-hint',type==='array'?'Enter a list in square brackets.':'Enter details in braces, with quoted field names.'),error);
+  }else{
+    field=element(type==='string'&&(schema.maxLength??0)>500?'textarea':'input');if(type==='number'||type==='integer'){field.type='number';field.step=type==='integer'?'1':'any';if(schema.minimum!==undefined)field.min=String(schema.minimum);if(schema.maximum!==undefined)field.max=String(schema.maximum);field.value=draft?.text??(value===undefined?'':String(value));}
+    else{field.maxLength=schema.maxLength??24000;field.value=value??'';if(field.tagName.toLowerCase()==='textarea')field.rows=3;}
+    field.addEventListener('input',()=>{if(type==='number'||type==='integer'){const number=field.value.trim()===''?undefined:Number(field.value),error=number!==undefined&&!Number.isFinite(number)?'Enter a valid number.':'';workflowRawFields(step).set(name,{text:field.value,error});if(!error)replaceWorkflowArgument(step,name,number);}else replaceWorkflowArgument(step,name,field.value===''&&!required?undefined:field.value);});
+  }
+  field.setAttribute('aria-label',title+' for step '+(index+1));field.dataset.argument=name;if(![...label.childNodes].includes(field))label.append(field);if(schema.description)label.append(element('small','workflow-field-hint',schema.description));return label;
+}
+function renderWorkflowSteps(){
+  const list=$('workflow-steps');list.replaceChildren();$('workflow-catalog-status').textContent=toolCatalogError||(!toolCatalogReady?'Checking available actions…':capabilityStatus?.ready===false?capabilityStatus.message||'Installed actions are unavailable.':'Choose an action, then fill in its values.');
+  const eligible=toolCatalog.filter(item=>item.workflowAllowed===true);
+  workflowDraft.forEach((step,index)=>{const state=workflowAvailability(step),row=element('div','workflow-step'),header=element('div','workflow-step-header'),select=element('select');select.setAttribute('aria-label','Action for step '+(index+1));const empty=element('option','','Choose an action');empty.value='';select.append(empty);
+    for(const meta of eligible){const option=element('option','',meta.title||humanLabel(meta.name));option.value=meta.name;select.append(option);}if(step.tool&&!eligible.some(item=>item.name===step.tool)){const option=element('option','',toolLabel(step.tool)+' · unavailable');option.value=step.tool;select.append(option);}select.value=step.tool||'';select.addEventListener('change',()=>{workflowDraft[index]={tool:select.value,arguments:{}};renderWorkflowSteps();});header.append(element('span','',String(index+1).padStart(2,'0')),select,button('Remove','quiet-button',()=>{workflowDraft.splice(index,1);renderWorkflowSteps();}));row.append(header);
+    if(step.tool&&!state.available){row.append(element('p','workflow-unavailable',state.reason));if(state.changed){row.append(button('Use updated action','secondary-button',()=>{workflowDraft[index]={tool:step.tool,arguments:clone(step.arguments||{})};renderWorkflowSteps();}));}}
+    if(state.meta?.parameters){const schema=state.meta.parameters,optional=element('details','workflow-optional');optional.append(element('summary','','More options'));let optionalCount=0;for(const[name,property]of Object.entries(schema.properties||{})){const required=(schema.required||[]).includes(name),field=renderWorkflowField(step,index,name,property,required);if(required)row.append(field);else{optionalCount++;optional.append(field);if(Object.hasOwn(step.arguments||{},name))optional.open=true;}}if(optionalCount)row.append(optional);}
+    else if(step.tool){const details=element('details','workflow-saved-values');details.append(element('summary','','Saved values'),element('pre','',JSON.stringify(step.arguments||{},null,2)));row.append(details);}
+    list.append(row);
+  });
+}
+$('new-workflow').addEventListener('click',()=>openWorkflow());$('add-workflow-step').addEventListener('click',()=>{if(workflowDraft.length>=12){toast('Keep this workflow to 12 steps.');return;}workflowDraft.push({tool:'',arguments:{}});renderWorkflowSteps();});
+$('workflow-form').addEventListener('submit',async event=>{event.preventDefault();$('workflow-form-error').textContent='';$('workflow-save').disabled=true;try{await refreshToolCatalog();if(workflowEditingId&&workflowEditingRevision!==workspace.revision){workflowEditingRevision=workspace.revision;throw new Error('Your workspace changed. Review these steps, then save again.');}validateWorkflowSteps(workflowDraft);await workspaceOperation('saveWorkflow',{...(workflowEditingId?{workflowId:workflowEditingId}:{}),name:$('workflow-name').value.trim(),description:$('workflow-description').value.trim(),steps:clone(workflowDraft),enabled:true});$('workflow-dialog').close();}catch(error){$('workflow-form-error').textContent=error.message;workflowEditingRevision=workspace?.revision;}finally{$('workflow-save').disabled=false;}});
 function renderProviders(){
   const picker=$('provider-select');picker.replaceChildren();
   if(!providers.length){const option=element('option','','No AI connected');option.value='';picker.append(option);}
@@ -602,7 +704,7 @@ function editProvider(provider){editingProviderId=provider.id;$('provider-type')
 async function removeProvider(provider){if(providerBusy||runtimeReconnectPromise)return;providerBusy=true;renderProviders();try{applyProviders(await boundedApi('providers/remove',{method:'POST',body:JSON.stringify({id:provider.id})}));toast('Connection removed.');}catch(error){toast(error.message);}finally{providerBusy=false;renderProviders();renderService();}}
 $('provider-form').addEventListener('submit',async event=>{event.preventDefault();if(providerBusy||runtimeReconnectPromise)return;providerBusy=true;$('provider-save').disabled=true;$('provider-error').textContent='';const type=$('provider-type').value,key=$('provider-key').value;const body={id:editingProviderId||type+'-'+crypto.randomUUID().slice(0,8),type,model:$('provider-model').value.trim(),label:$('provider-label').value.trim()||undefined,...(['compatible','ollama'].includes(type)&&$('provider-url').value.trim()?{baseUrl:$('provider-url').value.trim()}:{}),...(key?{apiKey:key}:{})};$('provider-key').value='';try{applyProviders(await boundedApi('providers/configure',{method:'POST',body:JSON.stringify(body)},30000));editingProviderId=null;$('provider-form').reset();providerFormType();$('connect-panel').open=false;toast('Connection saved. Choose Use this AI to select it.');}catch(error){$('provider-error').textContent=error.message;}finally{providerBusy=false;$('provider-save').disabled=false;renderProviders();renderService();}});
 $('connect-panel').addEventListener('toggle',()=>{if(!$('connect-panel').open){$('provider-key').value='';editingProviderId=null;}});
-async function refreshJobs(){if(jobsPending||destroyed)return;jobsPending=true;try{const value=await boundedApi('features');if(!Array.isArray(value.jobs))throw new Error('Feature builds could not be read.');jobs=value.jobs;if(!selectedJobId&&jobs.length)selectedJobId=jobs[0].id;renderJobs();const activation=jobs.filter(job=>['applied','rolled_back'].includes(job.status)).map(job=>job.id+':'+job.status+':'+job.updatedAt).join('|');if(activation!==extensionRefreshKey){extensionRefreshKey=activation;void loadExtensions();}}finally{jobsPending=false;}}
+async function refreshJobs(){if(jobsPending||destroyed)return;jobsPending=true;try{const value=await boundedApi('features');if(!Array.isArray(value.jobs))throw new Error('Feature builds could not be read.');jobs=value.jobs;if(!selectedJobId&&jobs.length)selectedJobId=jobs[0].id;renderJobs();const activation=jobs.filter(job=>['applied','rolled_back'].includes(job.status)).map(job=>job.id+':'+job.status+':'+job.updatedAt).join('|');if(activation!==extensionRefreshKey){extensionRefreshKey=activation;void loadExtensions();}renderSavedConversation();}finally{jobsPending=false;}}
 function refreshJobsSafely(){if(runtimeReconnectPromise)return;void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});}
 function rememberJob(job){if(!job?.id)return;if(Array.isArray(job.files)&&(!jobDetails.get(job.id)||String(job.updatedAt)>=String(jobDetails.get(job.id).updatedAt)))jobDetails.set(job.id,job);while(jobDetails.size>12){const id=jobDetails.keys().next().value;if(id===selectedJobId){const value=jobDetails.get(id);jobDetails.delete(id);jobDetails.set(id,value);}else jobDetails.delete(id);}}
 async function ensureJobDetail(id){
@@ -633,7 +735,7 @@ function renderJobs(){
   if(['ready','review_required'].includes(job.status)){const activate=button('Activate feature ↗','primary-button',()=>void jobAction(job,'apply'));activate.disabled=featureBusy||!fresh||job.verification?.passed!==true;actions.append(activate);}
   if(job.status==='applied'){actions.append(button('Reload interface ↻','secondary-button',()=>location.reload()),button('Roll back changes','quiet-button',()=>void jobAction(job,'rollback')));if(job.files?.some(file=>file.path.startsWith('electron/'))){detail.append(element('p','review-note',desktopUpdateNotice()));if(nativeSourceRuntime===true&&typeof nativeShell?.restart==='function')actions.append(button('Restart desktop ↻','secondary-button',restartNativeDesktop));}}
   if(['queued','generating','validating'].includes(job.status)){const cancel=button('Cancel build','quiet-button',()=>void jobAction(job,'cancel'));cancel.disabled=featureBusy;actions.append(cancel);}
-  if(actions.childNodes.length)detail.append(actions);
+  if(actions.childNodes.length)detail.append(actions);appendInstalledFeatureReady(detail,job);
   if(!fresh)detail.append(element('p','form-hint','Loading the actual file changes and check results…'));
   if(job.files?.length){detail.append(element('h3','checks-heading','Changes'));for(const file of job.files){const section=element('details','change-file');section.dataset.path=file.path;section.open=openFiles.has(file.path);const summary=element('summary');summary.append(element('span','',file.path),element('span','change-count',`+${file.added||0} −${file.removed||0}`));section.append(summary,element('pre','file-diff',typeof file.diff==='string'?file.diff:JSON.stringify(file.diff,null,2)));detail.append(section);}}
   const checks=job.verification?.checks||[];if(checks.length){detail.append(element('h3','checks-heading','Checks'));for(const check of checks){const row=element('div','verification-check'+(check.passed?'':' failed'));row.append(element('strong','',(check.passed?'✓ ':'× ')+check.name));if(check.output)row.append(element('pre','',check.output));detail.append(row);}}
@@ -652,17 +754,43 @@ async function jobAction(job,action){
   finally{featureBusy=false;featureRenderKey='';renderJobs();renderRuntime();}
 }
 $('build-form').addEventListener('submit',async event=>{event.preventDefault();if(featureBusy||runtimeReconnectPromise)return;const prompt=$('feature-prompt').value.trim();if(!prompt)return;$('build-error').textContent='';const provider=activeProvider();if(!provider?.ready){$('build-error').textContent=provider?.unavailableReason||'Choose a ready AI connection in Settings first.';return;}featureBusy=true;$('build-submit').disabled=true;try{const value=await boundedApi('features',{method:'POST',body:JSON.stringify({prompt,providerId:provider.id,autoApply:$('feature-auto-apply').checked})},30000);const job=value.job||value;rememberJob(job);if(!job.id)throw new Error('The build could not be opened. Refresh to check build history.');jobs=[job,...jobs.filter(item=>item.id!==job.id)];selectedJobId=job.id;renderJobs();if($('feature-prompt').value.trim()===prompt)$('feature-prompt').value='';}catch(error){$('build-error').textContent=error.message;refreshJobsSafely();}finally{featureBusy=false;$('build-submit').disabled=false;}});
+async function runInstalledTool(tool,args={}){
+  if(runtimeReconnectPromise)throw new Error('Companion is reconnecting. Try this action again when it is ready.');
+  try{const value=await boundedApi('tools/run',{method:'POST',body:JSON.stringify({tool,arguments:args,operationId:crypto.randomUUID()})},45000);if(value.workspace)applyWorkspace(value.workspace);ingestDesktopResult(value.result);for(const action of value.result?.hostActions||[])ingestDesktopResult(action.result);if(value.result?.desktopAction)void refreshDesktop().catch(error=>toast(error.message));if(value.result?.error){const error=new Error(typeof value.result.error==='string'?value.result.error:value.result.error.message||'This action could not finish.');error.hostActions=value.result.hostActions;throw error;}return value;}
+  catch(error){void refreshWorkspace().catch(()=>{});throw error;}
+}
+async function loadExtensionModule(url){return import(url);}
+function disposeExtension(entry){try{entry.cleanup?.();}catch{}entry.panel.remove();entry.button?.remove();}
+async function applyExtensionManifest(manifest,version=++extensionGeneration){
+  if(manifest?.version!==1||!Array.isArray(manifest.features)||manifest.features.length>40)throw new Error('Installed tools could not be read.');
+  extensionProblems=[];const counts=new Map();for(const item of manifest.features)if(item?.id)counts.set(item.id,(counts.get(item.id)||0)+1);const nextIds=new Set();
+  for(const feature of manifest.features){
+    if(version!==extensionGeneration)return;
+    if(!feature||!/^[a-z][a-z0-9-]{0,59}$/.test(feature.id)||typeof feature.title!=='string'||!feature.title.trim()||feature.title.length>100||!/^\.\/features\/[a-z][a-z0-9-]{0,59}\.mjs$/.test(feature.module)||(feature.aliases!==undefined&&(!Array.isArray(feature.aliases)||feature.aliases.length>12||feature.aliases.some(alias=>typeof alias!=='string'||!alias.trim()||alias.length>120)))){extensionProblems.push('A tool has invalid installation details and is unavailable.');continue;}
+    if(counts.get(feature.id)>1){const message=feature.title+' has a duplicate installation ID and is unavailable.';if(!extensionProblems.includes(message))extensionProblems.push(message);for(const name of [feature.title,...(feature.aliases||[])])knownFeatureNames.add(normalizedFeatureName(name));continue;}
+    const id='extension-'+feature.id;nextIds.add(id);const old=extensions.get(id);if(old)disposeExtension(old);
+    const panel=element('section','view-panel extension-panel');panel.id=id+'-view';panel.hidden=currentView!==id;$('extension-panels').append(panel);
+    const entry={panel,button:null,featureId:feature.id,title:feature.title.trim(),description:typeof feature.description==='string'?feature.description:'',aliases:clone(feature.aliases||[]),capabilityId:typeof feature.capabilityId==='string'?feature.capabilityId:null,ready:false,error:null,cleanup:null};extensions.set(id,entry);for(const name of featureNames(entry))knownFeatureNames.add(name);renderToolsCatalog();
+    try{const module=await loadExtensionModule(new URL(feature.module+'?activation='+version+'-'+Date.now(),import.meta.url).href);if(version!==extensionGeneration){disposeExtension(entry);return;}if(typeof module.mount!=='function')throw new Error('This tool has no interface.');
+      const cleanup=await module.mount({container:panel,api:Object.freeze({getWorkspace:async()=>clone(workspace),workspaceOperation,runTool:runInstalledTool,notify:toast})});
+      if(version!==extensionGeneration){if(typeof cleanup==='function'){try{cleanup();}catch{}}disposeExtension(entry);if(extensions.get(id)===entry)extensions.delete(id);return;}
+      if(typeof cleanup==='function')entry.cleanup=cleanup;entry.ready=true;
+    }catch(error){if(version!==extensionGeneration)return;entry.error=String(error.message||'This tool could not open.').slice(0,300);entry.ready=false;panel.replaceChildren(emptyState('This tool could not open.',entry.error));}
+  }
+  if(version!==extensionGeneration)return;
+  for(const[id,entry]of extensions){if(nextIds.has(id))continue;disposeExtension(entry);extensions.delete(id);if(currentView===id)showView('today');}
+  renderToolsCatalog();featureRenderKey='';renderJobs();conversationRenderKey='';renderSavedConversation();void refreshToolCatalog({quiet:true});
+}
 async function loadExtensions(){
   const version=++extensionGeneration;
-  try{const response=await fetch('/src/features/manifest.json',{cache:'no-store',credentials:'same-origin'});if(version!==extensionGeneration)return;if(response.status===404){for(const[id,entry]of extensions){try{entry.cleanup?.();}catch{}entry.panel.remove();entry.button.remove();extensions.delete(id);}if(currentView.startsWith('extension-'))showView('today');$('extension-nav').hidden=true;return;}if(!response.ok)throw new Error('Installed features could not be loaded.');const manifest=await response.json();if(version!==extensionGeneration)return;if(manifest.version!==1||!Array.isArray(manifest.features)||manifest.features.length>40)throw new Error('The feature manifest could not be read.');
-    const nextIds=new Set();
-    for(const feature of manifest.features){if(!feature||!/^[a-z][a-z0-9-]{0,63}$/.test(feature.id)||typeof feature.title!=='string'||feature.title.length>100||!/^\.\/features\/[a-z][a-z0-9-]{0,59}\.mjs$/.test(feature.module))continue;const id='extension-'+feature.id;nextIds.add(id);const old=extensions.get(id);try{old?.cleanup?.();}catch{}old?.panel.remove();old?.button.remove();
-      const panel=element('section','view-panel extension-panel');panel.id=id+'-view';panel.hidden=currentView!==id;
-      const nav=button(feature.title,'nav-item',()=>showView(id));nav.dataset.view=id;nav.setAttribute('aria-label',feature.title);nav.title=feature.title;$('extension-panels').append(panel);$('extension-nav').append(nav);const entry={panel,button:nav,title:feature.title,cleanup:null};extensions.set(id,entry);
-      try{const module=await import(new URL(feature.module+'?activation='+Date.now(),import.meta.url).href);if(version!==extensionGeneration){panel.remove();nav.remove();return;}if(typeof module.mount!=='function')throw new Error('This feature has no interface.');const cleanup=await module.mount({container:panel,api:Object.freeze({getWorkspace:async()=>clone(workspace),workspaceOperation,runTool:async(tool,args={})=>{if(runtimeReconnectPromise)throw new Error('Companion is reconnecting. Try this action again when it is ready.');const result=await boundedApi('tools/run',{method:'POST',body:JSON.stringify({tool,arguments:args,operationId:crypto.randomUUID()})},45000);if(result.workspace)applyWorkspace(result.workspace);ingestDesktopResult(result.result);if(result.result?.desktopAction)void refreshDesktop().catch(error=>toast(error.message));return result;},notify:toast})});if(version!==extensionGeneration){if(typeof cleanup==='function'){try{cleanup();}catch{}}panel.remove();nav.remove();if(extensions.get(id)===entry)extensions.delete(id);return;}if(typeof cleanup==='function')entry.cleanup=cleanup;}catch(error){panel.replaceChildren(emptyState('This feature could not open.',error.message));}
-    }
-    if(version!==extensionGeneration)return;for(const [id,entry] of extensions){if(nextIds.has(id))continue;try{entry.cleanup?.();}catch{}entry.panel.remove();entry.button.remove();extensions.delete(id);if(currentView===id)showView('today');}$('extension-nav').hidden=!extensions.size;
-  }catch(error){toast(error.message);}
+  try{const response=await fetch('/src/features/manifest.json',{cache:'no-store',credentials:'same-origin'});if(version!==extensionGeneration)return;if(response.status===404){await applyExtensionManifest({version:1,features:[]},version);return;}if(!response.ok)throw new Error('Installed tools could not be loaded.');const manifest=await response.json();if(version!==extensionGeneration)return;await applyExtensionManifest(manifest,version);}
+  catch(error){if(version!==extensionGeneration)return;for(const entry of extensions.values()){entry.ready=false;entry.error='The current installation could not be verified.';}extensionProblems=[error.message];renderToolsCatalog();toast(error.message);}
+}
+function appendInstalledFeatureReady(container,job){
+  const provided=job?.providedFeatures??job?.installedFeatures;if(job?.status!=='applied'||!Array.isArray(provided))return;
+  for(const installed of provided){if(!installed||typeof installed.id!=='string')continue;const entry=extensions.get('extension-'+installed.id);const row=element('div','feature-ready');if(entry?.ready){row.append(element('span','',entry.title+' ready.'),button('Open','quiet-button',()=>openInstalledFeature(installed.id)),element('small','','Say “open '+entry.title+'”.'));}
+    else{row.append(element('span','',(installed.title||'The tool')+(entry?.error?' could not open.':' is not currently available.')),button('Check tool','quiet-button',()=>showToolsList(entry?.error||'Check that this tool is available below.')));}container.append(row);
+  }
 }
 function setState(state,detail=''){
   const labels={idle:voiceSessionState.enabled?'Microphone paused':'Microphone off',opening:'Opening your microphone…',listening:'Listening…',transcribing:'Turning speech into text…',thinking:'Working…',desktop:'Working with your computer…',speaking:'Reading the reply aloud.'};
@@ -680,13 +808,14 @@ function addMessage(role,text,label=role==='user'?'You':'Companion'){
   $('messages').append(article);messages.push({role,text});updateCornerPreview(text);
   $('content-scroll').scrollTop=$('content-scroll').scrollHeight;return article;
 }
-function renderActionReceipts(container,actions,{historical=false}={}){
+function renderActionReceipts(container,actions,{historical=false,nested=false}={}){
   if(!container||!Array.isArray(actions))return;
   const labels={create_task:'Task saved',update_task:'Task updated',complete_task:'Task completed',save_note:'Note saved',list_tasks:'Tasks checked',list_notes:'Notes checked',search_notes:'Notes searched',read_note:'Note opened',start_focus:'Focus started',stop_focus:'Focus ended',save_workflow:'Workflow saved',run_workflow:'Workflow run',build_feature:'Feature build',list_feature_builds:'Builds checked',get_time:'Current time'};
   for(const action of actions){let result=action.result||{};if(historical&&result.desktopAction){const current=desktopActions.find(item=>item.id===result.desktopAction.id);if(current)result={...result,desktopAction:current};}const failed=action.status==='failed'||!!action.error||!!result.error;let text;
-    if(failed){const error=result.error||action.error;text=(labels[action.tool]||action.tool||'Action')+' · could not finish: '+(typeof error==='string'?error:error?.message||'Unknown error');}
+    if(failed){const error=result.error||action.error;text=(labels[action.tool]||toolLabel(action.arguments?.name||action.tool)||'Action')+' · could not finish: '+(typeof error==='string'?error:error?.message||'Unknown error');}
     else if(result.desktopAction){if(!historical)ingestDesktopResult(result);text=(desktopPending(result.desktopAction)?(historical?'Prepared desktop action · ':'Needs your review · '):DESKTOP_LABELS[result.desktopAction.status]+' · ')+result.desktopAction.summary;}
     else if(result.desktopReceipt){if(!historical)ingestDesktopResult(result);text=result.desktopReceipt.summary;}
+    else if(result.capability)text=toolLabel(result.capability.name||action.arguments?.name||action.tool)+' · completed';
     else if(result.featureJob)text=historical?'Feature build requested · check build history for its current state':'Feature build started · '+(JOB_LABELS[result.featureJob.status]||result.featureJob.status);
     else if(result.task)text=(labels[action.tool]||'Task updated')+' · '+result.task.title;
     else if(result.note)text=(labels[action.tool]||'Note opened')+' · '+result.note.title;
@@ -695,6 +824,8 @@ function renderActionReceipts(container,actions,{historical=false}={}){
     else if(result.formatted)text=result.formatted;
     else text=action.summary||result.summary||result.message||labels[action.tool]||action.tool||'Action completed';
     const receipt=element('div','action-receipt'+(failed?' receipt-failed':''),text);container.append(receipt);
+    if(!failed&&result.capability&&result.value)receipt.append(element('pre','capability-output',JSON.stringify(result.value,null,2).slice(0,4000)));
+    if(!nested&&Array.isArray(result.hostActions))renderActionReceipts(receipt,result.hostActions,{historical,nested:true});
     if(!failed&&desktopPending(result.desktopAction))receipt.append(button('Review action ↗','quiet-button',()=>void openDesktopReview(result.desktopAction.id)));
   }
 }
@@ -829,9 +960,13 @@ async function localVoiceCommand(message,options={}){
   if(['stop listening','microphone off','mic off','turn voice off','disable voice'].includes(phrase)){voiceSession?.disable();stopSpeech();$('question').value='';return true;}
   if(['stop','cancel','stop current work','cancel current work','stop everything'].includes(phrase)){void stopAllActivity(true,{global:true});$('question').value='';return true;}
   const views={'show tasks':'tasks','open tasks':'tasks','show notes':'notes','open notes':'notes','show workflows':'workflows','open workflows':'workflows','show computer':'desktop','open computer':'desktop','show settings':'settings','open settings':'settings','show memory':'settings','open memory':'settings','show build':'build','open build':'build','build a feature':'build'};
-  const recognized=['show chat','open chat','hide chat','close chat','new conversation','review desktop action','review computer action','close preview'].includes(phrase)||Object.hasOwn(views,phrase);if(!recognized)return false;
+  const featureMatch=/^(?:open|show) (?:the )?(?:(?:tool|feature) )?(.+)$/.exec(phrase),featureName=featureMatch?.[1],dynamicMatch=featureName&&[...extensions.values()].some(entry=>featureNames(entry).includes(normalizedFeatureName(featureName))),capabilityMatch=featureName&&toolCatalog.some(item=>item.kind==='capability'&&[item.title,item.name].some(value=>normalizedFeatureName(value)===normalizedFeatureName(featureName))),toolList=['show tools','open tools','list tools','show installed tools'].includes(phrase);
+  const recognized=toolList||!!dynamicMatch||!!capabilityMatch||!!(featureName&&knownFeatureNames.has(normalizedFeatureName(featureName)))||/^(?:open|show) (?:the )?(?:tool|feature) /i.test(phrase)||['show chat','open chat','hide chat','close chat','new conversation','review desktop action','review computer action','close preview'].includes(phrase)||Object.hasOwn(views,phrase);if(!recognized)return false;
   if(!currentConversationContext(options.conversationContext)){$('question-error').textContent='The conversation changed. Repeat that command here.';voiceSession?.disable({remember:false});return true;}
-  if(['show chat','open chat'].includes(phrase)){setChatOpen(true);ensureCornerExpanded();}
+  if(toolList)showToolsList();
+  else if(dynamicMatch&&Object.hasOwn(views,phrase))showToolsList('More than one tool matches that name. Choose the installed tool below, or use the bottom controls.');
+  else if(featureName&&!Object.hasOwn(views,phrase)&&!['show chat','open chat','show memory','open memory'].includes(phrase)){openFeatureByName(featureName);}
+  else if(['show chat','open chat'].includes(phrase)){setChatOpen(true);ensureCornerExpanded();}
   else if(['hide chat','close chat'].includes(phrase))setChatOpen(false);
   else if(phrase==='new conversation')await selectConversation(null,{allowVoiceCommand:true});
   else if(phrase==='close preview')$('desktop-review-dialog').close();
