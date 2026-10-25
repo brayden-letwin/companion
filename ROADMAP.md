@@ -33,6 +33,18 @@ Checked items mean the feature has an implementation. They do not establish that
 - [x] Updates between sessions, room-revision conflicts that preserve drafts, and duplicate-send protection.
 - [x] Real author/reviewer constraints, revision-specific reviews, source snapshots, linked resolutions, and reasoned reopening.
 
+## Personal assistant workspace (0.5)
+
+- [x] A separate browser workspace with a connected reading map, source cards, a voice control, and visible request state.
+- [x] Local model and transcription endpoints with independent personal sessions, exact-origin/CSRF checks, bounded input, and scoped cancellation.
+- [x] An authored sample concept map with exact source passages; selected PDF passages appear without invented concept links.
+- [x] Typed or transcribed requests for explanations, local plots, source navigation, and personal note saving/search.
+- [x] Explicit familiarity preferences, frozen question context, and AI-draft labels with captured source text.
+- [x] Opt-in hands-free turn ending and offline device read-aloud. Microphone hardware, noise conditions, and automatic turn ending still need human testing.
+- [x] One main launcher starts the installed local services and opens the assistant; the shared room remains separate.
+
+These functions act inside Companion. Source-map connections are prepared reading aids, not a learned knowledge graph. Local model checks found mathematical errors; the current build does not establish proof reliability.
+
 ## Group reading pilot
 
 [DISCUSSION_FLOW.md](DISCUSSION_FLOW.md) describes the workflow and its remaining design proposals. The `/group.html` demo remains a single-device simulation. The new shared room at `127.0.0.1:4174/room.html` has real local member accounts, server storage, updates between sessions, source snapshots, and attributed history. It supports up to 50 members around one original sample paper, using Node 24.15 or newer.
@@ -78,7 +90,7 @@ Local inference has completed real passage questions, and local transcription ha
 - [ ] External PDF viewer or user-selected screen-region context, with coordinate checks and explicit capture controls.
 - [ ] OCR, equation-aware parsing, long-paper retrieval, and LaTeX source import.
 - [ ] Optional quiet AI suggestions that do not speak or act merely because the pointer pauses.
-- [ ] Continuous voice, natural interruption, and other recording modes.
+- [ ] Wake words, natural interruption, and broader recording modes after the opt-in hands-free flow is tested with human speakers.
 - [ ] Symbolic algebra with domain-aware checks and richer mathematical diagrams.
 - [ ] Tested notebook, LaTeX editor, and other math-application adapters.
 - [ ] Broader PC actions with target-window checks, clear intent, verified outcomes, and immediate user takeover.

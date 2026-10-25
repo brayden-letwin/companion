@@ -1,6 +1,6 @@
 # Companion — math desktop assistant
 
-Design revision: 24 October 2026. Platform assumption: Windows desktop. Status: design and interactive preview; the native desktop application and live AI integration are not implemented yet.
+Design revision: 24 October 2026. Platform assumption: Windows desktop. This document preserves the original product vision; [README.md](README.md) describes the implemented app. Version 0.5 adds a Jarvis-inspired browser assistant with local math AI, speech input, a source-linked reading map, and bounded math commands, alongside the existing native reader and shared reading room. See [QA.md](QA.md) for verification limits.
 
 ## Product promise
 

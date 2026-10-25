@@ -1,18 +1,20 @@
 # Companion
 
-Read a paper, ask a question, and build an explanation together.
+An on-screen math assistant: talk through a paper, follow connected ideas, and turn a request into a plot or a saved note.
 
 ## Start here
 
-1. **Double-click `Start Companion.cmd`** in the Companion folder. It opens the reading room in your browser.
-2. **The first time, choose your group name, your name, and a password.** Use at least 12 characters for the password.
-3. **Select a passage and click “Ask a question.”** You can then add explanations, review contributions, and record what helped.
+1. **Double-click `Start Companion.cmd`** in the Companion folder. It opens the math assistant in your browser and starts the installed local AI services.
+2. **Choose a source** in the reading map, or open a PDF.
+3. **Click the microphone or type a request.** Try “Explain this,” “Plot x^2,” or “Save note: completeness keeps the limit inside the space.” Use Stop to end the current request.
 
-Next time, double-click the same file and sign in if asked. Closing the browser keeps your saved questions and discussions.
+The personal assistant opens without a group account. Your notes and familiarity preferences stay in this browser. The separate **Shared room** keeps its existing accounts and saved group discussions.
 
-**This PC is already configured.** You do not need to install anything or type terminal commands. On a fresh checkout, install **Node.js 24.15 or newer** once, then use the same launcher. The shared reading room needs no AI key or additional server packages.
+**This development PC is already configured.** No terminal commands or new installation are needed. A fresh checkout needs **Node.js 24.15 or newer**; live questions and voice also need the local model and speech setup below. The assistant uses the installed Qwen math model and Whisper speech recognizer on this PC, with no cloud fallback or API key.
 
-Version 0.4 currently runs on this PC with one sample paper. Colleagues on other computers will need a hosted version. The personal math reader and the earlier simulated discussion demo remain available for development below.
+**Version 0.5** adds a dark, voice-centered workspace inspired by the [Jarvis demonstration](https://www.youtube.com/watch?v=Acw0NtkyNtM&t=17s). Its reading map uses prepared mathematical connections tied to the original sample passages. Imported PDF text stays local until you ask about a selected passage. Actions operate inside Companion: source navigation, explanations, plots, and notes.
+
+The assistant runs at **http://127.0.0.1:4174/assistant.html**. The shared reading room remains at **http://127.0.0.1:4174/room.html** with one sample paper. Colleagues on other computers will need a hosted version.
 
 <details>
 <summary>Advanced: shared-room launch options, storage, and limits</summary>
@@ -43,7 +45,7 @@ Accounts, invitations, sessions, and discussion history are stored in `room.sqli
 
 </details>
 
-## Personal reader (optional)
+## Original desktop reader (optional)
 
 <details>
 <summary>Open, configure, or rebuild the personal reader and local AI</summary>
@@ -56,7 +58,7 @@ If the portable runtime, model, speech environment, and packaged app have alread
 .\scripts\start-local.ps1 -RuntimeRoot '<portable-runtime-root>'
 ```
 
-Replace the placeholder with the folder containing `runtime/ollama.exe` and `models/`. The launcher starts the local services and opens `release/Companion-0.4.0/Companion.exe`. The configured development installation also provides **Start Companion.cmd** in its adjacent `companion-local` folder. Close any existing Companion instance first: focus the corner and press **Alt+F4**. An already running instance keeps its previous configuration.
+Replace the placeholder with the folder containing `runtime/ollama.exe` and `models/`. The launcher starts the local services and opens `release/Companion-0.5.0/Companion.exe`. The configured development installation also provides **Start Companion.cmd** in its adjacent `companion-local` folder for this original desktop reader. Close any existing desktop instance first: focus the corner and press **Alt+F4**. An already running instance keeps its previous configuration. The new browser assistant uses the main repository's launcher instead.
 
 The launcher selects `companion-math` at `127.0.0.1:11434`, sets `OLLAMA_NO_CLOUD=1`, and uses the speech helper at `127.0.0.1:8178`. No API key is needed. **Preferences → Refresh connection** checks model and microphone transcription availability separately. If voice is unavailable, typed questions still work. A model's first question can take longer while weights load.
 
@@ -87,7 +89,7 @@ Build the app from the repository directory:
 ```powershell
 pnpm install
 node node_modules/electron/install.js
-node scripts/package.mjs Companion-0.4.0
+node scripts/package.mjs Companion-0.5.0
 ```
 
 The explicit Electron command installs its runtime. Packaging creates an unsigned development build, not an installer. Keep the whole output folder together. The packager excludes private `.env` files and refuses to replace an existing output directory; choose a new package name if needed, then pass its executable through `-AppPath`.
@@ -195,7 +197,8 @@ For development, dictate requests into this Codex chat and describe independent 
 
 | Interface | Open it with | Where its discussion data lives |
 | --- | --- | --- |
-| Shared reading room | `Start Companion.cmd` | SQLite on this PC |
+| Math assistant | `Start Companion.cmd` | Personal notes and preferences in this browser |
+| Shared reading room | Open **Shared room**, or `scripts/start-shared.ps1` | SQLite on this PC |
 | Group discussion design demo | `/group.html` through `npm run preview` | This browser/app profile |
 | Personal reader and corner | `scripts/start-local.ps1` | Personal app profile; selected AI provider answers questions |
 
@@ -216,7 +219,7 @@ pnpm test     # Math, tutor, PDF, provider, discussion, server and training-data
 pnpm check    # JavaScript syntax checks
 ```
 
-The browser preview offers the prepared sample, local tools, PDF reading, and the group design demo. The authenticated room runs through its separate server. Live personal AI, microphone transcription, and the native corner require Electron. Model weights, Ollama, the Python environment, speech helper, and shared server are separate from the packaged app; retain the source checkout and runtime folders for the launch scripts.
+The older browser preview on port 4173 offers the prepared sample, local tools, PDF reading, and group design demo. The assistant on port 4174 connects to local AI and speech through its own bounded server endpoints. Its personal session does not grant reading-room membership. The native corner remains in the original Electron reader. Model weights, Ollama, the Python environment, speech helper, and server are separate from the packaged desktop app; retain the source checkout and runtime folders for the launch scripts.
 
 The shared core and HTTP API have 18 automated tests covering member permissions, invitation races and expiry, revision conflicts, duplicate sends, restart persistence, and request boundaries. Test accounts use temporary or in-memory databases. See [QA.md](QA.md) for the final combined test run and browser checks, and [CONTRIBUTING.md](CONTRIBUTING.md) for development and contribution guidance.
 

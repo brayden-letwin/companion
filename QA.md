@@ -1,5 +1,18 @@
 # Prototype verification — 24 October 2026
 
+## Personal assistant workspace (0.5.0)
+
+- All 85 Node tests pass, with no skips. Seven new command/source-map tests cover conservative action parsing, source snapshots, exact-source history, local note search, and the distinction between authored sample links and unlinked imported passages. Nine new HTTP tests cover independent personal sessions, group isolation, Origin/CSRF checks, input limits, cancellation, disconnects, timeouts, concurrency, and static-file restrictions.
+- Live browser checks on a separate QA server: select Completeness and obtain an actual local-model answer; command a plot of x² on [−3,3]; save the captured passage and search it; set explicit Cauchy familiarity; cancel a live request immediately. The canceled request left no late answer in the conversation.
+- Imported the existing synthetic three-page PDF fixture, navigated to page 2, and selected a text line. Its source card kept the exact text, PDF name, and page. The graph showed selected PDF passages without fabricated concept edges.
+- At 1280 × 720, the workspace has no horizontal overflow and the composer ends at y=682. Browser rendering and cancellation were checked; microphone recording and read-aloud were not activated during verification.
+- The actual local speech API transcribed computer-generated speech exactly as “Companion, explain why completeness matters.” in 371 ms. No human microphone was recorded. A real local-model question returned in 6.7 seconds. These are individual observations, not benchmarks.
+- The model's mathematical quality remains a material limitation. One answer incorrectly attributed convergence to the definition of a contraction; another described approaching a limit as reaching it and ignored the requested sentence count. General prompt clarifications did not establish reliability: subsequent original checks still gave wrong incomplete-domain and missing-hypothesis answers, while a geometric-tail explanation was correct. Some answers still emit raw LaTeX. Generated explanations are labeled AI drafts, with their exact source attached.
+- Independent frontend review found and repaired source capture around microphone permission, explicit empty voice context, PDF import supersession, and return-to-sample lifecycle issues. Review used fake media objects rather than recording a microphone.
+- Browser navigation to the shared room and Back left the assistant usable, with saved familiarity retained. Compact navigation now keeps explicit accessible labels and a PDF import control. The local server was upgraded to 0.5 after a private backup of the existing reading-room database; its first-run state was retained. The main launcher started or reused local AI and speech successfully. A separate Windows 0.5 folder was packaged; the new primary workspace runs through the browser server.
+
+Human microphone permission/capture, automatic turn ending in different noise conditions, device changes, offline voice playback, and longer browser sessions remain to be tested. Commands operate within Companion; arbitrary PC control, wake words, autonomous background work, learned knowledge graphs, and external integrations are not implemented.
+
 ## Shared local reading room (0.4.0)
 
 - Simplified launch: the repository's `Start Companion.cmd` and the configured output folder's `Open Companion.cmd` open the same room. A cold start and repeated launch passed against a separate disposable room on port 4186; only that test server was stopped. The launcher finds the installed Node runtime and gives a direct install instruction when none is available.

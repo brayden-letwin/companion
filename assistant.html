@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' blob:; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <title>Companion — follow a thought</title>
+  <link rel="stylesheet" href="src/assistant.css">
+</head>
+<body>
+  <svg class="icon-library" aria-hidden="true"><defs>
+    <symbol id="mark" viewBox="0 0 32 32"><path d="M19 7C9 3 2 17 10 23c7 6 17-1 14-9-2-6-10-5-10 1 0 4 4 5 8 3"/></symbol>
+    <symbol id="mic" viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="13" rx="4"/><path d="M5 11a7 7 0 0014 0M12 18v4M8 22h8"/></symbol>
+    <symbol id="book" viewBox="0 0 24 24"><path d="M12 5c-3-2-6-2-10-1v15c4-1 7-1 10 1 3-2 6-2 10-1V4c-4-1-7-1-10 1v15"/></symbol>
+    <symbol id="note" viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 8h8M8 12h8M8 16h5"/></symbol>
+    <symbol id="nodes" viewBox="0 0 24 24"><path d="m6 6 12 1M6 6l5 12M18 7l-7 11"/><circle cx="6" cy="6" r="3"/><circle cx="18" cy="7" r="3"/><circle cx="11" cy="18" r="3"/></symbol>
+    <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+    <symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="sliders" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="8" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></symbol>
+  </defs></svg>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Your space">
+      <a class="brand" href="assistant.html" aria-label="Companion home" title="Companion home"><svg><use href="#mark"/></svg><span>companion<span class="brand-dot">.</span></span></a>
+      <div class="space-label">YOUR SPACE</div>
+      <nav class="nav-list">
+        <button class="nav-item active" id="map-nav" aria-label="Thought map" title="Thought map"><svg><use href="#nodes"/></svg><span>Thought map</span></button>
+        <button class="nav-item" id="paper-nav" aria-label="Sample paper" title="Sample paper"><svg><use href="#book"/></svg><span>Sample paper</span></button>
+        <button class="nav-item" id="notes-nav" aria-label="Your notes" title="Your notes"><svg><use href="#note"/></svg><span>Your notes</span><span class="count" id="note-count">0</span></button>
+        <a class="nav-item" href="room.html" aria-label="Shared room" title="Shared room"><svg><use href="#nodes"/></svg><span>Shared room</span><span class="nav-arrow">↗</span></a>
+      </nav>
+      <div class="sidebar-divider"></div>
+      <p class="space-label">START WITH A THOUGHT</p>
+      <p class="sidebar-tip">Choose an idea.<br>Ask what is missing.<br>Go at your own pace.</p>
+      <button class="open-pdf" id="import-pdf" aria-label="Open your PDF" title="Open your PDF"><svg><use href="#plus"/></svg><span>Open your PDF</span></button>
+      <input type="file" id="pdf-file" accept=".pdf,application/pdf" hidden>
+      <div class="sidebar-bottom"><div class="device-label"><span class="status-dot"></span>On this computer</div><button class="nav-item" id="profile-nav" aria-label="My starting point" title="My starting point"><svg><use href="#sliders"/></svg>My starting point</button><span class="version">PERSONAL MATH ASSISTANT <span>0.5</span></span></div>
+    </aside>
+    <main class="workspace">
+      <header class="topbar"><div class="breadcrumb">YOUR READING <span>/</span><strong id="paper-title">A first look at fixed points</strong></div><button class="quiet-button" id="source-toggle">View source <span>↗</span></button></header>
+      <section class="map-workspace" aria-label="Mathematical thought map">
+        <div class="map-heading"><div><p class="eyebrow">FOLLOW A THOUGHT</p><h1>Make the idea <em>click.</em></h1><p>See what connects. Ask about the part that doesn’t.</p></div><span class="map-badge"><span></span>Source map</span></div>
+        <div class="graph-stage" id="graph-stage"><svg id="graph-lines" viewBox="0 0 780 390" preserveAspectRatio="none" aria-hidden="true"></svg><div id="graph-nodes" class="graph-nodes"></div><div class="graph-key"><span class="key-dot"></span>Selected idea<span class="key-line"></span>Linked in the sample</div></div>
+        <div class="map-caption"><span id="map-caption">A reading map of our original sample, not an AI analysis.</span><button class="quiet-button" id="reset-map" hidden>Back to sample</button></div>
+        <section class="source-panel" id="source-panel" aria-label="Selected source">
+          <header class="source-header"><div><span class="eyebrow">IN FOCUS</span><h2 id="source-heading">Choose an idea in the map</h2></div><span class="source-page" id="source-page">SAMPLE · PAGE 1</span></header>
+          <p class="source-text" id="source-text"></p><div class="source-actions"><button class="pill-button" id="explain-source">Explain this <span>↗</span></button><button class="quiet-button" id="save-source">Keep this passage</button><span id="source-hint">This passage will be attached to your next question.</span></div>
+        </section>
+      </section>
+    </main>
+    <aside class="assistant-panel" aria-label="Ask Companion">
+      <header class="assistant-heading"><div><span class="tiny-label">HERE WITH YOU</span><h2>Companion</h2></div><button class="icon-button" id="connection-refresh" aria-label="Refresh local connection" title="Refresh local connection">↻</button></header>
+      <div class="voice-area"><button class="voice-orb" id="mic-button" aria-label="Start recording" aria-pressed="false"><span class="orb-ring ring-one"></span><span class="orb-ring ring-two"></span><span class="orb-core"><svg><use href="#mic"/></svg></span></button><div class="voice-state" id="voice-state" role="status">One thought at a time.</div><p class="voice-detail" id="voice-detail">Type below, or tap the mic to speak.</p><div class="voice-options"><label><input type="checkbox" id="hands-free">Hands-free</label><label><input type="checkbox" id="read-aloud">Read aloud</label></div><p class="voice-help" id="voice-help">Mic only listens when you turn it on.</p></div>
+      <div class="conversation" id="conversation" aria-live="polite"><div class="welcome-card" id="welcome-card"><span class="eyebrow">A PLACE TO BEGIN</span><h3>What are you<br>trying to understand?</h3><p>Choose a passage, then ask in your own words. You can tell me where to start.</p><button class="suggestion" id="suggest-question">Why do we need completeness? <span>↗</span></button><button class="suggestion" id="suggest-plot">Plot x/2 <span>↗</span></button></div><div id="messages"></div></div>
+      <div class="turn-progress" id="turn-progress" hidden><span class="progress-dot"></span><span id="progress-text">Working on your question…</span><button id="cancel-turn">Cancel</button></div>
+      <form class="composer" id="question-form"><label class="sr-only" for="question">Ask a question or give a math command</label><textarea id="question" rows="2" maxlength="2000" placeholder="I’m wondering why…"></textarea><div class="composer-bottom"><span id="attached-source">WITH SELECTED PASSAGE</span><button type="submit" id="send-question" aria-label="Send question"><svg><use href="#arrow"/></svg></button></div></form>
+      <p class="inline-error" id="question-error" role="alert"></p>
+      <footer class="connection-footer"><span class="status-dot" id="connection-dot"></span><span id="connection-label">Checking local model…</span><button class="quiet-button" id="service-details">Details</button></footer>
+    </aside>
+  </div>
+  <dialog id="paper-dialog" class="paper-dialog"><header class="dialog-heading"><div><span class="eyebrow">YOUR SOURCE</span><h2 id="reader-title">A first look at fixed points</h2></div><button class="close-dialog icon-button" aria-label="Close paper">×</button></header><div class="reader-toolbar"><p id="reader-status">Select a passage to give Companion context.</p><div><button id="previous-page" class="icon-button" aria-label="Previous page" disabled>‹</button><span id="reader-page">1 / 1</span><button id="next-page" class="icon-button" aria-label="Next page" disabled>›</button></div></div><div id="sample-passages" class="sample-passages"></div><div id="pdf-view" class="pdf-view" hidden><div class="pdf-surface"><canvas id="pdf-canvas"></canvas><div id="pdf-text" class="textLayer"></div></div></div><p class="dialog-footnote">PDFs open in this browser. Only your selected passage is sent to the local model when you ask.</p></dialog>
+  <dialog id="notes-dialog" class="notes-dialog"><header class="dialog-heading"><div><span class="eyebrow">YOUR NOTES</span><h2>Keep the thought.</h2></div><button class="close-dialog icon-button" aria-label="Close notes">×</button></header><label class="field-label" for="notes-search">Find a note</label><input id="notes-search" type="search" placeholder="Search your notes…" maxlength="200"><div id="notes-list" class="notes-list"></div><form id="note-form"><label class="field-label" for="new-note">Write a note</label><textarea id="new-note" rows="3" maxlength="4000" placeholder="An idea worth keeping…"></textarea><button class="pill-button" type="submit">Save note <span>↗</span></button></form><p class="dialog-footnote">Personal notes are saved in this browser on this computer.</p></dialog>
+  <dialog id="profile-dialog" class="profile-dialog"><header class="dialog-heading"><div><span class="eyebrow">YOUR STARTING POINT</span><h2>Start where you are.</h2></div><button class="close-dialog icon-button" aria-label="Close starting point">×</button></header><p class="dialog-intro">What already feels familiar? Companion includes your choices when you ask. Change them whenever you like.</p><div id="familiarity-fields"></div><p class="dialog-footnote">Your choices stay in this browser. We don’t infer your knowledge from mouse movement.</p></dialog>
+  <dialog id="plot-dialog" class="plot-dialog"><header class="dialog-heading"><div><span class="eyebrow">MATH CANVAS</span><h2>See what it does.</h2></div><button class="close-dialog icon-button" aria-label="Close graph">×</button></header><form id="plot-form"><label class="field-label" for="plot-expression">f(x) =</label><input id="plot-expression" value="x/2" maxlength="512" spellcheck="false"><div class="plot-bounds"><label>From <input type="number" id="plot-min" value="-6" step="any"></label><label>to <input type="number" id="plot-max" value="6" step="any"></label><button class="pill-button">Draw function ↗</button></div></form><p id="plot-error" class="inline-error" role="alert"></p><svg id="plot-svg" viewBox="0 0 700 390" role="img" aria-label="Numerical function graph"></svg><p id="plot-caption" class="plot-caption"></p><p class="dialog-footnote">A numerical sketch, not a proof. Use x, pi, e, + − * / ^, sin, cos, tan, sqrt, abs, log, ln, exp. Multiply explicitly: 2*x. Angles are in radians.</p></dialog>
+  <dialog id="service-dialog" class="service-dialog"><header class="dialog-heading"><div><span class="eyebrow">ON THIS COMPUTER</span><h2>A clear connection.</h2></div><button class="close-dialog icon-button" aria-label="Close connection details">×</button></header><div id="service-status"></div><p class="dialog-footnote">Papers, notes and plots work locally. Questions use the local model; voice recordings use local transcription. Companion does not switch to a cloud service. This assistant handles math and reading actions inside Companion.</p><button class="pill-button" id="retry-service">Check again ↻</button></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script type="module" src="src/assistant.mjs"></script>
+</body>
+</html>

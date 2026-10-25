@@ -1,26 +1,30 @@
 COMPANION — START HERE
 
 1. Double-click Start Companion.cmd in the Companion folder.
-   If you are in the parent outputs folder, Open Companion.cmd opens the same app.
+   In the parent outputs folder, Open Companion.cmd opens the same app.
+   The launcher starts the installed local math and speech services.
 
-2. The first time, choose your reading-group name, your name, and a password.
-   Use at least 12 characters for the password.
+2. Choose a source in the reading map, or open a PDF.
 
-3. Select a passage in the sample paper and click Ask a question.
-   Add an explanation, review a contribution, or mark what helped you understand.
+3. Click the microphone or type a request.
+   Try: Explain this. Plot x^2. Save note: my observation.
+   Use Stop to end the current request.
 
 NEXT TIME
-Double-click the same launcher. Sign in if asked.
-Closing the browser keeps your saved questions and discussions.
+Double-click the same launcher. No group account is needed for the assistant.
+Your personal notes and familiarity preferences stay in this browser.
 
 This PC is already configured. No installation or terminal commands are needed.
-On a fresh checkout, install Node.js 24.15 or newer once, then use the same launcher.
-The shared reading room needs no AI key or additional server packages.
+A fresh checkout needs Node.js 24.15 or newer. Live questions and voice also need
+the local AI setup in README.md. No cloud API key is needed.
 
 CURRENT PILOT
-The app runs only on this PC and includes one original sample paper.
-Invite links can be tested in another browser on this PC. Colleagues on other
-computers will need a hosted version.
+The app runs on this PC. It includes an original sample paper and can open a PDF.
+Voice commands act inside Companion: source navigation, math explanations,
+plots and notes. The microphone starts only when you enable it.
 
-Your personal math reader and the discussion design demo remain separate options.
-See README.md for advanced setup and development details.
+SHARED READING
+Choose Shared room for the separate group discussion area. Its existing accounts,
+invitations and discussions stay available. Remote group access needs hosting.
+
+See README.md for setup, development and verification details.
