@@ -61,7 +61,9 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 
 - [x] Manage server-worker restarts, bounded recovery, and browser reconnection through the normal launcher.
 - [ ] Make full host-code relaunch/migration as clear and recoverable as the worker restart path.
-- [ ] Expose newly registered tool capabilities consistently to chat, workflows, extensions, and external AI clients.
+- [x] Expose registered executable capabilities consistently to chat/voice dispatch, workflows, panels, and external AI tools using one catalog and real receipts.
+- [x] Pin workflow definitions and custom capability versions; exact terminal retries never execute later appended steps.
+- [x] Run concrete registered-capability acceptance cases in guarded children with fixture-only host effects.
 - [ ] Add acceptance checks for generated interactions, not just syntax and module loading.
 - [ ] Make missing-capability requests produce useful, scoped plans, with progress that reflects actual work.
 - [ ] Add project organization and better task scheduling; extend the retained conversation/context foundation where real use needs it.

@@ -10,7 +10,7 @@ A quiet, voice-first workspace for getting things done—and adding the tools yo
 
 No group account is needed. The existing development PC has a working Codex sign-in. On another PC, install **Node.js 24.15 or newer**, then use an existing Codex CLI sign-in or connect a provider in Settings. API keys belong in the app's password field, never in a chat or a Git commit.
 
-The full workspace is at **http://127.0.0.1:4174/assistant.html**. It runs on this computer; it is not a hosted service. Closing a page or hiding the corner leaves the local server running. Double-click the same launcher next time. The main local service was upgraded to 0.8 after a consistent private SQLite backup. [QA.md](QA.md) records live checks separately from automated tests and remaining hardware checks.
+The full workspace is at **http://127.0.0.1:4174/assistant.html**. It runs on this computer; it is not a hosted service. Closing a page or hiding the corner leaves the local server running. Double-click the same launcher next time. The main local service was upgraded to 0.9 after a consistent private SQLite backup. [QA.md](QA.md) records live checks separately from automated tests and remaining hardware checks.
 
 Try a concrete request:
 
@@ -29,6 +29,10 @@ The main interface starts as an almost blank white canvas. A small strip at the 
 Conversations are saved on this PC. The corner, workspace, and connected AI clients can open the same retained conversation. Each turn records its actual action results and linked build/review IDs. A running or interrupted request is never silently rerun. Two windows cannot send overlapping turns to the same conversation; open a new conversation for a separate intention. Earlier messages load in bounded pages. Unsent drafts remain local to their current window and are not a durable backup.
 
 Teach a lasting preference explicitly, such as “Remember that I prefer short replies and concrete examples.” Companion saves it as a reviewable preference, uses it in future replies, and can stop using it when asked. Preferences shape communication and work context; they do not grant new action permissions. A requested missing capability still goes through the actual source builder, checks, review rules, and rollback. Remembering a preference and changing code are separate, visible outcomes.
+
+New callable functions now share one registry. Voice/chat discovers them, panels call them, saved workflows retain their exact versions, and connected AI tools see the same schemas and results. Open **Tools** to find successfully loaded panels and their spoken names. An unavailable or ambiguous name opens the catalog for a choice. A panel alone is not a callable function: [CAPABILITIES.md](docs/CAPABILITIES.md) describes the actual executor, test cases, guarded runtime, review and restart contract.
+
+Each workflow run retains its original definition and real partial results. An exact retry returns that run's receipt even if the workflow was later edited or disabled. Changed or removed custom actions require review before a fresh run; they are never silently replaced. Generated capability behavior checks execute actual code with fixture-only host effects. Those checks supplement concrete review and live acceptance rather than proving every possible feature correct.
 
 | View | What works now |
 | --- | --- |
@@ -121,7 +125,9 @@ npm test
 npm run check
 ```
 
-The 0.8 update passed 255 Node tests and 34 JavaScript syntax checks. Real GPT conversation continuity and preference saving, Memory archive/restore, managed restart persistence, the white browser/native canvas, and the expanded trusted builder baseline were checked separately. Automatic speech detection still needs a human microphone check; its capture and integration tests use fake media.
+The 0.9 update passed 300 Node tests and 39 JavaScript syntax checks. Real GPT, MCP, an actual panel and a saved workflow used one isolated synthetic capability through the same executor. Exact edited-workflow retries did not execute newly appended steps. Check last run retains the original run ID after a lost response, including after reload, and requires an explicit click. Global Stop also reaches direct tool and workflow requests. See QA.md for the distinction between fixture, live, and generated-feature evidence.
+
+The 0.8 checkpoint passed 255 Node tests and 34 JavaScript syntax checks. Real GPT conversation continuity and preference saving, Memory archive/restore, managed restart persistence, the white browser/native canvas, and the expanded trusted builder baseline were checked separately. Automatic speech detection still needs a human microphone check; its capture and integration tests use fake media.
 
 The 0.7 checkpoint passed all 201 Node tests, 33 JavaScript syntax checks, and the PowerShell parser checks. The automated suites cover the persistent store and real tools, provider protocols and credentials, source builds and rollback, runtime lifecycle, local API boundaries, and the preserved reader/group core. Live Codex requests created real tasks and notes, a saved workflow executed two steps, and the same workspace survived restart. A real Codex-generated time-zone panel passed five checks, activated and ran in an isolated source copy, then rolled back and disappeared from that copy’s UI. Managed worker restart and browser reconnection also passed live checks. The native corner and a real GPT app-search/open-Calculator chain were checked separately. A real GPT-prepared Notepad text action completed after human button approval, and the exact synthetic text was observed in Notepad. Basic voice success was user-reported. A normal native launch showed the new white-outline corner, and a physical global Stop cancelled a pending Notepad action without changing the editor text. [QA.md](QA.md) records these outcomes separately from mock/synthetic tests and lists the remaining live account and human-voice checks.
 

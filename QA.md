@@ -1,5 +1,21 @@
 # Prototype verification — 24 October 2026
 
+## Callable capabilities and immutable workflow runs (0.9.0)
+
+The full suite passed **300 Node tests** and **39 JavaScript syntax checks**. Coverage includes real guarded-child execution, parent-owned tool receipts, schema/path/source-hash validation, network/process/private-file denial, cancellation, timeout, output bounds, partial failure, workflow version pins, edited-definition replay, and the shared nested execution budget. A default-runtime test also verifies that a malformed installed registry leaves the real workspace and source-recovery routes usable.
+
+Live QA used a separate source copy and private data on port 4204. Its Task briefing module and panel were a **hand-written synthetic fixture**, not a GPT-generated feature or a primary installation. A real GPT completion discovered and ran it with `run_capability`. A real MCP client discovered its schema and ran the same executor directly and in a saved workflow. The actual browser panel's Refresh briefing button returned the same two-open-task, one-high-priority result and next-task ID/title. The workflow editor offered the installed action and preserved it on save. After a note-writing step was appended to that workflow, an exact retry returned the original one-step result and left notes at zero.
+
+Candidate verification executes actual registered-module behavior and rejects wrong/empty executors, unexpected host calls, and unused declared fixture calls. Declared expectations can still be inadequate; they are behavior evidence for those cases, not a proof of arbitrary user intent. Review is still required for generated server modules. The new provider gateway keeps 28 fixed definitions while the live catalog held 29 actions including the synthetic module. Executable documentation examples were separately run in guarded children and their panel receipt handling was checked.
+
+Voice aliases, ambiguous/failed/removed panels, schema-driven workflow drafts, changed capability pins, current-mount-only Open links, and direct partial error receipts have actual-module VM tests. No microphone was recorded to verify the new spoken aliases. The white default canvas remains in place; installed panels and their voice phrases live under Tools.
+
+Real HTTP/child tests verify that global Stop and client disconnect cancel direct capability execution and workflow requests, retain completed host-action receipts, and prevent follow-on or repeated effects. Workflow checks distinguish a live running receipt from a restart-interrupted receipt. UI tests verify that a lost response retains only the workflow/run IDs across reload and offers an explicit Check last run using the original request; it never automatically replays.
+
+The primary service was upgraded after a consistent private SQLite backup. The final managed worker changed from 9224 to 15760, with GPT ready, 28 base actions, and no synthetic custom capability installed. An earlier read-only verification helper accidentally created repeated sessions and reached the local admission limit; it was corrected to reuse its cookie, and normal access was restored through the owned host's normal relaunch. Authentication and rate limits were retained.
+
+The final browser view visibly showed the blank white canvas, small bottom strip, closed Chat, and Tools menu. The idle native shell was then reopened through the normal launcher; its fresh corner accessibility tree exposed Tools, closed Chat, and Microphone off. Native screenshot capture included an unrelated overlapping window, so that image was not retained or used as visual proof. Settings desktop relaunch remains independently unverified.
+
 ## White voice canvas, retained conversations, and taught preferences (0.8.0)
 
 This work used a separate private QA workspace on port 4203. It did not seed the primary workspace with synthetic conversations or preferences, enter API keys, or record a human microphone utterance.
