@@ -107,7 +107,7 @@ Windows API keys are encrypted with **DPAPI for the current Windows user**, boun
 
 1. Describe the behavior and what should count as working. Companion starts a persisted build job using the selected AI.
 2. The builder reads allowed application source and generates complete changed files in a separate candidate copy. Private runtime data and credentials are excluded.
-3. It runs fixed syntax, regression, registration, and applicable feature checks. The interface shows actual events, source diffs, and check output.
+3. It runs fixed syntax, regression, registration, and applicable feature checks. A generated candidate that fails a check gets one bounded correction using the same request, source baseline and initial acceptance checks. **Attempt history** retains both diffs and check reports. External patches are not automatically rewritten. [Build correction](docs/BUILD_CORRECTION.md) explains the limits and recovery.
 4. Passing routine frontend changes may activate automatically when that option is enabled. Protected controls, backend/launcher changes, and file deletions require review of the concrete diff and an **Activate feature** action.
 5. Activation checks that the source has not changed since the candidate was prepared. **Roll back changes** restores the retained version when the affected files have not subsequently changed.
 6. If the build came from a chat/voice task, wait for **Continue original request**, then choose it explicitly. **Open work** shows its actual result and partial receipts. A direct build-form request or external patch changes source without creating a linked task to finish.
@@ -153,7 +153,9 @@ npm test
 npm run check
 ```
 
-The 0.16 update passed **623 Node tests** and **62 source syntax checks**. In a separate test app, real GPT built a missing Task fit tool, its reviewed activation loaded a fresh service, and **Continue original request** ran that tool and saved the exact result. Retrying and restarting preserved one completed Work job and single notes. The primary app now serves 0.16 with its full saved workspace unchanged. [QA.md](QA.md) records the actual checks and remaining physical-voice, native-shell and account checks.
+The 0.17 update passed **656 Node tests** and **64 source syntax checks**. In an isolated app, a seeded failing duration tool received one real GPT correction, passed its unchanged acceptance cases, ran through GPT after reviewed activation, and rolled back to all 156 original source files. The first failure remains inspectable. The primary app now serves 0.17 with its saved workspace unchanged. [QA.md](QA.md) records the live evidence and remaining physical-voice, native-shell and account checks.
+
+The 0.16 update passed **623 Node tests** and **62 source syntax checks**. In a separate test app, real GPT built a missing Task fit tool, its reviewed activation loaded a fresh service, and **Continue original request** ran that tool and saved the exact result. Retrying and restarting preserved one completed Work job and single notes.
 
 The 0.15 update passed 529 Node tests and 55 JavaScript syntax checks. Live browser, GPT and MCP checks saved and undid real synthetic text files while preserving BOM, emoji and CRLF. The source-builder regression baseline also passed without activation. [QA.md](QA.md) records exact recovery checks and the human picker, physical-voice and Electron checks still outstanding.
 

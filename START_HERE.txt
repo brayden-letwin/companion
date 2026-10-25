@@ -47,6 +47,8 @@ MISSING A TOOL? FINISH THE ORIGINAL REQUEST
    open the linked build. Your request is kept apart from Build instructions.
 2. Read the actual changes and checks. Protected changes need review and
    Activate feature; ordinary verified changes may activate automatically.
+   A generated candidate that fails checks gets one correction. Attempt history
+   keeps both candidates' changes and checks; after two failures the build stops.
    Wait for any required service restart and readiness check.
 3. When Continue original request appears, choose it. Or, with that build open,
    say exactly "continue original request". Nothing resumes automatically.

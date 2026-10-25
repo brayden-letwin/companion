@@ -30,6 +30,10 @@ After an uncertain workflow response, retain only its workflow ID and operation 
 
 ## Build follow-through
 
+An AI-generated candidate may receive one automatic correction after concrete verification failure. Preserve the original request, provider configuration, complete source context and source baseline. Retain immutable failed candidate/check evidence before another model call; clear current checks while correction runs. Corrections are complete patches against the original baseline, with no orphaned prior changes. Never remove or rewrite initial generated feature tests, registered behavior or capability acceptance cases merely to pass. Keep original trusted checks, source conflict detection, normal protected activation and runtime readiness. External patches and nonverification failures do not automatically correct. Stop and restart must never replay an uncertain attempt. Read-only attempt history cannot start work. See docs/BUILD_CORRECTION.md.
+
+`src/build-attempts.mjs` is protected review UI. Keep its historical evidence separate from the latest candidate's activation controls.
+
 Keep the original accepted human request separate from the model-written implementation spec. Reserve a stable build/link/Work identity before coding admission; one original receipt has one linked follow-through. Continue is explicit and must prove current applied source hashes, provided callable capability pins and the required new public runtime lifetimes. It revalidates the original provider/source/project, starts a dedicated nonactivating Work turn, reuses completed exact prior effect receipts and cannot recursively build/delegate. Successful model text is insufficient: retain a matching new capability execution receipt. A missing continuation ledger must never turn its queued Work into an unrestricted task. GET/restart/uncertain acknowledgements reconcile the original identities without replaying effects. Preserve Stop and truthful partial outcomes. See docs/BUILD_FOLLOW_THROUGH.md.
 
 ## Project folders
