@@ -22,6 +22,64 @@ async function fixture(t, options = {}) {
 const executionId=(prefix,request,call)=>{const h=createHash('sha256').update(`${request}:${call}`).digest('hex').slice(0,32);return`${prefix}:${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;};
 const fakeCapability=(version=1)=>({id:'fixture',title:'Fixture',module:'./fixture.mjs',modulePath:path.join(tmpdir(),'fixture.mjs'),moduleHash:'a'.repeat(64),version,hash:String(version).repeat(64),effectPolicy:'workspace',workflowAllowed:true,tool:{name:'cap_fixture',description:'Synthetic capability.',parameters:{type:'object',properties:{text:{type:'string',minLength:1,maxLength:100}},required:['text'],additionalProperties:false}}});
 
+test('task deadlines preserve calendar dates and exact instants, omit unchanged values and clear both explicitly',async t=>{
+  const f=await fixture(t),created=f.apply('addTask',{title:'Calendar deadline',dueDate:'2028-02-29'});assert.equal(created.task.dueDate,'2028-02-29');assert.equal(created.task.dueAt,null);assert.equal(created.appliedRevision,1);
+  const taskId=created.task.id,renamed=f.apply('updateTask',{taskId,title:'Same day, new title'});assert.equal(renamed.task.dueDate,'2028-02-29');assert.equal(renamed.task.dueAt,null);
+  const timed=f.apply('updateTask',{taskId,dueAt:'2026-11-01T01:30:00-07:00'});assert.equal(timed.task.dueAt,'2026-11-01T08:30:00.000Z');assert.equal(timed.task.dueDate,null);
+  assert.equal(f.apply('completeTask',{taskId}).task.dueAt,timed.task.dueAt);
+  for(const fields of [{dueDate:''},{dueAt:null},{dueDate:null,dueAt:''}]){
+    f.apply('updateTask',{taskId,dueDate:'2026-10-25'});const result=f.apply('updateTask',{taskId,...fields});assert.equal(result.task.dueDate,null);assert.equal(result.task.dueAt,null);
+  }
+  const normalizedCalendar=f.apply('updateTask',{taskId,dueDate:'2026-10-25',dueAt:null});assert.equal(normalizedCalendar.task.dueDate,'2026-10-25');assert.equal(normalizedCalendar.task.dueAt,null);
+  const normalizedInstant=f.apply('updateTask',{taskId,dueDate:null,dueAt:'2026-10-25T12:00:00Z'});assert.equal(normalizedInstant.task.dueDate,null);assert.equal(normalizedInstant.task.dueAt,'2026-10-25T12:00:00.000Z');
+  const before=f.store.snapshot();for(const fields of [{dueDate:'2026-02-29'},{dueDate:'2026-02-30'},{dueDate:'2026-1-01'},{dueAt:'2026-10-25'},{dueAt:'2026-11-01T01:30:00'},{dueAt:'2026-10-25T12:00:00.0001Z'},{dueAt:'2026-02-30T12:00:00Z'},{dueDate:'2026-10-25',dueAt:'2026-10-25T12:00:00Z'}])assert.throws(()=>f.apply('updateTask',{taskId,title:'Must roll back',...fields}),{code:'invalid_deadline'});
+  assert.deepEqual(f.store.snapshot(),before);
+});
+
+test('deadline task receipts retain original create, update and completion outcomes across later changes and restart',async t=>{
+  const f=await fixture(t),tools=createProductivityTools({store:f.store}),createArgs={title:'Original task',dueDate:'2026-10-25'},createContext={requestId:'deadline-create',callId:'one'},created=await tools.execute('create_task',createArgs,createContext),taskId=created.task.id;
+  const updateArgs={taskId,dueAt:'2026-10-25T12:00:00+02:00'},updateContext={requestId:'deadline-edit',callId:'one'},updated=await tools.execute('update_task',updateArgs,updateContext),completeContext={requestId:'deadline-complete',callId:'one'},completed=await tools.execute('complete_task',{taskId},completeContext);
+  await tools.execute('update_task',{taskId,status:'todo',title:'Current title',dueDate:'2026-12-31'},{requestId:'deadline-later',callId:'one'});const before=f.store.snapshot();
+  for(const [name,args,context,original]of [['create_task',createArgs,createContext,created],['update_task',updateArgs,updateContext,updated],['complete_task',{taskId},completeContext,completed]]){
+    const replay=await tools.execute(name,args,context);assert.equal(replay.replayed,true);assert.deepEqual(replay.task,original.task);assert.equal(replay.appliedRevision,original.appliedRevision);
+  }
+  assert.deepEqual(f.store.snapshot(),before);f.store.close();const reopened=await f.open(),after=createProductivityTools({store:reopened}),replay=await after.execute('update_task',updateArgs,updateContext);assert.deepEqual(replay.task,updated.task);assert.equal(replay.appliedRevision,2);assert.equal(replay.replayed,true);assert.deepEqual(reopened.snapshot(),before);
+});
+
+test('opening old task records never guesses a calendar deadline or rewrites legacy saved instants',async t=>{
+  const f=await fixture(t),created=f.apply('addTask',{title:'Legacy task',dueAt:'2026-10-25T01:30:00Z'}),legacy=f.store.snapshot();delete legacy.tasks[0].dueDate;legacy.tasks[0].dueAt='2026-10-25T01:30:00Z';
+  const db=new DatabaseSync(path.join(f.dataDirectory,'productivity.sqlite'));try{db.prepare('UPDATE workspace SET state=? WHERE id=1').run(JSON.stringify(legacy));}finally{db.close();}
+  f.store.close();const reopened=await f.open();assert.deepEqual(reopened.snapshot(),legacy);const changed=f.apply('updateTask',{taskId:created.task.id,title:'Unrelated edit'},reopened);assert.equal(changed.task.dueAt,legacy.tasks[0].dueAt);assert.equal(Object.hasOwn(changed.task,'dueDate'),false);
+});
+
+test('task snapshot history is atomic with its state receipt and leaves the original two-column writer compatible',async t=>{
+  const f=await fixture(t),operation={operationId:randomUUID(),expectedRevision:0,type:'addTask',title:'Atomic deadline',dueDate:'2026-10-25'},db=new DatabaseSync(path.join(f.dataDirectory,'productivity.sqlite'));
+  try{
+    assert.equal(db.prepare('PRAGMA table_info(workspace_receipts)').all().length,2);const oldId=randomUUID();db.prepare('INSERT INTO workspace_receipts VALUES(?,?)').run(oldId,'old-writer');
+    db.exec("CREATE TRIGGER synthetic_task_receipt_failure BEFORE INSERT ON task_mutation_receipts BEGIN SELECT RAISE(ABORT, 'Synthetic task history failure'); END;");
+    const before=f.store.snapshot();assert.throws(()=>f.store.apply(operation),/Synthetic task history failure/);assert.deepEqual(f.store.snapshot(),before);assert.equal(db.prepare('SELECT id FROM workspace_receipts WHERE id=?').get(operation.operationId),undefined);
+    db.exec('DROP TRIGGER synthetic_task_receipt_failure;');const applied=f.store.apply(operation);assert.equal(applied.replayed,false);assert.equal(applied.appliedRevision,1);assert.equal(JSON.parse(db.prepare('SELECT result_json FROM task_mutation_receipts WHERE id=?').get(operation.operationId).result_json).task.dueDate,'2026-10-25');
+  }finally{db.close();}
+});
+
+test('legacy task retries expose an unavailable original snapshot instead of borrowing a later deadline',async t=>{
+  const f=await fixture(t),operation={operationId:randomUUID(),expectedRevision:0,type:'addTask',title:'Legacy receipt',dueDate:'2026-10-25'},first=f.store.apply(operation);f.apply('updateTask',{taskId:first.task.id,dueDate:'2026-12-31'});
+  const db=new DatabaseSync(path.join(f.dataDirectory,'productivity.sqlite'));try{db.prepare('DELETE FROM task_mutation_receipts WHERE id=?').run(operation.operationId);}finally{db.close();}
+  const replay=f.store.apply(operation);assert.deepEqual(replay.task,{id:first.task.id});assert.equal(replay.originalTaskUnavailable,true);assert.equal(replay.appliedRevision,null);assert.equal(replay.replayed,true);assert.equal(replay.workspace.tasks[0].dueDate,'2026-12-31');
+});
+
+test('task history limit rolls back only fresh task changes and keeps original retries and other workspace writes available',async t=>{
+  const f=await fixture(t,{taskReceiptBytes:1024}),operation={operationId:randomUUID(),expectedRevision:0,type:'addTask',title:'Retained deadline',dueDate:'2026-10-25'},first=f.store.apply(operation),before=f.store.snapshot();
+  assert.throws(()=>f.apply('updateTask',{taskId:first.task.id,details:'x'.repeat(1000),dueDate:'2026-12-31'}),{code:'task_receipt_limit',statusCode:429});assert.deepEqual(f.store.snapshot(),before);assert.deepEqual(f.store.apply(operation).task,first.task);
+  assert.equal(f.apply('addNote',{text:'Independent note still saves.'}).workspace.notes.length,1);assert.deepEqual(f.store.apply(operation).task,first.task);
+});
+
+test('large task model receipts stay bounded and retain original deadline metadata after later edits',async t=>{
+  const f=await fixture(t),tools=createProductivityTools({store:f.store}),args={title:'Original escaped details',details:'\ud800'.repeat(12000),dueDate:'2026-10-25'},context={requestId:'deadline-large',callId:'one'},original=await tools.execute('create_task',args,context);
+  assert.equal(original.detailsOmitted,true);assert.equal(original.task.detailsOmitted,true);assert.equal(original.task.detailsLength,12000);assert.equal(original.task.dueDate,'2026-10-25');assert.ok(Buffer.byteLength(JSON.stringify(original))<16*1024);
+  f.apply('updateTask',{taskId:original.task.id,dueDate:'2026-12-31',details:'Current details'});const replay=await tools.execute('create_task',args,context);assert.deepEqual(replay.task,original.task);assert.equal(replay.appliedRevision,original.appliedRevision);assert.equal(replay.replayed,true);
+});
+
 test('voice routine edits keep one existing ID and immutable original save results across later edits and restart',async t=>{
   const f=await fixture(t),tools=createProductivityTools({store:f.store}),initial={name:'Morning routine',description:'Keep this description',enabled:false,steps:[{tool:'start_focus',arguments:{minutes:25}}]},created=await tools.execute('save_workflow',initial,{requestId:'routine-create',callId:'one'}),workflowId=created.workflow.id;
   assert.equal(created.appliedRevision,1);assert.equal(created.replayed,false);

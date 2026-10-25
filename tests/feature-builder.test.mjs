@@ -104,6 +104,12 @@ function executablePatch(code='export function execute(args){return {total:args.
   const capability={id:'double-value',title:'Double value',module:'./double-value.mjs',version:1,tool:{name:'cap_double_value',description:'Double one number.',parameters:{type:'object',properties:{value:{type:'integer'}},required:['value'],additionalProperties:false}},workflowAllowed:true,effectPolicy:'pure',acceptance:[{name:'Known result',arguments:{value:3},expected:{total:6}}]};
   return {summary:'Add one executable registered capability.',files:[{path:'server/capabilities/manifest.json',content:JSON.stringify({version:1,capabilities:[capability]})},{path:'server/capabilities/double-value.mjs',content:code}],tests:[]};
 }
+
+test('shared deadline semantics remain protected even when their source is served to the browser',async t=>{
+ const file='src/core/productivity-deadlines.mjs',f=await fixture(t,{complete:async()=>({summary:'Review shared deadline validation.',files:[{path:file,content:'export const deadlinePolicy = "review required";\n'}],tests:[]})});
+ const job=await finished(f.builder,(await f.builder.request({prompt:'Prepare a change to shared task deadline validation.',providerId:'synthetic',autoApply:true},OWNER)).id);
+ assert.equal(job.status,'review_required');assert.equal(job.reviewRequired,true);assert.equal(job.files[0].protected,true);await absent(path.join(f.root,file));
+});
 test('executable capabilities require real behavior verification and protected activation',async t=>{
   const f=await fixture(t,{complete:async()=>executablePatch()});
   const job=await finished(f.builder,(await f.builder.request({prompt:'Add a tested callable action.',providerId:'synthetic',autoApply:true},OWNER)).id);

@@ -10,6 +10,19 @@ import { createProductivityTools } from '../server/productivity-tools.mjs';
 
 const schema={type:'object',properties:{text:{type:'string',minLength:1,maxLength:100}},required:['text'],additionalProperties:false};
 const entry=(extra={})=>({id:'word-count',title:'Word count',module:'./word-count.mjs',version:1,tool:{name:'cap_word_count',description:'Count words in supplied text.',parameters:structuredClone(schema)},effectPolicy:'pure',workflowAllowed:true,acceptance:[{name:'Counts words',arguments:{text:'one two'},expected:{words:2}}],...extra});
+
+test('deadline tools extend existing names with calendar filters, nullable fields and read-only local-time resolution',async()=>{
+  const clock=Date.parse('2026-10-25T06:30:45Z'),store={snapshot:()=>({revision:0,tasks:[],notes:[],workflows:[],preferences:[]})},tools=createProductivityTools({store,now:()=>clock}),catalog=builtinCatalog(),definition=name=>tools.definitions.find(item=>item.name===name);
+  assert.equal(tools.definitions.length,25);for(const name of ['list_tasks','summarize_tasks'])assert.deepEqual(validateToolArguments(definition(name),{deadline:'today',timezone:'America/Vancouver',asOf:'2026-10-25T06:30:45.000Z'}).deadline,'today');
+  assert.deepEqual(validateToolArguments(definition('create_task'),{title:'Calendar',dueDate:'2026-10-25'}),{title:'Calendar',dueDate:'2026-10-25'});assert.equal(validateToolArguments(definition('update_task'),{taskId:randomUUID(),dueAt:null}).dueAt,null);
+  assert.throws(()=>validateToolArguments(definition('list_tasks'),{deadline:'later'}),{code:'invalid_tool'});
+  const actual=await tools.execute('get_time',{timezone:'America/Vancouver'});assert.equal(actual.iso,new Date(clock).toISOString());assert.equal(actual.localDate,'2026-10-24');assert.equal(actual.localTime,'23:30:45');assert.equal(actual.timezone,'America/Vancouver');
+  const fold=await tools.execute('get_time',{action:'resolve',timezone:'America/Vancouver',localDateTime:'2025-11-02T01:30'});assert.equal(fold.status,'ambiguous');assert.equal(fold.candidates.length,2);assert.notEqual(fold.candidates[0].dueAt,fold.candidates[1].dueAt);
+  const gap=await tools.execute('get_time',{action:'resolve',timezone:'America/Vancouver',localDateTime:'2025-03-09T02:30'});assert.equal(gap.status,'nonexistent');assert.deepEqual(gap.candidates,[]);
+  const unique=await tools.execute('get_time',{action:'resolve',timezone:'Asia/Kathmandu',localDateTime:'2026-10-25T12:00'});assert.equal(unique.status,'unique');assert.equal(unique.candidates[0].dueAt,'2026-10-25T06:15:00.000Z');assert.equal(unique.candidates[0].offsetMinutes,345);
+  await assert.rejects(tools.execute('get_time',{action:'resolve',localDateTime:'2026-10-25T12:00'}),{code:'invalid_timezone'});await assert.rejects(tools.execute('get_time',{localDateTime:'2026-10-25T12:00',timezone:'UTC'}),{code:'invalid_tool'});
+  assert.equal(catalog.find(item=>item.name==='get_time').effectPolicy,'pure');assert.equal(catalog.find(item=>item.name==='get_time').workflowAllowed,true);
+});
 async function fixture(t,record=entry(),code='export async function execute(args){return {words:args.text.trim().split(/\\s+/).length};}'){
   const closers=[],root=await mkdtemp(path.join(tmpdir(),'companion-registry-')),directory=path.join(root,'server','capabilities');await mkdir(directory,{recursive:true});
   const save=async value=>writeFile(path.join(directory,'manifest.json'),JSON.stringify({version:1,capabilities:value}));await save([record]);await writeFile(path.join(directory,'word-count.mjs'),code);
