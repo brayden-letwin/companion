@@ -1,4 +1,13 @@
 const $ = id => document.getElementById(id);
+const shellCandidate = window.companionShell;
+const nativeShell = shellCandidate?.desktop===true&&['corner','workspace'].includes(shellCandidate.mode)
+  &&['openWorkspace','setExpanded','hide','onStop','onModeChanged'].every(name=>typeof shellCandidate[name]==='function')?shellCandidate:null;
+const modeParameters = new URLSearchParams(location.search||'');
+const cornerMode = nativeShell?nativeShell.mode==='corner':(modeParameters.get('mode')||modeParameters.get('desktop'))==='corner';
+let cornerExpanded = false;
+let nativeWindowVisible = null;
+let nativeSourceRuntime = null;
+const shellSubscriptions = [];
 const MAX_RECORDING = 60_000;
 const ACTIVE_JOBS = new Set(['queued','generating','validating','applying']);
 const JOB_LABELS = {queued:'Queued',generating:'Building',validating:'Checking changes',ready:'Ready to activate',review_required:'Needs your review',applying:'Activating',applied:'Activated',conflict:'Files changed',failed:'Could not finish',cancelled:'Cancelled',rolled_back:'Rolled back',interrupted:'Interrupted',recovery_required:'Needs recovery'};
@@ -6,6 +15,9 @@ let workspace = null, providers = [], activeProviderId = '', jobs = [], selected
 let service = { transcriptionReady:false }, csrfToken = '', serviceError = '', checkingService = null;
 let serviceCheckGeneration = 0, runtimeInfo = null, runtimeReconnectPromise = null, runtimeReconnectGeneration = 0;
 let runtimeNotice = null, runtimeRetry = null, mcpConfiguration = '', integrationsPending = false;
+let desktopStatus=null, desktopActions=[], desktopRefreshPromise=null, desktopEpoch=0, desktopToolBusy=false, desktopMutationBusy=false;
+let desktopExecutionGeneration=0, activeDesktopRequest=null, desktopStopPromise=null, desktopSnapshot=null, desktopReview=null, desktopInputTarget=null;
+let desktopReviewGeneration=0;
 let currentView = 'today', showCompleted = false, workspacePending = false, jobsPending = false;
 let operationBusy = false, featureBusy = false, providerBusy = false, editingProviderId = null, editingTarget = null;
 let pendingWorkspaceRequest = null;
@@ -28,25 +40,61 @@ function timeLabel(value) { const date=new Date(value); return Number.isNaN(date
 function dateLabel(value) { const date=new Date(value); return Number.isNaN(date.getTime())?'':date.toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
 function toast(text) { $('toast').textContent=text; $('toast').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('toast').hidden=true,4500); }
 function emptyState(title,description) { const node=element('div','empty-state'); node.append(element('span','empty-glyph','✧'),element('h2','',title),element('p','',description)); return node; }
-function showDialog(id) { disableHandsFree(); if(recording||microphoneOpening)stopRecording(false); if(!$(id).open)$(id).showModal(); }
+function showDialog(id) { ensureCornerExpanded();disableHandsFree(); if(recording||microphoneOpening)stopRecording(false); if(!$(id).open)$(id).showModal(); }
+function renderCorner(){
+  document.body.classList.toggle('corner-mode',cornerMode);document.body.classList.toggle('native-shell',!!nativeShell);
+  document.body.classList.toggle('corner-expanded',cornerMode&&cornerExpanded);document.body.classList.toggle('corner-collapsed',cornerMode&&!cornerExpanded);
+  $('native-corner-header').hidden=!cornerMode;$('corner-empty').hidden=!cornerMode||messages.length>0;
+  $('corner-expand').textContent=cornerExpanded?'⌄':'⌃';$('corner-expand').setAttribute('aria-expanded',String(cornerExpanded));
+  $('corner-expand').setAttribute('aria-label',cornerExpanded?'Collapse corner':'Expand corner');$('corner-expand').title=cornerExpanded?'Collapse corner':'Expand corner';
+  $('corner-hide').disabled=!nativeShell;
+  $('restart-desktop').hidden=typeof nativeShell?.restart!=='function';
+}
+function setCornerExpanded(value){if(!cornerMode)return;const previous=cornerExpanded;cornerExpanded=!!value;renderCorner();if(nativeShell)try{nativeShell.setExpanded(cornerExpanded);}catch{cornerExpanded=previous;renderCorner();toast('The corner could not be resized.');}}
+function ensureCornerExpanded(){if(cornerMode&&!cornerExpanded)setCornerExpanded(true);}
+function updateCornerPreview(text){if(!cornerMode)return;$('corner-recent').textContent=String(text||'').slice(0,360);$('corner-recent').hidden=!text;$('corner-empty').hidden=messages.length>0;}
+function initNativeShell(){
+  renderCorner();
+  $('corner-expand').addEventListener('click',()=>setCornerExpanded(!cornerExpanded));
+  $('corner-recent').addEventListener('click',()=>{ensureCornerExpanded();showView('today');});
+  $('corner-open-workspace').addEventListener('click',()=>{if(nativeShell){try{nativeShell.openWorkspace();}catch{toast('The workspace could not be opened.');}}else location.assign('assistant.html?mode=workspace');});
+  $('corner-hide').addEventListener('click',()=>{if(!nativeShell)return;cancelTurn(false);try{nativeShell.hide();}catch{toast('The corner could not be hidden.');}});
+  $('corner-desktop').addEventListener('click',()=>{ensureCornerExpanded();showView('desktop');});
+  $('restart-desktop').addEventListener('click',restartNativeDesktop);
+  if(!nativeShell)return;
+  try{
+    shellSubscriptions.push(nativeShell.onStop(event=>{if(event?.reason==='hidden')cancelTurn(false);else stopAllActivity(false,{global:event?.reason==='shortcut'});}));
+    shellSubscriptions.push(nativeShell.onModeChanged(state=>{
+      if(!state||state.mode!==nativeShell.mode)return;
+      if(typeof state.expanded==='boolean')cornerExpanded=state.expanded;
+      if(typeof state.sourceRuntime==='boolean'){nativeSourceRuntime=state.sourceRuntime;featureRenderKey='';renderJobs();}
+      if(state.visible===false)cancelTurn(false);if(typeof state.visible==='boolean')nativeWindowVisible=state.visible;
+      if(state.shortcuts){$('native-shortcut-hint').hidden=false;$('native-shortcut-hint').textContent=[state.shortcuts.toggle?'Ctrl + Alt + Space shows corner':'Corner shortcut unavailable',state.shortcuts.stop?'Ctrl + Alt + Esc stops':'Global stop unavailable'].join(' · ');}
+      renderCorner();
+    }));
+  }catch{toast('Native window controls are unavailable.');}
+}
+function restartNativeDesktop(){if(typeof nativeShell?.restart!=='function'){toast('Close and relaunch the Companion desktop app to load its updated controls.');return;}stopAllActivity();try{nativeShell.restart();}catch{toast('The desktop app could not be relaunched.');}}
+function desktopUpdateNotice(){return nativeSourceRuntime===true?'Desktop source changed. Restart the desktop app to load its updated controls; a server-worker restart does not reload desktop code.':nativeSourceRuntime===false?'Desktop source changed. Rebuild the desktop app to load it; relaunching this copied package does not load repository edits.':'Desktop source changed. Relaunch from the updated source, or rebuild a copied desktop package, to load it.';}
 for(const close of document.querySelectorAll('.close-dialog'))close.addEventListener('click',()=>close.closest('dialog').close());
 function showView(view) {
-  if(!['today','tasks','notes','workflows','build','settings'].includes(view)&&!extensions.has(view))return;
+  if(!['today','tasks','notes','workflows','build','settings','desktop'].includes(view)&&!extensions.has(view))return;
   currentView=view;
   document.querySelectorAll('.view-panel').forEach(panel=>panel.hidden=panel.id!==view+'-view');
   document.querySelectorAll('[data-view]').forEach(item=>{item.classList.toggle('active',item.dataset.view===view);item.setAttribute('aria-current',item.dataset.view===view?'page':'false');});
-  $('view-title').textContent=extensions.get(view)?.title||({today:'Today',tasks:'Tasks',notes:'Notes',workflows:'Workflows',build:'Build a feature',settings:'Settings'})[view];
+  $('view-title').textContent=extensions.get(view)?.title||({today:'Today',tasks:'Tasks',notes:'Notes',workflows:'Workflows',build:'Build a feature',settings:'Settings',desktop:'Computer'})[view];
   $('content-scroll').scrollTop=0;
-  if(view==='settings'){renderProviders();renderRuntime();if(!mcpConfiguration)void loadIntegrations();}
+  if(view==='settings'){renderProviders();renderRuntime();if(!mcpConfiguration)void loadIntegrations();void refreshDesktop().catch(error=>{$('desktop-settings-status').textContent=error.message;});}
   if(view==='build'){renderJobs();refreshJobsSafely();}
+  if(view==='desktop')void refreshDesktop().catch(error=>{$('desktop-error').textContent=error.message;});
   if(view!=='settings')$('provider-key').value='';
 }
 for(const nav of document.querySelectorAll('[data-view]'))nav.addEventListener('click',()=>showView(nav.dataset.view));
 for(const suggestion of document.querySelectorAll('[data-prompt]'))suggestion.addEventListener('click',()=>{$('question').value=suggestion.dataset.prompt;$('question').focus();});
 $('welcome-build').addEventListener('click',()=>{showView('build');$('feature-prompt').focus();});
 async function api(path,options={}) {
-  const {signal,raw,id,...rest}=options;const headers=new Headers(rest.headers||{});
-  if(rest.method==='POST'){headers.set('X-CSRF-Token',csrfToken);if(!raw)headers.set('Content-Type','application/json');if(id)headers.set('X-Request-Id',id);}
+  const {signal,raw,id,csrfTokenOverride,...rest}=options;const headers=new Headers(rest.headers||{});
+  if(rest.method==='POST'){headers.set('X-CSRF-Token',csrfTokenOverride??csrfToken);if(!raw)headers.set('Content-Type','application/json');if(id)headers.set('X-Request-Id',id);}
   let response;
   try{response=await fetch('/api/assistant/'+path,{...rest,headers,credentials:'same-origin',cache:'no-store',redirect:'error',signal});}
   catch(error){if(error.name==='AbortError')throw error;throw new Error('Companion’s service could not be reached. Double-click Start Companion.cmd, then check again.');}
@@ -67,13 +115,14 @@ async function checkService({reconnecting=false,force=false,deadline=Infinity}={
   checkingService=(async()=>{
     try{
       const session=await boundedApi('session',{},timeout());if(typeof session.csrfToken!=='string')throw new Error('Companion’s session could not be opened.');if(check!==serviceCheckGeneration)return;csrfToken=session.csrfToken;
-      const results=await Promise.allSettled([boundedApi('providers',{},timeout()),boundedApi('status',{},timeout()),boundedApi('workspace',{},timeout()),boundedApi('features',{},timeout()),boundedApi('runtime',{},timeout())]);
+      const results=await Promise.allSettled([boundedApi('providers',{},timeout()),boundedApi('status',{},timeout()),boundedApi('workspace',{},timeout()),boundedApi('features',{},timeout()),boundedApi('runtime',{},timeout()),boundedApi('desktop',{},timeout())]);
       if(check!==serviceCheckGeneration)return;
       if(results[0].status==='fulfilled'){applyProviders(results[0].value);serviceError='';}else{providers=[];activeProviderId='';serviceError=results[0].reason.message;}
       if(results[1].status==='fulfilled')service=results[1].value;else service={transcriptionReady:false,transcriptionUnavailableReason:results[1].reason.message};
       if(results[2].status==='fulfilled')applyWorkspace(results[2].value);else serviceError||=results[2].reason.message;
       if(results[3].status==='fulfilled'&&Array.isArray(results[3].value.jobs)){jobs=results[3].value.jobs;if(!selectedJobId&&jobs.length)selectedJobId=jobs[0].id;renderJobs();}else if(results[3].status==='rejected')serviceError||=results[3].reason.message;
       if(results[4].status==='fulfilled')applyRuntime(results[4].value);
+      if(results[5].status==='fulfilled')applyDesktopStatus(results[5].value);
       return {workspaceReady:results[2].status==='fulfilled',jobsReady:results[3].status==='fulfilled',runtimeReady:results[4].status==='fulfilled'};
     }catch(error){if(check===serviceCheckGeneration){serviceError=error.message;providers=[];activeProviderId='';service={transcriptionReady:false};}return {workspaceReady:false,jobsReady:false,runtimeReady:false};}
     finally{if(check===serviceCheckGeneration){renderProviders();renderService();renderRuntime();$('connection-refresh').disabled=!!runtimeReconnectPromise;$('retry-service').disabled=!!runtimeReconnectPromise;checkingService=null;}}
@@ -106,19 +155,23 @@ function renderRuntime(){
   $('restart-runtime').disabled=busy||!runtimeInfo?.managed;
   $('connection-refresh').disabled=busy||!!checkingService;
   $('retry-service').disabled=busy||!!checkingService;
+  $('desktop-refresh').disabled=busy||!!desktopRefreshPromise;
+  $('desktop-settings-refresh').disabled=busy||!!desktopRefreshPromise;
   $('runtime-banner').hidden=!runtimeNotice;
   $('runtime-banner').className='runtime-banner'+(runtimeNotice?` runtime-${runtimeNotice.phase}`:'');
   $('runtime-message').textContent=runtimeNotice?.message||'';
   $('runtime-retry').hidden=!runtimeRetry||busy||!['failed','manual'].includes(runtimeNotice?.phase);
   $('runtime-retry').disabled=busy;
-  $('mic-button').disabled=busy;$('send-question').disabled=busy||turnBusy;
+  $('mic-button').disabled=busy||desktopToolBusy||desktopMutationBusy;$('send-question').disabled=busy||turnBusy||desktopToolBusy||desktopMutationBusy;
+  $('desktop-review-mic').disabled=busy||desktopToolBusy||desktopMutationBusy||!service.transcriptionReady;
   $('provider-select').disabled=busy||providerBusy||!providers.length;
   $('provider-save').disabled=busy||providerBusy;
   $('build-submit').disabled=busy||featureBusy;
-  if(busy){$('hands-free').disabled=true;$('connection-label').textContent='Reconnecting to Companion…';$('connection-dot').className='status-dot offline';}
+  if(busy||desktopToolBusy||desktopMutationBusy)$('hands-free').disabled=true;if(busy){$('connection-label').textContent='Reconnecting to Companion…';$('connection-dot').className='status-dot offline';}
 }
 async function reconnectAfterRestart(metadata,{jobId=null,action='restart'}={}){
   if(runtimeReconnectPromise)return runtimeReconnectPromise;
+  ensureCornerExpanded();
   const baselinePid=metadata?.workerPid||runtimeInfo?.workerPid;
   if(!Number.isInteger(baselinePid)||baselinePid<1)throw new Error('The previous server could not be identified. Check the connection before restarting.');
   runtimeRetry={baselinePid,jobId,action};
@@ -174,12 +227,173 @@ async function loadIntegrations(){
     }
     mcpConfiguration=JSON.stringify({mcpServers:{companion:configuration}},null,2);
     $('mcp-config').value=mcpConfiguration;$('mcp-config-panel').hidden=false;$('mcp-copy').disabled=false;
-    $('mcp-status').textContent=`${Array.isArray(value.tools)?value.tools.length:0} workspace actions are available through Companion’s tools. Paste this configuration into your AI client’s MCP settings, then reconnect that client.`;
+    $('mcp-status').textContent=`${Array.isArray(value.tools)?value.tools.length:0} actions are available through Companion’s tools. Paste this configuration into your AI client’s MCP settings, then reconnect that client.`;
   }catch(error){$('mcp-error').textContent=error.message;}
   finally{integrationsPending=false;$('mcp-load').disabled=false;}
 }
 $('mcp-load').addEventListener('click',()=>void loadIntegrations());
 $('mcp-copy').addEventListener('click',async()=>{if(!mcpConfiguration)return;try{if(!navigator.clipboard?.writeText)throw new Error('Select and copy the configuration below.');await navigator.clipboard.writeText(mcpConfiguration);toast('Configuration copied. Paste it into your AI client’s MCP settings.');}catch(error){$('mcp-config').focus();$('mcp-config').select();$('mcp-error').textContent=error.message||'Select and copy the configuration below.';}});
+const DESKTOP_LABELS={pending:'Needs review',executing:'Sending input',completed:'Completed',failed:'Could not finish',cancelled:'Cancelled',expired:'Preview expired'};
+function desktopPending(action){return action?.status==='pending'&&(!action.expiresAt||Date.parse(action.expiresAt)>Date.now());}
+function desktopSignature(action){return JSON.stringify({id:action.id,target:action.target,preview:action.preview,expiresAt:action.expiresAt});}
+function rememberDesktopAction(action){
+  if(!action||typeof action.id!=='string'||!Object.hasOwn(DESKTOP_LABELS,action.status))return;
+  const old=desktopActions.find(item=>item.id===action.id);
+  if(old?.status==='completed'&&action.status!=='completed')return;
+  if(old&&['failed','cancelled','expired'].includes(old.status)&&['pending','executing'].includes(action.status))return;
+  desktopActions=[clone(action),...desktopActions.filter(item=>item.id!==action.id)].slice(0,80);desktopEpoch+=1;
+  if(desktopPending(action)&&!old)ensureCornerExpanded();renderDesktopActions();renderDesktopReview();
+}
+function ingestDesktopResult(result){
+  if(result?.desktopAction)rememberDesktopAction(result.desktopAction);
+  if(result?.desktopReceipt){const receipt=result.desktopReceipt;if(receipt.status==='completed'){
+    const row={id:receipt.id,status:'completed',summary:receipt.summary,target:receipt.target,createdAt:receipt.completedAt,receipt};rememberDesktopAction(row);updateCornerPreview(receipt.summary);
+  }}
+}
+function applyDesktopStatus(value){
+  if(!value||typeof value.available!=='boolean')throw new Error('Computer control availability could not be read.');desktopStatus=clone(value);renderDesktopStatus();
+  if(value.pendingCount>0&&!desktopRefreshPromise&&!runtimeReconnectPromise)void refreshDesktop().catch(()=>{});
+}
+function renderDesktopStatus(){
+  const ready=desktopStatus?.available===true,busy=desktopToolBusy||desktopMutationBusy||!!runtimeReconnectPromise;
+  const detail=desktopStatus?ready?'Computer controls are available on this PC. Input actions need a prepared preview.':desktopStatus.reason||'Computer controls are unavailable in this runtime.':'Checking computer control availability…';
+  $('desktop-status').textContent=detail;$('desktop-settings-status').textContent=detail;$('desktop-status-dot').className='status-dot '+(ready?'ready':'offline');
+  $('desktop-app-search').disabled=busy||!ready||desktopStatus?.capabilities?.installedApps===false;
+  $('desktop-window-list').disabled=busy||!ready||desktopStatus?.capabilities?.windows===false;
+  $('desktop-refresh').disabled=!!desktopRefreshPromise||!!runtimeReconnectPromise;
+  $('desktop-settings-refresh').disabled=!!desktopRefreshPromise||!!runtimeReconnectPromise;
+  renderDesktopActions();
+}
+async function refreshDesktop(){
+  if(desktopRefreshPromise||destroyed||runtimeReconnectPromise)return desktopRefreshPromise;
+  const epoch=desktopEpoch;
+  desktopRefreshPromise=Promise.resolve().then(async()=>{
+    if(!csrfToken)await checkService();
+    const [status,listing]=await Promise.all([boundedApi('desktop'),boundedApi('desktop/actions')]);
+    applyDesktopStatus(status);if(!Array.isArray(listing.actions))throw new Error('Computer action history could not be read.');
+    if(epoch===desktopEpoch)desktopActions=desktopActions.filter(action=>['completed','failed','cancelled','expired'].includes(action.status));
+    for(const action of [...listing.actions].reverse())rememberDesktopAction(action);
+    renderDesktopActions();renderDesktopReview();
+  }).finally(()=>{desktopRefreshPromise=null;renderDesktopStatus();});
+  renderDesktopStatus();return desktopRefreshPromise;
+}
+function renderDesktopActions(){
+  const list=$('desktop-action-list');list.replaceChildren();
+  if(!desktopActions.length)list.append(element('p','desktop-hint','Actions and their real outcomes will appear here.'));
+  for(const action of desktopActions.slice(0,15)){
+    const row=element('article','desktop-action-row'),main=element('div');main.append(element('strong','',action.summary||'Computer action'));
+    const status=action.status==='pending'&&!desktopPending(action)?'expired':action.status;
+    main.append(element('span','desktop-action-state '+status,DESKTOP_LABELS[status]||status));if(action.error)main.append(element('p','inline-error',typeof action.error==='string'?action.error:action.error.message));row.append(main);
+    if(desktopPending(action))row.append(button('Review ↗','secondary-button',()=>void openDesktopReview(action.id)));
+    list.append(row);
+  }
+  const pending=desktopActions.filter(desktopPending);$('desktop-pending-banner').hidden=!pending.length;$('desktop-nav-count').hidden=!pending.length;$('desktop-nav-count').textContent=pending.length;
+  document.body.classList.toggle('has-desktop-pending',pending.length>0);
+  $('desktop-pending-text').textContent=`${pending.length} computer action${pending.length===1?' needs':'s need'} your review.`;
+}
+async function runDesktopTool(tool,args={}){
+  if(desktopToolBusy||desktopMutationBusy||runtimeReconnectPromise)throw new Error('Let the current computer action finish, or stop it first.');
+  if(!desktopStatus?.available)throw new Error(desktopStatus?.reason||'Computer controls are not ready. Check availability first.');
+  const turn=++desktopExecutionGeneration,controller=new AbortController();activeDesktopRequest={controller,turn};desktopToolBusy=true;ensureCornerExpanded();disableHandsFree();if(recording||microphoneOpening)stopRecording(false);stopSpeech();setState('desktop','A real computer request is running.');renderDesktopStatus();renderRuntime();
+  const timeout=setTimeout(()=>controller.abort(),45000);
+  try{const value=await api('tools/run',{method:'POST',body:JSON.stringify({tool,arguments:args,operationId:crypto.randomUUID()}),signal:controller.signal});if(turn!==desktopExecutionGeneration)throw new DOMException('Stopped.','AbortError');if(value.workspace)applyWorkspace(value.workspace);if(value.result?.error)throw new Error(value.result.error);ingestDesktopResult(value.result);return value.result;}
+  catch(error){if(error.name==='AbortError')throw new Error('The computer request was stopped. Check its actual result before trying again.');throw error;}
+  finally{clearTimeout(timeout);if(activeDesktopRequest?.turn===turn)activeDesktopRequest=null;if(turn===desktopExecutionGeneration){desktopToolBusy=false;setState('idle');renderDesktopStatus();renderRuntime();}}
+}
+$('desktop-app-form').addEventListener('submit',async event=>{event.preventDefault();$('desktop-error').textContent='';try{const result=await runDesktopTool('desktop_list_apps',{query:$('desktop-app-query').value.trim()});const list=$('desktop-app-results');list.replaceChildren();if(!Array.isArray(result.apps))throw new Error('Installed apps could not be read.');if(!result.apps.length)list.append(element('p','desktop-hint','No matching installed apps were found.'));for(const app of result.apps){const row=element('div','desktop-app-row');row.append(element('span','',app.name),button('Open ↗','quiet-button',async()=>{try{const opened=await runDesktopTool('desktop_open_app',{appId:app.id});if(opened.desktopReceipt?.status==='completed')toast(opened.desktopReceipt.summary);}catch(error){$('desktop-error').textContent=error.message;}}));list.append(row);}if(result.truncated)list.append(element('p','form-hint','More apps match. Narrow your search.'));}catch(error){$('desktop-error').textContent=error.message;}});
+$('desktop-window-list').addEventListener('click',async()=>{$('desktop-error').textContent='';try{const result=await runDesktopTool('desktop_list_windows',{});const list=$('desktop-window-results');list.replaceChildren();if(!Array.isArray(result.windows))throw new Error('Open windows could not be read.');if(!result.windows.length)list.append(element('p','desktop-hint','No available windows were found.'));for(const window of result.windows){const row=element('div','desktop-window-row'),info=element('div');info.append(element('strong','',window.title||'Untitled window'),element('span','',window.appName));const actions=element('div','desktop-window-actions');actions.append(button('Focus','quiet-button',async()=>{try{const result=await runDesktopTool('desktop_focus_window',{windowId:window.id});if(result.desktopReceipt?.status==='completed')toast(result.desktopReceipt.summary);}catch(error){$('desktop-error').textContent=error.message;}}),button('Read window','quiet-button',()=>void readDesktopWindow(window.id)));row.append(info,actions);list.append(row);}if(result.truncated)list.append(element('p','form-hint','The window list is truncated.'));}catch(error){$('desktop-error').textContent=error.message;}});
+async function readDesktopWindow(windowId){$('desktop-error').textContent='';try{const result=await runDesktopTool('desktop_read_window',{windowId});const snapshot=result.snapshot;if(!snapshot?.id||!Array.isArray(snapshot.elements))throw new Error('The selected window could not be read.');desktopSnapshot=clone(snapshot);renderDesktopSnapshot();}catch(error){$('desktop-error').textContent=error.message;}}
+function renderDesktopSnapshot(){
+  const snapshot=desktopSnapshot;$('desktop-snapshot-panel').hidden=!snapshot;if(!snapshot)return;
+  $('desktop-snapshot-title').textContent=snapshot.window?.title||snapshot.window?.appName||'Selected window';$('desktop-snapshot-expiry').textContent=snapshot.truncated?'Some controls were omitted':'';
+  $('desktop-snapshot-note').textContent=snapshot.protectedInput?'This is Companion. Use its controls directly; computer input cannot approve or operate Companion’s own controls.':'This is the text and controls read from that window. Preparing input creates a separate preview for your review.';
+  const list=$('desktop-snapshot-elements');list.replaceChildren();
+  if(!snapshot.elements.length)list.append(element('p','desktop-hint','No readable controls were returned.'));
+  for(const control of snapshot.elements.slice(0,80)){
+    const row=element('article','desktop-control'),info=element('div');info.append(element('strong','',control.name||control.controlType||'Unnamed control'),element('span','',control.controlType));if(control.value!==undefined)info.append(element('pre','',String(control.value).slice(0,4000)));row.append(info);
+    const actions=element('div','desktop-control-actions');
+    if(!snapshot.protectedInput&&control.enabled!==false&&control.actions?.includes('setText'))actions.append(button('Prepare text ↗','quiet-button',()=>{desktopInputTarget={snapshotId:snapshot.id,elementId:control.id,windowTitle:snapshot.window?.title||'',name:control.name||control.controlType,expiresAt:snapshot.expiresAt};$('desktop-input-target').textContent=`${desktopInputTarget.windowTitle} · ${desktopInputTarget.name}`;$('desktop-input-text').value='';$('desktop-input-error').textContent='';showDialog('desktop-input-dialog');}));
+    if(!snapshot.protectedInput&&control.enabled!==false&&control.actions?.includes('click'))actions.append(button('Review click ↗','quiet-button',()=>void prepareDesktopAction({snapshotId:snapshot.id,elementId:control.id,action:'click'})));
+    if(actions.childNodes.length)row.append(actions);list.append(row);
+  }
+}
+async function prepareDesktopAction(argumentsObject){
+  try{const result=await runDesktopTool('desktop_propose_action',argumentsObject);if(!result.desktopAction?.id)throw new Error('No prepared action was returned. Nothing was approved.');if(result.desktopAction.status==='pending'){if($('desktop-input-dialog').open)$('desktop-input-dialog').close();await openDesktopReview(result.desktopAction.id);}}catch(error){if($('desktop-input-dialog').open)$('desktop-input-error').textContent=error.message;else $('desktop-error').textContent=error.message;}
+}
+$('desktop-input-form').addEventListener('submit',async event=>{event.preventDefault();if(!desktopInputTarget)return;const target=clone(desktopInputTarget);if(target.expiresAt&&Date.parse(target.expiresAt)<=Date.now()){$('desktop-input-error').textContent='This window snapshot expired. Read the window again before preparing input.';return;}$('desktop-input-prepare').disabled=true;$('desktop-input-error').textContent='';try{await prepareDesktopAction({snapshotId:target.snapshotId,elementId:target.elementId,action:'setText',text:$('desktop-input-text').value});}finally{$('desktop-input-prepare').disabled=false;}});
+async function openDesktopReview(id){
+  if(runtimeReconnectPromise)return;try{await refreshDesktop();const action=desktopActions.find(item=>item.id===id);if(!desktopPending(action))throw new Error('This prepared action is no longer available. Create a new preview.');desktopReviewGeneration+=1;desktopReview={id,signature:desktopSignature(action),action:clone(action)};$('desktop-review-error').textContent='';$('desktop-review-command').value='';renderDesktopReview();showDialog('desktop-review-dialog');}catch(error){toast(error.message);}
+}
+function renderDesktopReview(){
+  if(!desktopReview)return;const current=desktopActions.find(action=>action.id===desktopReview.id),action=desktopReview.action;
+  const changed=!!current&&desktopSignature(current)!==desktopReview.signature;
+  $('desktop-review-summary').textContent=action.summary||'A computer action is prepared.';
+  const target=$('desktop-review-target');target.replaceChildren();for(const [label,value]of[['Window',action.target?.title],['App',action.target?.appName],['Control',action.target?.name||action.target?.controlType]])if(value){target.append(element('dt','',label),element('dd','',value));}
+  const preview=action.preview||{};$('desktop-preview-label').textContent=preview.action==='setText'?'Exact text':preview.action==='pressKey'?'Exact key':'Exact action';
+  $('desktop-review-warning').textContent=action.warning||'';
+  const validPreview=['click','setText','pressKey'].includes(preview.action)&&(preview.action!=='setText'||typeof preview.text==='string')&&(preview.action!=='pressKey'||typeof preview.key==='string');
+  $('desktop-review-preview').textContent=preview.action==='setText'?String(preview.text??''):preview.action==='pressKey'?String(preview.key??''):'Click '+(action.target?.name||action.target?.controlType||'the selected control');
+  $('desktop-review-expiry').textContent=action.expiresAt?'Preview expires at '+timeLabel(action.expiresAt)+'.':'';
+  const status=current?.status||'unavailable';$('desktop-review-status').textContent=!validPreview?'This input preview could not be displayed safely. Create a new preview.':changed?'The target or input changed. Close this preview and open it again.':status==='pending'&&!desktopPending(current)?'Preview expired. Create a new preview.':DESKTOP_LABELS[status]||'This action is no longer available.';
+  if(current?.error)$('desktop-review-error').textContent=typeof current.error==='string'?current.error:current.error.message;
+  if(current?.outcomeUnknown)$('desktop-review-error').textContent=($('desktop-review-error').textContent+' Input may already have happened. Check the target window before trying again.').trim();
+  $('desktop-review-approve').hidden=!!current&&['completed','failed','cancelled','expired'].includes(status);
+  $('desktop-review-approve').disabled=desktopMutationBusy||desktopToolBusy||!!runtimeReconnectPromise||changed||!validPreview||!desktopPending(current);
+  $('desktop-review-approve').textContent=preview.action==='setText'?'Send this text':preview.action==='pressKey'?'Press this key':'Click this control';
+  $('desktop-review-cancel').hidden=!!current&&['completed','failed','cancelled','expired'].includes(status);
+  $('desktop-review-cancel').disabled=desktopMutationBusy||!!runtimeReconnectPromise||!current;
+  $('desktop-review-stop').hidden=!desktopMutationBusy&&status!=='executing';
+}
+async function desktopActionOperation(operation){
+  if(!desktopReview||desktopMutationBusy||desktopToolBusy||runtimeReconnectPromise)return;
+  const frozen=clone(desktopReview),current=desktopActions.find(action=>action.id===frozen.id);
+  if(operation==='approve'&&(!desktopPending(current)||desktopSignature(current)!==frozen.signature)){$('desktop-review-error').textContent='This preview changed or expired. Create a new preview before sending input.';renderDesktopReview();return;}
+  const turn=++desktopExecutionGeneration,controller=new AbortController();activeDesktopRequest={controller,turn};desktopMutationBusy=true;renderDesktopReview();renderDesktopStatus();renderRuntime();const timeout=setTimeout(()=>controller.abort(),45000);
+  try{const value=await api(`desktop/actions/${encodeURIComponent(frozen.id)}/${operation}`,{method:'POST',body:JSON.stringify({}),signal:controller.signal});if(turn!==desktopExecutionGeneration)return;if(value.desktopAction)rememberDesktopAction(value.desktopAction);if(value.workspace)applyWorkspace(value.workspace);if(value.desktopAction?.status==='completed')updateCornerPreview(value.desktopAction.receipt?.summary||value.desktopAction.summary);}
+  catch(error){if(turn===desktopExecutionGeneration){$('desktop-review-error').textContent=error.name==='AbortError'?'The action was stopped. Check the actual result before trying again.':error.message;void refreshDesktop().catch(()=>{});}}
+  finally{clearTimeout(timeout);if(activeDesktopRequest?.turn===turn)activeDesktopRequest=null;if(turn===desktopExecutionGeneration){desktopMutationBusy=false;renderDesktopReview();renderDesktopStatus();renderRuntime();}}
+}
+$('desktop-review-approve').addEventListener('click',()=>void desktopActionOperation('approve'));
+$('desktop-review-cancel').addEventListener('click',()=>void desktopActionOperation('cancel'));
+function captureDesktopApprovalContext(){return $('desktop-review-dialog').open&&desktopReview?{id:desktopReview.id,signature:desktopReview.signature,generation:desktopReviewGeneration}:null;}
+function localDesktopApprovalMatch(value){return /^(approve|cancel) desktop action\.?$/i.exec(value.trim());}
+async function localDesktopApproval(value,options={}){
+  const match=localDesktopApprovalMatch(value);if(!match)return false;
+  if($('question').value.trim()===value.trim())$('question').value='';
+  if(runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy){$('desktop-review-error').textContent='Wait for the current action or reconnection. No new input was approved.';return true;}
+  const context=Object.hasOwn(options,'approvalContext')?options.approvalContext:captureDesktopApprovalContext();
+  const current=desktopActions.find(action=>action.id===context?.id);
+  if(!context||!$('desktop-review-dialog').open||desktopReview?.id!==context.id||desktopReview.signature!==context.signature||desktopReviewGeneration!==context.generation||!desktopPending(current)||desktopSignature(current)!==context.signature){
+    const message='Open the current, unexpired action preview first. This command did not approve or cancel any input.';$('desktop-review-error').textContent=message;$('question-error').textContent=message;return true;
+  }
+  $('question-error').textContent='';$('desktop-review-error').textContent='';await desktopActionOperation(match[1].toLowerCase()==='approve'?'approve':'cancel');return true;
+}
+$('desktop-review-command-form').addEventListener('submit',async event=>{event.preventDefault();const value=$('desktop-review-command').value;if(!localDesktopApprovalMatch(value)){$('desktop-review-error').textContent='Use the exact phrase “approve desktop action” or “cancel desktop action”.';return;}cancelTurn(false);await runCommand(value,{approvalContext:captureDesktopApprovalContext()});if($('desktop-review-command').value===value)$('desktop-review-command').value='';});
+$('desktop-review-mic').addEventListener('click',()=>{if(recording)stopRecording(true);else if(microphoneOpening)cancelTurn(false);else{if(turnBusy)cancelTurn(false);void startRecording();}});
+$('desktop-review-dialog').addEventListener('close',()=>{desktopReviewGeneration+=1;if(recording||microphoneOpening){disableHandsFree();stopRecording(false);}});
+$('desktop-review-next').addEventListener('click',()=>{const action=desktopActions.find(desktopPending);if(action)void openDesktopReview(action.id);});
+$('desktop-refresh').addEventListener('click',()=>void refreshDesktop().catch(error=>{$('desktop-error').textContent=error.message;}));
+$('desktop-settings-refresh').addEventListener('click',()=>void refreshDesktop().catch(error=>{$('desktop-settings-status').textContent=error.message;}));
+async function stopDesktopActions(){
+  desktopExecutionGeneration+=1;activeDesktopRequest?.controller.abort();activeDesktopRequest=null;desktopToolBusy=false;desktopMutationBusy=false;
+  if(desktopStopPromise)return desktopStopPromise;
+  desktopStopPromise=Promise.resolve().then(async()=>{const result=await postStopWithFreshSession('desktop/stop');await refreshDesktop();return result;}).finally(()=>{desktopStopPromise=null;renderDesktopStatus();renderDesktopReview();renderRuntime();});return desktopStopPromise;
+}
+async function postStopWithFreshSession(path){
+  if(!['stop','desktop/stop'].includes(path))throw new Error('Only Stop requests can refresh and retry here.');
+  for(let attempt=0;attempt<2;attempt++){
+    const session=await boundedApi('session',{},4000);
+    if(typeof session.csrfToken!=='string'||!session.csrfToken)throw new Error('A fresh Stop session could not be opened.');
+    const stopCsrfToken=session.csrfToken;csrfToken=stopCsrfToken;
+    try{return await boundedApi(path,{method:'POST',body:JSON.stringify({}),csrfTokenOverride:stopCsrfToken},path==='stop'?10000:7000);}
+    catch(error){if(attempt===0&&[401,403].includes(error.status))continue;throw error;}
+  }
+}
+function stopAllActivity(announce=false,{global=false}={}){
+  cancelTurn(false);desktopExecutionGeneration+=1;activeDesktopRequest?.controller.abort();activeDesktopRequest=null;desktopToolBusy=false;desktopMutationBusy=false;
+  const stop=global?Promise.resolve().then(async()=>{const result=await postStopWithFreshSession('stop');await Promise.allSettled([refreshDesktop(),refreshJobs()]);return result;}):stopDesktopActions();
+  void stop.then(()=>{if(announce||global){const message=global?'Stopped running requests. Completed work is preserved.':'Stopped. Completed work is preserved.';toast(message);updateCornerPreview(message);}}).catch(error=>{if(global)void stopDesktopActions().catch(()=>{});if(announce||global)$('question-error').textContent='The current turn stopped, but the computer stop could not be confirmed. '+error.message;}).finally(()=>{renderDesktopStatus();renderDesktopReview();renderRuntime();});
+}
 $('connection-refresh').addEventListener('click',()=>void checkService());$('retry-service').addEventListener('click',()=>void checkService());
 $('service-details').addEventListener('click',()=>{renderService();showDialog('service-dialog');});
 $('open-connections').addEventListener('click',()=>{$('service-dialog').close();showView('settings');});
@@ -225,22 +439,22 @@ function renderWorkspace(){
 function renderFocus(){const focus=workspace?.focus;$('focus-card').hidden=!focus;if(!focus)return;$('focus-label').textContent=focus.label||'Time to focus';const minutes=Math.max(0,Math.ceil((new Date(focus.endsAt)-Date.now())/60000));$('focus-remaining').textContent=minutes?`${minutes} min remaining`:'Focus time complete';}
 $('stop-focus').addEventListener('click',async()=>{try{await workspaceOperation('stopFocus');}catch(error){toast(error.message);}});
 function renderTasks(){const list=$('task-list');list.replaceChildren();const tasks=(workspace?.tasks||[]).filter(task=>showCompleted||task.status!=='done');
-  if(!tasks.length)list.append(emptyState('A clear place to start.','Add your first task above, or tell Companion what needs doing.'));
+  if(!tasks.length)list.append(emptyState('No open tasks.','Add a task above or ask Companion to create one.'));
   for(const task of tasks){const row=element('article','task-row'+(task.status==='done'?' done':''));const check=button(task.status==='done'?'✓':'','task-check',async()=>{check.disabled=true;try{await workspaceOperation(task.status==='done'?'updateTask':'completeTask',{taskId:task.id,...(task.status==='done'?{status:'todo'}:{})});}catch(error){toast(error.message);check.disabled=false;}});check.setAttribute('aria-label',(task.status==='done'?'Reopen task: ':'Complete task: ')+task.title);check.setAttribute('aria-pressed',String(task.status==='done'));
     const main=element('div','task-main');main.append(element('p','task-title',task.title));if(task.details)main.append(element('p','task-details',task.details));const meta=element('div','task-meta');if(task.priority==='high')meta.append(element('span','priority-high','High priority'));if(task.project)meta.append(element('span','',task.project));if(task.dueAt)meta.append(element('span','','Due '+dateLabel(task.dueAt)));if(meta.childNodes.length)main.append(meta);row.append(check,main,button('Edit','quiet-button',()=>openEditor('task',task)));list.append(row);}
 }
 $('toggle-completed').addEventListener('click',()=>{showCompleted=!showCompleted;$('toggle-completed').textContent=showCompleted?'Hide completed':'Show completed';renderTasks();});
 $('task-form').addEventListener('submit',async event=>{event.preventDefault();const title=$('new-task').value.trim();if(!title)return;$('task-error').textContent='';const submit=event.submitter;submit.disabled=true;try{await workspaceOperation('addTask',{title});if($('new-task').value.trim()===title)$('new-task').value='';}catch(error){$('task-error').textContent=error.message;}finally{submit.disabled=false;}});
 function renderNotes(){const list=$('notes-list');list.replaceChildren();const query=$('notes-search').value.trim().toLowerCase();const notes=(workspace?.notes||[]).filter(note=>!note.archived&&(!query||[note.title,note.text,...(note.tags||[])].join(' ').toLowerCase().includes(query)));
-  if(!notes.length)list.append(emptyState(query?'No matching thoughts.':'Give that thought a home.',query?'Try another word.':'Save your first note above, or ask Companion to keep something.'));
+  if(!notes.length)list.append(emptyState(query?'No matching notes.':'No notes to show.',query?'Try another word.':'Save a note above or ask Companion to save one.'));
   for(const note of [...notes].reverse()){const card=element('article','note-card');if(note.title)card.append(element('h2','',note.title));card.append(element('p','note-text',note.text));const meta=element('div','note-meta');meta.append(element('time','',dateLabel(note.updatedAt||note.createdAt)),button('Edit','quiet-button',()=>openEditor('note',note)),button('Archive','quiet-button',async()=>{try{await workspaceOperation('archiveNote',{noteId:note.id,archived:true});}catch(error){toast(error.message);}}));card.append(meta);list.append(card);}
 }
 $('notes-search').addEventListener('input',renderNotes);
 $('note-form').addEventListener('submit',async event=>{event.preventDefault();const text=$('new-note').value.trim(),title=$('note-title').value.trim();if(!text)return;$('note-error').textContent='';const submit=event.submitter;submit.disabled=true;try{await workspaceOperation('addNote',{text,...(title?{title}:{})});if($('new-note').value.trim()===text){$('new-note').value='';$('note-title').value='';}}catch(error){$('note-error').textContent=error.message;}finally{submit.disabled=false;}});
 function openEditor(kind,item){editingTarget={kind,id:item.id,revision:workspace.revision};$('edit-title').textContent=kind==='task'?'Edit task':'Edit note';$('edit-name').value=item.title||'';$('edit-name').required=true;$('edit-name').maxLength=kind==='task'?300:200;$('edit-text').value=kind==='task'?item.details||'':item.text;$('edit-text').maxLength=kind==='task'?12000:40000;$('task-edit-fields').hidden=kind!=='task';$('edit-priority').value=item.priority||'normal';$('edit-project').value=item.project||'';$('edit-error').textContent='';showDialog('edit-dialog');}
 $('edit-form').addEventListener('submit',async event=>{event.preventDefault();if(!editingTarget)return;const target={...editingTarget};$('edit-error').textContent='';$('edit-save').disabled=true;try{if(workspace.revision!==target.revision){editingTarget.revision=workspace.revision;throw new Error('Your workspace changed while this editor was open. Review your draft, then save again.');}await workspaceOperation(target.kind==='task'?'updateTask':'updateNote',target.kind==='task'?{taskId:target.id,title:$('edit-name').value.trim(),details:$('edit-text').value,priority:$('edit-priority').value,project:$('edit-project').value.trim()}:{noteId:target.id,title:$('edit-name').value.trim(),text:$('edit-text').value});$('edit-dialog').close();}catch(error){$('edit-error').textContent=error.message;if(editingTarget)editingTarget.revision=workspace.revision;}finally{$('edit-save').disabled=false;}});
-function renderWorkflows(){const list=$('workflow-list');list.replaceChildren();if(!workspace?.workflows.length)list.append(emptyState('Make the routine easier.','Create a workflow from a few simple actions, then run it whenever you need it.'));
-  for(const flow of workspace?.workflows||[]){const wrapper=element('div'),card=element('article','workflow-card'),info=element('div','workflow-info');info.append(element('h2','',flow.name),element('p','',flow.description||'A few small actions, ready when you are.'),element('small','',`${flow.steps?.length||0} steps${flow.enabled===false?' · Disabled':''}`));const actions=element('div','workflow-actions');const run=button(runningWorkflows.has(flow.id)?'Running…':'Run workflow ↗','secondary-button',()=>void runWorkflow(flow));run.disabled=flow.enabled===false||runningWorkflows.has(flow.id);actions.append(run,button('Edit','quiet-button',()=>openWorkflow(flow)));card.append(element('span','workflow-icon','↳'),info,actions);wrapper.append(card);const result=workflowResults.get(flow.id);if(result){const receipt=element('div','workflow-result');receipt.append(element('strong','',result.status==='completed'?'Workflow finished.':'Workflow stopped: '+(result.error||'A step could not finish.')));for(const [index,step]of(result.steps||[]).entries())receipt.append(element('div','',`${index+1}. ${STEP_TYPES[step.tool]||step.tool} · completed`));wrapper.append(receipt);}list.append(wrapper);}
+function renderWorkflows(){const list=$('workflow-list');list.replaceChildren();if(!workspace?.workflows.length)list.append(emptyState('No workflows yet.','Create a workflow from the actions you use often.'));
+  for(const flow of workspace?.workflows||[]){const wrapper=element('div'),card=element('article','workflow-card'),info=element('div','workflow-info');info.append(element('h2','',flow.name),element('p','',flow.description||'Saved actions, ready to run.'),element('small','',`${flow.steps?.length||0} steps${flow.enabled===false?' · Disabled':''}`));const actions=element('div','workflow-actions');const run=button(runningWorkflows.has(flow.id)?'Running…':'Run workflow ↗','secondary-button',()=>void runWorkflow(flow));run.disabled=flow.enabled===false||runningWorkflows.has(flow.id);actions.append(run,button('Edit','quiet-button',()=>openWorkflow(flow)));card.append(element('span','workflow-icon','↳'),info,actions);wrapper.append(card);const result=workflowResults.get(flow.id);if(result){const receipt=element('div','workflow-result');receipt.append(element('strong','',result.status==='completed'?'Workflow finished.':'Workflow stopped: '+(result.error||'A step could not finish.')));for(const [index,step]of(result.steps||[]).entries())receipt.append(element('div','',`${index+1}. ${STEP_TYPES[step.tool]||step.tool} · completed`));wrapper.append(receipt);}list.append(wrapper);}
 }
 async function runWorkflow(flow){if(runningWorkflows.has(flow.id)||runtimeReconnectPromise)return;runningWorkflows.add(flow.id);renderWorkflows();$('workflow-error').textContent='';try{const result=await boundedApi(`workspace/workflows/${encodeURIComponent(flow.id)}/run`,{method:'POST',body:JSON.stringify({operationId:crypto.randomUUID()})},45000);workflowResults.set(flow.id,result);if(result.workspace)applyWorkspace(result.workspace);toast(result.status==='completed'?'Workflow finished.':'The workflow stopped before all steps finished.');}catch(error){$('workflow-error').textContent=error.message;}finally{runningWorkflows.delete(flow.id);renderWorkflows();}}
 function openWorkflow(flow=null){workflowEditingId=flow?.id||null;workflowEditingRevision=workspace?.revision;$('workflow-name').value=flow?.name||'';$('workflow-description').value=flow?.description||'';workflowDraft=clone(flow?.steps||[{tool:'create_task',arguments:{title:''}}]);$('workflow-form-error').textContent='';renderWorkflowSteps();showDialog('workflow-dialog');}
@@ -294,7 +508,7 @@ function renderJobs(){
   const list=$('job-list');list.replaceChildren();
   for(const job of [...jobs].sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt)))){const item=button('','job-button'+(job.id===selectedJobId?' active':''),()=>{selectedJobId=job.id;renderJobs();});item.append(element('span','job-name',job.prompt||job.summary||'Feature build'),jobStatus(job));list.append(item);}
   const detail=$('job-detail'),summary=jobs.find(item=>item.id===selectedJobId);detail.replaceChildren();
-  if(!summary){detail.append(emptyState('A workspace that grows with you.','Your feature builds, code changes, and checks will appear here.'));return;}
+  if(!summary){detail.append(emptyState('Build a feature.','Describe it above. Changes and checks will appear here.'));return;}
   const fresh=!!cached&&String(cached.updatedAt)>=String(summary.updatedAt);
   const job=fresh?cached:summary;
   if(!fresh)void ensureJobDetail(job.id);
@@ -305,12 +519,12 @@ function renderJobs(){
   if(job.reviewRequired&&['ready','review_required'].includes(job.status))detail.append(element('p','review-note','This change touches core controls. Review the files and checks, then activate it when you are ready.'));
   const actions=element('div','job-actions');
   if(['ready','review_required'].includes(job.status)){const activate=button('Activate feature ↗','primary-button',()=>void jobAction(job,'apply'));activate.disabled=featureBusy||!fresh||job.verification?.passed!==true;actions.append(activate);}
-  if(job.status==='applied'){actions.append(button('Reload interface ↻','secondary-button',()=>location.reload()),button('Roll back changes','quiet-button',()=>void jobAction(job,'rollback')));}
+  if(job.status==='applied'){actions.append(button('Reload interface ↻','secondary-button',()=>location.reload()),button('Roll back changes','quiet-button',()=>void jobAction(job,'rollback')));if(job.files?.some(file=>file.path.startsWith('electron/'))){detail.append(element('p','review-note',desktopUpdateNotice()));if(nativeSourceRuntime===true&&typeof nativeShell?.restart==='function')actions.append(button('Restart desktop ↻','secondary-button',restartNativeDesktop));}}
   if(['queued','generating','validating'].includes(job.status)){const cancel=button('Cancel build','quiet-button',()=>void jobAction(job,'cancel'));cancel.disabled=featureBusy;actions.append(cancel);}
   if(actions.childNodes.length)detail.append(actions);
   if(!fresh)detail.append(element('p','form-hint','Loading the actual file changes and check results…'));
-  if(job.files?.length){detail.append(element('h3','checks-heading','WHAT CHANGED'));for(const file of job.files){const section=element('details','change-file');section.dataset.path=file.path;section.open=openFiles.has(file.path);const summary=element('summary');summary.append(element('span','',file.path),element('span','change-count',`+${file.added||0} −${file.removed||0}`));section.append(summary,element('pre','file-diff',typeof file.diff==='string'?file.diff:JSON.stringify(file.diff,null,2)));detail.append(section);}}
-  const checks=job.verification?.checks||[];if(checks.length){detail.append(element('h3','checks-heading','CHECKS'));for(const check of checks){const row=element('div','verification-check'+(check.passed?'':' failed'));row.append(element('strong','',(check.passed?'✓ ':'× ')+check.name));if(check.output)row.append(element('pre','',check.output));detail.append(row);}}
+  if(job.files?.length){detail.append(element('h3','checks-heading','Changes'));for(const file of job.files){const section=element('details','change-file');section.dataset.path=file.path;section.open=openFiles.has(file.path);const summary=element('summary');summary.append(element('span','',file.path),element('span','change-count',`+${file.added||0} −${file.removed||0}`));section.append(summary,element('pre','file-diff',typeof file.diff==='string'?file.diff:JSON.stringify(file.diff,null,2)));detail.append(section);}}
+  const checks=job.verification?.checks||[];if(checks.length){detail.append(element('h3','checks-heading','Checks'));for(const check of checks){const row=element('div','verification-check'+(check.passed?'':' failed'));row.append(element('strong','',(check.passed?'✓ ':'× ')+check.name));if(check.output)row.append(element('pre','',check.output));detail.append(row);}}
   if(job.events?.length){const events=element('div','job-events');for(const event of [...job.events].slice(-12).reverse()){const row=element('div','job-event');row.append(element('time','',timeLabel(event.at)),element('span','',event.message||event.type));events.append(row);}detail.append(events);}
 }
 async function jobAction(job,action){
@@ -321,6 +535,7 @@ async function jobAction(job,action){
     if(changed?.id){jobs=jobs.map(item=>item.id===changed.id?changed:item);selectedJobId=changed.id;featureRenderKey='';renderJobs();}
     if(changed.runtime&&['apply','rollback'].includes(action))await reconnectAfterRestart(changed.runtime,{jobId:job.id,action});
     else{await refreshJobs();if(action==='apply'||action==='rollback')void loadExtensions();const latest=jobDetails.get(job.id)||changed;toast(latest.status==='rolled_back'?'Changes rolled back.':action==='apply'&&latest.status==='applied'?'Feature activated.':action==='cancel'?'Build cancelled.':'Build status updated.');}
+    const latest=jobDetails.get(job.id)||changed;if(latest.status==='applied'&&latest.files?.some(file=>file.path.startsWith('electron/'))){runtimeNotice={phase:'manual',message:desktopUpdateNotice()};runtimeRetry=null;renderRuntime();toast(nativeSourceRuntime===false?'Desktop source changed. Rebuild the desktop app to load it.':'Desktop source changed. Relaunch from the updated source to load it.');}
   }catch(error){$('build-error').textContent=error.message;refreshJobsSafely();}
   finally{featureBusy=false;featureRenderKey='';renderJobs();renderRuntime();}
 }
@@ -332,23 +547,25 @@ async function loadExtensions(){
     for(const feature of manifest.features){if(!feature||!/^[a-z][a-z0-9-]{0,63}$/.test(feature.id)||typeof feature.title!=='string'||feature.title.length>100||!/^\.\/features\/[a-z][a-z0-9-]{0,59}\.mjs$/.test(feature.module))continue;const id='extension-'+feature.id;nextIds.add(id);const old=extensions.get(id);try{old?.cleanup?.();}catch{}old?.panel.remove();old?.button.remove();
       const panel=element('section','view-panel extension-panel');panel.id=id+'-view';panel.hidden=currentView!==id;
       const nav=button(feature.title,'nav-item',()=>showView(id));nav.dataset.view=id;nav.setAttribute('aria-label',feature.title);nav.title=feature.title;$('extension-panels').append(panel);$('extension-nav').append(nav);const entry={panel,button:nav,title:feature.title,cleanup:null};extensions.set(id,entry);
-      try{const module=await import(new URL(feature.module+'?activation='+Date.now(),import.meta.url).href);if(version!==extensionGeneration){panel.remove();nav.remove();return;}if(typeof module.mount!=='function')throw new Error('This feature has no interface.');const cleanup=await module.mount({container:panel,api:Object.freeze({getWorkspace:async()=>clone(workspace),workspaceOperation,runTool:async(tool,args={})=>{if(runtimeReconnectPromise)throw new Error('Companion is reconnecting. Try this action again when it is ready.');const result=await boundedApi('tools/run',{method:'POST',body:JSON.stringify({tool,arguments:args,operationId:crypto.randomUUID()})},45000);if(result.workspace)applyWorkspace(result.workspace);return result;},notify:toast})});if(version!==extensionGeneration){if(typeof cleanup==='function'){try{cleanup();}catch{}}panel.remove();nav.remove();if(extensions.get(id)===entry)extensions.delete(id);return;}if(typeof cleanup==='function')entry.cleanup=cleanup;}catch(error){panel.replaceChildren(emptyState('This feature could not open.',error.message));}
+      try{const module=await import(new URL(feature.module+'?activation='+Date.now(),import.meta.url).href);if(version!==extensionGeneration){panel.remove();nav.remove();return;}if(typeof module.mount!=='function')throw new Error('This feature has no interface.');const cleanup=await module.mount({container:panel,api:Object.freeze({getWorkspace:async()=>clone(workspace),workspaceOperation,runTool:async(tool,args={})=>{if(runtimeReconnectPromise)throw new Error('Companion is reconnecting. Try this action again when it is ready.');const result=await boundedApi('tools/run',{method:'POST',body:JSON.stringify({tool,arguments:args,operationId:crypto.randomUUID()})},45000);if(result.workspace)applyWorkspace(result.workspace);ingestDesktopResult(result.result);if(result.result?.desktopAction)void refreshDesktop().catch(error=>toast(error.message));return result;},notify:toast})});if(version!==extensionGeneration){if(typeof cleanup==='function'){try{cleanup();}catch{}}panel.remove();nav.remove();if(extensions.get(id)===entry)extensions.delete(id);return;}if(typeof cleanup==='function')entry.cleanup=cleanup;}catch(error){panel.replaceChildren(emptyState('This feature could not open.',error.message));}
     }
     if(version!==extensionGeneration)return;for(const [id,entry] of extensions){if(nextIds.has(id))continue;try{entry.cleanup?.();}catch{}entry.panel.remove();entry.button.remove();extensions.delete(id);if(currentView===id)showView('today');}$('extension-nav').hidden=!extensions.size;
   }catch(error){toast(error.message);}
 }
 function setState(state,detail=''){
-  const labels={idle:'Here when you need me.',opening:'Opening your microphone…',listening:'Listening to you.',transcribing:'Turning speech into text…',thinking:'Working on it…',speaking:'Reading the reply aloud.'};
+  const labels={idle:'Here when you need me.',opening:'Opening your microphone…',listening:'Listening to you.',transcribing:'Turning speech into text…',thinking:'Working on it…',desktop:'Working with your computer…',speaking:'Reading the reply aloud.'};
   $('voice-state').textContent=labels[state]||state;$('voice-detail').textContent=detail||(state==='idle'?'Type, or tap the mic.':'');
-  $('mic-button').classList.toggle('recording',state==='listening');$('mic-button').classList.toggle('working',['thinking','transcribing'].includes(state));$('mic-button').setAttribute('aria-pressed',String(state==='listening'));$('mic-button').setAttribute('aria-label',state==='listening'?'Finish recording':'Start recording');
-  $('turn-progress').hidden=!['thinking','transcribing','speaking','opening','listening'].includes(state);$('progress-text').textContent=state==='listening'?'Microphone on · up to 60 seconds':labels[state]||state;
+  $('corner-state').textContent=labels[state]||state;
+  $('desktop-review-mic').textContent=state==='listening'?'Finish recording':'Speak this command';$('desktop-review-mic').setAttribute('aria-pressed',String(state==='listening'));
+  $('mic-button').classList.toggle('recording',state==='listening');$('mic-button').classList.toggle('working',['thinking','transcribing','desktop'].includes(state));$('mic-button').setAttribute('aria-pressed',String(state==='listening'));$('mic-button').setAttribute('aria-label',state==='listening'?'Finish recording':'Start recording');
+  $('turn-progress').hidden=!['thinking','transcribing','speaking','opening','listening','desktop'].includes(state);$('progress-text').textContent=state==='listening'?'Microphone on · up to 60 seconds':labels[state]||state;
 }
-function setBusy(busy){turnBusy=busy;$('send-question').disabled=busy||!!runtimeReconnectPromise;}
+function setBusy(busy){turnBusy=busy;$('send-question').disabled=busy||!!runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy;}
 function addMessage(role,text,label=role==='user'?'You':'Companion'){
   $('welcome-card').hidden=true;$('today-summary').hidden=true;$('today-bottom').hidden=true;
   const article=element('article','message '+role);article.append(element('div','message-label',label),element('div','message-text',text));
   if(role==='assistant'){latestAnswer={text};const actions=element('div','message-actions');actions.append(button('Save as a note','quiet-button',async()=>{try{await workspaceOperation('addNote',{text});toast('Saved in your notes.');}catch(error){toast(error.message);}}));article.append(actions);}
-  $('messages').append(article);messages.push({role,text});if(messages.length>40)messages.shift();while($('messages').children.length>40)$('messages').firstElementChild.remove();
+  $('messages').append(article);messages.push({role,text});if(messages.length>40)messages.shift();while($('messages').children.length>40)$('messages').firstElementChild.remove();updateCornerPreview(text);
   $('content-scroll').scrollTop=$('content-scroll').scrollHeight;return article;
 }
 function renderActionReceipts(container,actions){
@@ -356,6 +573,8 @@ function renderActionReceipts(container,actions){
   const labels={create_task:'Task saved',update_task:'Task updated',complete_task:'Task completed',save_note:'Note saved',list_tasks:'Tasks checked',list_notes:'Notes checked',search_notes:'Notes searched',read_note:'Note opened',start_focus:'Focus started',stop_focus:'Focus ended',save_workflow:'Workflow saved',run_workflow:'Workflow run',build_feature:'Feature build',list_feature_builds:'Builds checked',get_time:'Current time'};
   for(const action of actions){const result=action.result||{},failed=action.status==='failed'||!!action.error||!!result.error;let text;
     if(failed){const error=result.error||action.error;text=(labels[action.tool]||action.tool||'Action')+' · could not finish: '+(typeof error==='string'?error:error?.message||'Unknown error');}
+    else if(result.desktopAction){ingestDesktopResult(result);text=(desktopPending(result.desktopAction)?'Needs your review · ':DESKTOP_LABELS[result.desktopAction.status]+' · ')+result.desktopAction.summary;}
+    else if(result.desktopReceipt){ingestDesktopResult(result);text=result.desktopReceipt.summary;}
     else if(result.featureJob)text='Feature build started · '+(JOB_LABELS[result.featureJob.status]||result.featureJob.status);
     else if(result.task)text=(labels[action.tool]||'Task updated')+' · '+result.task.title;
     else if(result.note)text=(labels[action.tool]||'Note opened')+' · '+result.note.title;
@@ -363,15 +582,17 @@ function renderActionReceipts(container,actions){
     else if(Array.isArray(result.notes))text='Notes checked · '+result.notes.length+' found';
     else if(result.formatted)text=result.formatted;
     else text=action.summary||result.summary||result.message||labels[action.tool]||action.tool||'Action completed';
-    container.append(element('div','action-receipt'+(failed?' receipt-failed':''),text));
+    const receipt=element('div','action-receipt'+(failed?' receipt-failed':''),text);container.append(receipt);
+    if(!failed&&desktopPending(result.desktopAction))receipt.append(button('Review action ↗','quiet-button',()=>void openDesktopReview(result.desktopAction.id)));
   }
 }
 async function requestWithTurn(path,body,options,turn){const id=crypto.randomUUID(),controller=new AbortController();activeRequest={id,controller,turn};const timeout=setTimeout(()=>controller.abort(),path==='transcribe'?90000:300000);try{const value=await api(path,{method:'POST',body:options?.raw?body:JSON.stringify({...body,id}),signal:controller.signal,raw:options?.raw,id,headers:options?.headers});if(value.id!==id)throw new Error('The response could not be matched to this request. Try again.');return value;}catch(error){if(error.name==='AbortError'&&turn===generation){void cancelBackend(id);throw new Error('This request took too long. Check your connection, then try again.');}throw error;}finally{clearTimeout(timeout);if(activeRequest?.id===id)activeRequest=null;}}
 async function cancelBackend(id){if(!csrfToken||!id)return;try{await boundedApi('cancel',{method:'POST',body:JSON.stringify({id})},4000);}catch{}}
 function cancelTurn(announce=true){const wasWorking=turnBusy||!!activeRequest;generation+=1;voicePipeline=false;disableHandsFree();stopRecording(false);stopSpeech();if(activeRequest){const request=activeRequest;activeRequest=null;request.controller.abort();void cancelBackend(request.id);}setBusy(false);setState('idle');if(wasWorking&&!runtimeReconnectPromise)void refreshWorkspace().catch(()=>{});if(announce)toast('Stopped. Completed actions stay in your workspace.');}
-$('cancel-turn').addEventListener('click',()=>cancelTurn());
+$('cancel-turn').addEventListener('click',()=>{if(desktopToolBusy||desktopMutationBusy)stopAllActivity(true);else cancelTurn();});
 async function runCommand(value,options={}){
-  const message=value.trim();if(!message||turnBusy||runtimeReconnectPromise)return;$('question-error').textContent='';
+  const message=value.trim();if(!message)return;if(await localDesktopApproval(message,options))return;if(options.voice&&options.approvalContext){$('desktop-review-error').textContent='Say “approve desktop action” or “cancel desktop action” for this preview. These words have not approved any input.';return;}if(turnBusy||runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy)return;$('question-error').textContent='';
+  ensureCornerExpanded();
   if(!options.voice&&(recording||microphoneOpening)){disableHandsFree();stopRecording(false);}
   const providerId=Object.hasOwn(options,'providerId')?options.providerId:activeProviderId;const provider=providers.find(item=>item.id===providerId);
   if(!provider?.ready){$('question-error').textContent=provider?.unavailableReason||'Choose an AI connection in Settings first. Your message stays here.';if(options.voice)disableHandsFree();return;}
@@ -423,11 +644,13 @@ function maybeResume() {
   setTimeout(() => { if ($('hands-free').checked && !document.hidden && !turnBusy && !recording && !microphoneOpening) void startRecording(); }, 450);
 }
 async function startRecording() {
-  if (recording || microphoneOpening || turnBusy || runtimeReconnectPromise || document.hidden || destroyed) return;
+  if (recording || microphoneOpening || turnBusy || runtimeReconnectPromise || desktopToolBusy || desktopMutationBusy || document.hidden || destroyed) return;
+  ensureCornerExpanded();
   $('question-error').textContent = '';
   if (!service.transcriptionReady) { disableHandsFree(); $('question-error').textContent = 'Voice input is not ready. Open Connection details, or type a message.'; return; }
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) { disableHandsFree(); $('question-error').textContent = 'This browser cannot record audio. You can type a message instead.'; return; }
   const frozenProviderId = activeProviderId;
+  const frozenApprovalContext = clone(captureDesktopApprovalContext());
   stopSpeech(); const turn = ++generation; microphoneOpening = true; voicePipeline = true; setState('opening', 'Your browser may ask for microphone access.');
   let stream;
   try {
@@ -435,7 +658,7 @@ async function startRecording() {
     if (turn !== generation || document.hidden || destroyed) { stream.getTracks().forEach(track => track.stop()); return; }
     const mimeType = ['audio/webm;codecs=opus','audio/webm','audio/mp4'].find(type => MediaRecorder.isTypeSupported(type));
     const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-    const item = { recorder, stream, turn, providerId: frozenProviderId, chunks: [], bytes: 0, submit: true, timer: null, frame: null, audioContext: null, speech: false, firstSound: 0, lastSound: 0, started: performance.now(), silenceChecked: false };
+    const item = { recorder, stream, turn, providerId: frozenProviderId, approvalContext:frozenApprovalContext, chunks: [], bytes: 0, submit: true, timer: null, frame: null, audioContext: null, speech: false, firstSound: 0, lastSound: 0, started: performance.now(), silenceChecked: false };
     recording = item;
     recorder.addEventListener('dataavailable', event => {
       if (!event.data.size) return; item.bytes += event.data.size; item.chunks.push(event.data);
@@ -495,7 +718,7 @@ async function finishRecording(item) {
     if (item.turn !== generation || destroyed) return;
     if (typeof result.text !== 'string' || !result.text.trim()) { disableHandsFree(); throw new Error('No words were detected. Tap the microphone to try again.'); }
     $('question').value = result.text.slice(0, 4000); setBusy(false);
-    await runCommand($('question').value, { providerId: item.providerId, voice: true });
+    await runCommand($('question').value, { providerId: item.providerId, approvalContext:item.approvalContext, voice: true });
   } catch (error) {
     if (item.turn === generation && error.name !== 'AbortError') { $('question-error').textContent = error.message; disableHandsFree(); }
   } finally {
@@ -521,10 +744,14 @@ $('hands-free').addEventListener('change', () => {
 $('settings-read-aloud').addEventListener('change',()=>{$('read-aloud').checked=$('settings-read-aloud').checked;$('read-aloud').dispatchEvent(new Event('change'));});
 $('read-aloud').addEventListener('change',()=>{$('settings-read-aloud').checked=$('read-aloud').checked;});
 document.addEventListener('visibilitychange',()=>{if(document.hidden){if(voicePipeline||recording||microphoneOpening)cancelTurn(false);else{disableHandsFree();stopSpeech();}$('provider-key').value='';}else{void checkService();}});
-window.addEventListener('pagehide',event=>{cancelTurn(false);extensionGeneration+=1;$('provider-key').value='';if(!event.persisted)destroyed=true;});
+window.addEventListener('pagehide',event=>{cancelTurn(false);extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
 window.addEventListener('pageshow',event=>{if(!event.persisted)return;destroyed=false;setBusy(false);setState('idle');updateVoiceHelp();void checkService();void loadExtensions();});
-providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();updateVoiceHelp();
+initNativeShell();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();updateVoiceHelp();
 void checkService();void loadExtensions();
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;renderFocus();if(jobs.some(job=>ACTIVE_JOBS.has(job.status))||currentView==='build')void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});},2000);
 setInterval(()=>{if(!document.hidden&&!destroyed&&!operationBusy&&!runtimeReconnectPromise)void refreshWorkspace().catch(error=>{$('connection-label').textContent=error.message;});},5000);
 setInterval(()=>{if(!document.hidden&&!destroyed&&!turnBusy&&!recording&&!microphoneOpening&&!runtimeReconnectPromise)void checkService();},30000);
+
+$('desktop-stop').addEventListener('click',()=>stopAllActivity(true));
+$('desktop-review-stop').addEventListener('click',()=>stopAllActivity(true));
+setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;if(currentView==='desktop'||$('desktop-review-dialog').open||desktopActions.some(action=>['pending','executing'].includes(action.status)))void refreshDesktop().catch(error=>{$('desktop-error').textContent=error.message;});},2500);
