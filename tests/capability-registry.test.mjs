@@ -51,6 +51,16 @@ test('catalog stays public and provider definitions stay bounded while the actua
   assert.equal(builtinCatalog().find(item=>item.name==='read_note').workflowAllowed,true);
 });
 
+test('routine discovery and maintenance share the existing bounded tool definitions and retain exact custom pins',async t=>{
+  const f=await fixture(t),capabilities=await loadCapabilities(f),store=await createProductivityStore({dataDirectory:path.join(f.root,'private')});f.track(()=>store.close());const tools=createProductivityTools({store,capabilities});
+  assert.equal(tools.definitions.length,25);assert.equal(tools.definitions.filter(tool=>tool.name==='list_workflows').length,1);assert.equal(tools.definitions.some(tool=>tool.name==='read_workflow'),false);
+  const create={name:'Count text',steps:[{tool:'cap_word_count',arguments:{text:'one two'}}]},created=await tools.execute('save_workflow',create,{requestId:'routine-schema-create',callId:'one'}),workflowId=created.workflow.id;
+  const list=await tools.execute('list_workflows',{});assert.equal(list.total,1);assert.equal(list.workflows[0].metadataOnly,true);assert.equal(Object.hasOwn(list.workflows[0],'steps'),false);assert.ok(Buffer.byteLength(JSON.stringify(list))<=48*1024);
+  const read=await tools.execute('list_workflows',{action:'read',workflowId}),definition=JSON.parse(read.definitionText);assert.equal(definition.steps[0].capability.hash,capabilities[0].hash);
+  const saved=await tools.execute('save_workflow',{workflowId,expectedRevision:read.revision,expectedDefinitionHash:read.definitionHash,steps:definition.steps},{requestId:'routine-schema-edit',callId:'one'});assert.equal(saved.workflow.id,workflowId);assert.deepEqual(saved.workflow.steps[0].capability,definition.steps[0].capability);
+  await assert.rejects(tools.execute('list_workflows',{action:'read',workflowId,query:'unsupported mix'}),{code:'invalid_tool'});
+});
+
 test('actual workspace capability brokers real effects once and preserves terminal replay after source replacement and restart',async t=>{
   const record=entry({effectPolicy:'workspace',tool:{...entry().tool,description:'Save the supplied requested note.'},acceptance:[{name:'Saves supplied note',arguments:{text:'one'},expected:{saved:true},tools:[{name:'save_note',arguments:{text:'one'},result:{note:{id:'fixture'}}}]}]});
   const f=await fixture(t,record,'export async function execute(args,ctx){const result=await ctx.runTool("save_note",{text:args.text});return {saved:true,noteId:result.note.id};}'),capabilities=await loadCapabilities(f),dataDirectory=path.join(f.root,'private');let store=await createProductivityStore({dataDirectory});f.track(()=>store.close());

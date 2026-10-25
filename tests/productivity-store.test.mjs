@@ -9,6 +9,7 @@ import { createProductivityStore } from '../server/productivity-store.mjs';
 import { createProductivityTools } from '../server/productivity-tools.mjs';
 import { capabilityHash } from '../server/capability-registry.mjs';
 import { formatWindowContext } from '../server/window-context.mjs';
+import { workflowDefinitionHash } from '../server/workflow-queries.mjs';
 
 async function fixture(t, options = {}) {
   const dataDirectory = await mkdtemp(path.join(tmpdir(), 'companion-productivity-store-')), stores = [];
@@ -20,6 +21,70 @@ async function fixture(t, options = {}) {
 }
 const executionId=(prefix,request,call)=>{const h=createHash('sha256').update(`${request}:${call}`).digest('hex').slice(0,32);return`${prefix}:${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;};
 const fakeCapability=(version=1)=>({id:'fixture',title:'Fixture',module:'./fixture.mjs',modulePath:path.join(tmpdir(),'fixture.mjs'),moduleHash:'a'.repeat(64),version,hash:String(version).repeat(64),effectPolicy:'workspace',workflowAllowed:true,tool:{name:'cap_fixture',description:'Synthetic capability.',parameters:{type:'object',properties:{text:{type:'string',minLength:1,maxLength:100}},required:['text'],additionalProperties:false}}});
+
+test('voice routine edits keep one existing ID and immutable original save results across later edits and restart',async t=>{
+  const f=await fixture(t),tools=createProductivityTools({store:f.store}),initial={name:'Morning routine',description:'Keep this description',enabled:false,steps:[{tool:'start_focus',arguments:{minutes:25}}]},created=await tools.execute('save_workflow',initial,{requestId:'routine-create',callId:'one'}),workflowId=created.workflow.id;
+  assert.equal(created.appliedRevision,1);assert.equal(created.replayed,false);
+  const page=await tools.execute('list_workflows',{action:'read',workflowId}),original=JSON.parse(page.definitionText);assert.equal(original.steps[0].arguments.minutes,25);
+  const edit={workflowId,expectedRevision:page.revision,expectedDefinitionHash:page.definitionHash,steps:[{tool:'start_focus',arguments:{minutes:40}}]},context={requestId:'routine-edit',callId:'one'},edited=await tools.execute('save_workflow',edit,context);
+  assert.equal(edited.workflow.id,workflowId);assert.equal(edited.workflow.steps[0].arguments.minutes,40);assert.equal(edited.workflow.name,initial.name);assert.equal(edited.workflow.description,initial.description);assert.equal(edited.workflow.enabled,false);assert.equal(edited.appliedRevision,2);assert.equal(f.store.snapshot().workflows.length,1);
+  await tools.execute('save_workflow',{workflowId,expectedRevision:2,name:'Renamed routine'},{requestId:'routine-rename',callId:'one'});
+  const toggled=await tools.execute('save_workflow',{workflowId,expectedRevision:3,enabled:true},{requestId:'routine-enable',callId:'one'});assert.equal(toggled.workflow.enabled,true);assert.equal(toggled.appliedRevision,4);
+  const before=f.store.snapshot(),replayed=await tools.execute('save_workflow',edit,context);assert.equal(replayed.replayed,true);assert.deepEqual(replayed.workflow,edited.workflow);assert.equal(replayed.appliedRevision,2);assert.deepEqual(f.store.snapshot(),before);
+  f.store.close();const reopened=await f.open(),after=createProductivityTools({store:reopened}),again=await after.execute('save_workflow',edit,context);assert.equal(again.replayed,true);assert.deepEqual(again.workflow,edited.workflow);assert.equal(again.appliedRevision,2);assert.equal(reopened.snapshot().workflows.length,1);assert.equal(reopened.snapshot().workflows[0].name,'Renamed routine');
+});
+
+test('routine edits reject stale revisions, wrong definition hashes and missing replacement context without mutation',async t=>{
+  const f=await fixture(t),tools=createProductivityTools({store:f.store}),created=await tools.execute('save_workflow',{name:'Keep exact routine',steps:[{tool:'get_time',arguments:{}}]},{requestId:'guard-create',callId:'one'}),workflowId=created.workflow.id,read=await tools.execute('list_workflows',{action:'read',workflowId});
+  const before=f.store.snapshot();
+  for(const[args,code]of [[{workflowId,name:'No revision'},'invalid_revision'],[{workflowId,expectedRevision:read.revision,steps:[{tool:'get_time',arguments:{}}]},'workflow_hash_required'],[{workflowId,expectedRevision:read.revision,expectedDefinitionHash:'0'.repeat(64),name:'Wrong hash'},'workflow_changed'],[{workflowId:randomUUID(),expectedRevision:read.revision,name:'Missing target'},'not_found']])await assert.rejects(tools.execute('save_workflow',args,{requestId:'guard-'+code,callId:'one'}),{code});
+  assert.deepEqual(f.store.snapshot(),before);f.apply('addTask',{title:'An intervening task'});const latest=f.store.snapshot();await assert.rejects(tools.execute('save_workflow',{workflowId,expectedRevision:read.revision,name:'Stale edit'},{requestId:'guard-stale',callId:'one'}),{code:'revision_conflict'});assert.deepEqual(f.store.snapshot(),latest);
+});
+
+test('metadata edits and toggles preserve unavailable custom pins while step replacement requires deliberate current selection',async t=>{
+  const f=await fixture(t),old=createProductivityTools({store:f.store,capabilities:[fakeCapability(1)]}),created=await old.execute('save_workflow',{name:'Pinned routine',steps:[{tool:'cap_fixture',arguments:{text:'Original'}}]},{requestId:'pin-create',callId:'one'}),workflowId=created.workflow.id;
+  const latest=fakeCapability(2),tools=createProductivityTools({store:f.store,capabilities:[latest],executeCapability:async()=>({value:{checked:true},hostActions:[]})});
+  const renamed=await tools.execute('save_workflow',{workflowId,expectedRevision:f.store.snapshot().revision,name:'Still pinned'},{requestId:'pin-rename',callId:'one'});assert.equal(renamed.workflow.steps[0].capability.version,1);
+  const disabled=await tools.execute('save_workflow',{workflowId,expectedRevision:f.store.snapshot().revision,enabled:false},{requestId:'pin-disable',callId:'one'});assert.equal(disabled.workflow.enabled,false);assert.equal(disabled.workflow.steps[0].capability.version,1);await assert.rejects(tools.runWorkflow(workflowId,{requestId:'disabled-fresh'}),{code:'workflow_unavailable'});
+  const enabled=await tools.execute('save_workflow',{workflowId,expectedRevision:f.store.snapshot().revision,enabled:true},{requestId:'pin-enable',callId:'one'});assert.equal(enabled.workflow.steps[0].capability.version,1);await assert.rejects(tools.runWorkflow(workflowId,{requestId:'stale-enabled-fresh'}),{code:'capability_changed'});
+  const before=f.store.snapshot(),base={workflowId,expectedRevision:before.revision,expectedDefinitionHash:workflowDefinitionHash(before.workflows[0])};
+  await assert.rejects(tools.execute('save_workflow',{...base,steps:[{tool:'cap_fixture',arguments:{text:'Changed argument'}}]},{requestId:'pin-implicit',callId:'one'}),{code:'capability_changed'});assert.deepEqual(f.store.snapshot(),before);
+  const updated=await tools.execute('save_workflow',{...base,steps:[{tool:'cap_fixture',arguments:{text:'Changed argument'},capability:{id:latest.id,version:latest.version,hash:latest.hash}}]},{requestId:'pin-explicit',callId:'one'});assert.equal(updated.workflow.id,workflowId);assert.equal(updated.workflow.steps[0].capability.version,2);assert.equal(f.store.snapshot().workflows.length,1);assert.equal((await tools.runWorkflow(workflowId,{requestId:'explicit-run'})).status,'completed');
+});
+
+test('editing or disabling through the model never resumes an earlier saved routine run',async t=>{
+  const f=await fixture(t),tools=createProductivityTools({store:f.store}),created=await tools.execute('save_workflow',{name:'One saved note',steps:[{tool:'save_note',arguments:{text:'Original routine note'}}]},{requestId:'run-create',callId:'one'}),workflowId=created.workflow.id,context={requestId:'old-run'},original=await tools.runWorkflow(workflowId,context),read=await tools.execute('list_workflows',{action:'read',workflowId});
+  await tools.execute('save_workflow',{workflowId,expectedRevision:read.revision,expectedDefinitionHash:read.definitionHash,enabled:false,steps:[{tool:'save_note',arguments:{text:'A later definition must not run on retry'}}]},{requestId:'run-edit',callId:'one'});
+  const replay=await tools.runWorkflow(workflowId,context);assert.equal(replay.replayed,true);assert.deepEqual(replay.steps,original.steps);assert.equal(f.store.snapshot().notes.length,1);await assert.rejects(tools.runWorkflow(workflowId,{requestId:'new-disabled-run'}),{code:'workflow_unavailable'});
+});
+
+test('routine mutation snapshots commit atomically and leave the original two-column writer compatible',async t=>{
+  const f=await fixture(t),database=()=>new DatabaseSync(path.toNamespacedPath(path.join(f.dataDirectory,'productivity.sqlite'))),inspect=database();
+  try{assert.deepEqual(inspect.prepare('PRAGMA table_info(workspace_receipts)').all().map(x=>x.name),['id','hash']);inspect.prepare('INSERT INTO workspace_receipts VALUES(?,?)').run(randomUUID(),'a'.repeat(64));inspect.exec("CREATE TRIGGER reject_routine_result BEFORE INSERT ON workflow_mutation_receipts BEGIN SELECT RAISE(ABORT,'Synthetic atomic receipt failure'); END;");}finally{inspect.close();}
+  const before=f.store.snapshot(),operationId=randomUUID();assert.throws(()=>f.store.apply({operationId,expectedRevision:before.revision,type:'saveWorkflow',name:'Must roll back',steps:[{tool:'get_time',arguments:{}}]}),/Synthetic atomic receipt failure/);assert.deepEqual(f.store.snapshot(),before);
+  const after=database();try{assert.equal(after.prepare('SELECT count(*) AS total FROM workspace_receipts WHERE id=?').get(operationId).total,0);assert.equal(after.prepare('SELECT count(*) AS total FROM workflow_mutation_receipts WHERE id=?').get(operationId).total,0);}finally{after.close();}
+});
+
+test('legacy routine save receipts never substitute the currently edited definition for unavailable original data',async t=>{
+  const f=await fixture(t),operationId=randomUUID(),operation={operationId,expectedRevision:0,type:'saveWorkflow',name:'Legacy original',steps:[{tool:'get_time',arguments:{}}]},created=f.store.apply(operation),database=new DatabaseSync(path.toNamespacedPath(path.join(f.dataDirectory,'productivity.sqlite')));
+  try{database.prepare('DELETE FROM workflow_mutation_receipts WHERE id=?').run(operationId);}finally{database.close();}
+  f.apply('saveWorkflow',{workflowId:operationId,name:'Current definition differs'});const before=f.store.snapshot(),replay=f.store.apply(operation);assert.equal(replay.replayed,true);assert.equal(replay.originalDefinitionUnavailable,true);assert.deepEqual(replay.workflow,{id:operationId});assert.equal(replay.appliedRevision,null);assert.ok(!Object.hasOwn(replay.workflow,'steps'));assert.deepEqual(f.store.snapshot(),before);assert.equal(created.workflow.name,'Legacy original');
+});
+
+test('bounded immutable routine history rejects only new routine changes and preserves old receipts and other workspace actions',async t=>{
+  const f=await fixture(t,{workflowReceiptBytes:1024}),operationId=randomUUID(),operation={operationId,expectedRevision:0,type:'saveWorkflow',name:'Small routine',steps:[{tool:'get_time',arguments:{}}]},first=f.store.apply(operation);let full=false;
+  for(let index=0;index<12;index++){const before=f.store.snapshot();try{f.apply('setWorkflowEnabled',{workflowId:operationId,enabled:index%2===0});}catch(error){assert.equal(error.code,'workflow_receipt_limit');assert.deepEqual(f.store.snapshot(),before);full=true;break;}}
+  assert.equal(full,true);assert.equal(f.store.apply(operation).appliedRevision,first.appliedRevision);assert.deepEqual(f.store.apply(operation).workflow,first.workflow);f.apply('addTask',{title:'Tasks remain usable after routine history fills'});assert.equal(f.store.snapshot().tasks.length,1);
+});
+
+test('large routine mutations return bounded original-snapshot metadata while full immutable receipts remain available',async t=>{
+  const f=await fixture(t),operation={operationId:randomUUID(),expectedRevision:0,type:'saveWorkflow',name:'Large routine',steps:Array.from({length:4},()=>({tool:'save_note',arguments:{text:'x'.repeat(22000)}}))},created=f.store.apply(operation),tools=createProductivityTools({store:f.store}),workflowId=created.workflow.id;
+  const args={workflowId,expectedRevision:created.appliedRevision,description:'\ud800'.repeat(2000)},context={requestId:'large-routine-edit',callId:'one'},saved=await tools.execute('save_workflow',args,context);
+  assert.equal(saved.workflow.id,workflowId);assert.equal(saved.definitionOmitted,true);assert.equal(saved.workflow.definitionOmitted,true);assert.equal(saved.workflow.metadataOnly,true);assert.equal(saved.workflow.stepCount,4);assert.equal(Object.hasOwn(saved.workflow,'steps'),false);assert.ok(Buffer.byteLength(JSON.stringify(saved))<16*1024);assert.equal(saved.appliedRevision,2);
+  const actual=f.store.snapshot().workflows[0];assert.ok(JSON.stringify({name:actual.name,description:actual.description,enabled:actual.enabled,steps:actual.steps}).length>100000);assert.equal(saved.workflow.definitionHash,workflowDefinitionHash(actual));
+  f.apply('saveWorkflow',{workflowId,name:'A later different title'});const before=f.store.snapshot(),replay=await tools.execute('save_workflow',args,context);assert.equal(replay.replayed,true);assert.equal(replay.workflow.name,'Large routine');assert.equal(replay.workflow.definitionHash,saved.workflow.definitionHash);assert.equal(replay.appliedRevision,2);assert.deepEqual(f.store.snapshot(),before);
+  const original=f.store.apply(operation);assert.equal(original.workflow.steps[3].arguments.text.length,22000);assert.equal(original.workflow.name,'Large routine');assert.equal(original.appliedRevision,1);
+});
 
 test('conversation compaction preserves selected-window provenance while explicitly omitting oversized source text',async t=>{
   const f=await fixture(t,{conversationLimits:{outcomeBytes:8192}}),conversationId=randomUUID();f.store.createConversation({id:conversationId});
@@ -68,7 +133,8 @@ test('central workflow schema validation preflights every step and custom versio
   const tools=createProductivityTools({store:f.store,capabilities:[fakeCapability(2)],executeCapability:async()=>{runs++;return{value:{},hostActions:[]};}});
   await assert.rejects(tools.runWorkflow(flow.id,{requestId:'stale-workflow'}),{code:'capability_changed'});assert.equal(f.store.snapshot().tasks.length,0);assert.equal(runs,0);
   assert.throws(()=>f.apply('saveWorkflow',{workflowId:flow.id,name:'Keep stale pin',steps:flow.steps}),{code:'capability_changed'});
-  const changed=f.apply('saveWorkflow',{workflowId:flow.id,name:'Explicit updated selection',steps:[{tool:'cap_fixture',arguments:{text:'Updated'}}]}).workspace.workflows[0];assert.equal(changed.steps[0].capability.version,2);
+  const current=tools.catalog().find(item=>item.name==='cap_fixture');
+  const changed=f.apply('saveWorkflow',{workflowId:flow.id,name:'Explicit updated selection',steps:[{tool:'cap_fixture',arguments:{text:'Updated'},capability:{id:current.capabilityId,version:current.version,hash:current.hash}}]}).workspace.workflows[0];assert.equal(changed.steps[0].capability.version,2);
   const missing=createProductivityTools({store:f.store});await assert.rejects(missing.runWorkflow(flow.id,{requestId:'missing-capability'}),{code:'capability_unavailable'});
 });
 

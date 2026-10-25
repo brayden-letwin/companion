@@ -14,6 +14,30 @@ const APP_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.me
 const response = (value, status = 200, headers = {}) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json', ...headers } });
 const init = { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic-test-client', version: '1.0' } };
 const tool = (name, args = {}) => ({ name, arguments: args });
+
+test('an external MCP client discovers exact routine schemas and edits one existing paused workflow without running it',async t=>{
+ const [{mkdtemp,rm},{tmpdir},path,{createProductivityStore},{createProductivityTools}]=await Promise.all([import('node:fs/promises'),import('node:os'),import('node:path'),import('../server/productivity-store.mjs'),import('../server/productivity-tools.mjs')]);
+ const dataDirectory=await mkdtemp(path.join(tmpdir(),'companion-mcp-routine-')),store=await createProductivityStore({dataDirectory});
+ t.after(async()=>{store.close();assert.ok(path.resolve(dataDirectory).startsWith(path.resolve(tmpdir())+path.sep));await rm(dataDirectory,{recursive:true,force:true});});
+ const tools=createProductivityTools({store}),workflowId=randomUUID();store.apply({operationId:workflowId,expectedRevision:0,type:'saveWorkflow',name:'MCP morning routine',enabled:false,steps:[{tool:'start_focus',arguments:{minutes:25}}]});
+ const sent=[],f=await fixture(t,async(url,request)=>{
+  sent.push({url,method:request.method,body:request.body?JSON.parse(request.body):undefined});
+  if(url.endsWith('/integrations'))return response({tools:tools.catalog()});
+  assert.ok(url.endsWith('/tools/run'));const body=JSON.parse(request.body);
+  try{return response({tool:body.tool,result:await tools.execute(body.tool,body.arguments,{requestId:'mcp:'+body.operationId,callId:'direct'})});}
+  catch(error){return response({error:{code:error.code,message:error.message}},error.statusCode||400);}
+ });await f.initialize();
+ const catalog=(await f.request('tools/call',tool('companion_list_tools'))).result.structuredContent.tools;
+ assert.ok(catalog.find(item=>item.name==='save_workflow').parameters.properties.workflowId);assert.ok(catalog.find(item=>item.name==='save_workflow').parameters.properties.expectedRevision);
+ async function run(name,args,operationId=randomUUID()){const value=await f.request('tools/call',tool('companion_run_tool',{tool:name,arguments:args,operationId}));assert.equal(value.result.isError,false);return value.result.structuredContent.result;}
+ const listed=await run('list_workflows',{query:'MCP morning'});assert.equal(listed.total,1);assert.equal(listed.workflows[0].metadataOnly,true);assert.equal(listed.workflows[0].steps,undefined);
+ const read=await run('list_workflows',{action:'read',workflowId,expectedRevision:listed.revision,expectedDefinitionHash:listed.workflows[0].definitionHash});assert.equal(read.definitionHasMore,false);const definition=JSON.parse(read.definitionText);definition.steps[0].arguments.minutes=40;
+ const editId=randomUUID(),edit={workflowId,expectedRevision:read.revision,expectedDefinitionHash:read.definitionHash,steps:definition.steps};
+ const changed=await run('save_workflow',edit,editId);assert.equal(changed.workflow.id,workflowId);assert.equal(changed.workflow.enabled,false);assert.equal(changed.workflow.steps[0].arguments.minutes,40);
+ const retried=await run('save_workflow',edit,editId);assert.equal(retried.replayed,true);assert.deepEqual(retried.workflow,changed.workflow);assert.equal(retried.appliedRevision,changed.appliedRevision);
+ assert.equal(store.snapshot().workflows.length,1);assert.equal(store.snapshot().focus,null);assert.equal(store.snapshot().notes.length,0);assert.equal(store.snapshot().tasks.length,0);
+ assert.equal(sent.filter(item=>item.body?.tool==='run_workflow').length,0);assert.deepEqual(sent.filter(item=>item.body?.tool==='save_workflow').map(item=>item.body.operationId),[editId,editId]);
+});
 async function fixture(t, handler = async () => response({ revision: 0, tasks: [] }), options = {}) {
   const input = new PassThrough(), output = new PassThrough(), errorOutput = new PassThrough(), messages = [], calls = [], waiters = [];
   let outputText = '', errorText = '', buffer = '', nextId = 1;

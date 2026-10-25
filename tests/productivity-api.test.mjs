@@ -70,6 +70,50 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
 
 async function settledProviderCheck(f,id,user){const until=Date.now()+3000;for(;;){const response=await f.request('GET','/api/assistant/provider-checks/'+id,undefined,user);assert.equal(response.status,200);if(!['queued','running','stopping'].includes(response.value.check.status))return response.value.check;if(Date.now()>until)throw Error('Synthetic connection test did not settle.');await new Promise(resolve=>setTimeout(resolve,5));}}
 
+test('chat updates one existing paused workflow using actual bounded discovery and definition evidence',async t=>{
+ let workflowId,revision,definitionHash;
+ const f=await fixture(t,{complete:async(input,round)=>{
+  assert.match(input.system,/Maintain existing routines/);
+  if(round===1)return{text:'',toolCalls:[{id:'find-routine',name:'list_workflows',arguments:{query:'Morning routine'}}]};
+  const result=JSON.parse(input.messages.at(-1).content);
+  if(round===2){assert.equal(result.total,1);assert.equal(result.workflows[0].id,workflowId);assert.equal(result.workflows[0].metadataOnly,true);assert.equal(result.workflows[0].steps,undefined);revision=result.revision;definitionHash=result.workflows[0].definitionHash;return{text:'',toolCalls:[{id:'read-routine',name:'list_workflows',arguments:{action:'read',workflowId,expectedRevision:revision,expectedDefinitionHash:definitionHash}}]};}
+  if(round===3){assert.equal(result.definitionHasMore,false);const saved=JSON.parse(result.definitionText);assert.equal(saved.enabled,false);assert.equal(saved.steps[0].arguments.minutes,25);saved.steps[0].arguments.minutes=40;return{text:'',toolCalls:[{id:'edit-routine',name:'save_workflow',arguments:{workflowId,expectedRevision:revision,expectedDefinitionHash:definitionHash,steps:saved.steps}}]};}
+  assert.equal(round,4);assert.equal(result.workflow.id,workflowId);assert.equal(result.workflow.enabled,false);assert.equal(result.workflow.steps[0].arguments.minutes,40);return{text:'The existing morning routine is now 40 minutes and remains paused.',toolCalls:[]};
+ }});
+ workflowId=randomUUID();f.store.apply({operationId:workflowId,expectedRevision:0,type:'saveWorkflow',name:'Morning routine',enabled:false,steps:[{tool:'start_focus',arguments:{minutes:25,label:'Synthetic morning'}}]});
+ const user=await f.session(),body={id:'change-existing-routine',message:'Change my Morning routine focus from 25 to 40 minutes. Keep it paused; do not run it.'};
+ const changed=await f.request('POST','/api/assistant/chat',body,user);assert.equal(changed.status,200);assert.equal(changed.value.actions.at(-1).result.workflow.id,workflowId);assert.equal(f.calls.length,4);
+ const state=f.store.snapshot();assert.equal(state.workflows.length,1);assert.equal(state.workflows[0].id,workflowId);assert.equal(state.workflows[0].enabled,false);assert.equal(state.workflows[0].steps[0].arguments.minutes,40);assert.equal(state.focus,null);assert.equal(state.tasks.length,0);assert.equal(state.notes.length,0);
+ const replay=await f.request('POST','/api/assistant/chat',body,user);assert.deepEqual(replay.value,changed.value);assert.equal(f.calls.length,4);assert.deepEqual(f.store.snapshot(),state);
+ await f.restart();const next=await f.session();assert.deepEqual((await f.request('POST','/api/assistant/chat',body,next)).value,changed.value);assert.equal(f.calls.length,4);
+});
+
+test('a successful metadata edit of a large routine reaches the next model completion without echoing its whole definition',async t=>{
+ const workflowId=randomUUID(),f=await fixture(t,{complete:async(input,round)=>{
+  if(round===1)return{text:'',toolCalls:[{id:'describe-large-routine',name:'save_workflow',arguments:{workflowId,expectedRevision:1,description:'\ud800'.repeat(2000)}}]};
+  assert.equal(round,2);const message=input.messages.at(-1);assert.ok(Buffer.byteLength(message.content)<48*1024);const receipt=JSON.parse(message.content);assert.equal(receipt.definitionOmitted,true);assert.equal(receipt.workflow.id,workflowId);assert.equal(receipt.workflow.stepCount,4);assert.equal(receipt.workflow.steps,undefined);assert.equal(receipt.appliedRevision,2);assert.match(receipt.workflow.definitionHash,/^[a-f\d]{64}$/);return{text:'The existing routine description was updated; the routine was not run.',toolCalls:[]};
+ }});
+ f.store.apply({operationId:workflowId,expectedRevision:0,type:'saveWorkflow',name:'Large synthetic routine',steps:Array.from({length:4},()=>({tool:'save_note',arguments:{text:'x'.repeat(22000)}}))});
+ const user=await f.session(),request={id:'large-routine-metadata-only',message:'Update only the existing routine description. Do not run it.'},changed=await f.request('POST','/api/assistant/chat',request,user);assert.equal(changed.status,200);assert.equal(f.calls.length,2);assert.equal(changed.value.actions[0].status,'completed');assert.equal(changed.value.actions[0].result.definitionOmitted,true);const state=f.store.snapshot();assert.equal(state.workflows.length,1);assert.equal(state.workflows[0].description,'\ud800'.repeat(2000));assert.equal(state.workflows[0].steps.length,4);assert.equal(state.notes.length,0);assert.ok(JSON.stringify({name:state.workflows[0].name,description:state.workflows[0].description,enabled:state.workflows[0].enabled,steps:state.workflows[0].steps}).length>100000);assert.deepEqual((await f.request('POST','/api/assistant/chat',request,user)).value,changed.value);assert.equal(f.calls.length,2);
+});
+
+test('authenticated workflow maintenance preserves original edit receipts and old run outcomes after later edits and restart',async t=>{
+ const f=await fixture(t),user=await f.session(),route='/api/assistant/tools/run';
+ async function tool(name,args,operationId=randomUUID(),session=user){return f.request('POST',route,{tool:name,arguments:args,operationId},session);}
+ assert.equal((await f.request('POST',route,{tool:'list_workflows',arguments:{}})).status,401);
+ const workflowId=randomUUID();f.store.apply({operationId:workflowId,expectedRevision:0,type:'saveWorkflow',name:'Synthetic repeatable routine',steps:[{tool:'save_note',arguments:{text:'Exactly one original run note.'}}]});
+ const runOperation={operationId:randomUUID()},runRoute='/api/assistant/workspace/workflows/'+workflowId+'/run',ran=await f.request('POST',runRoute,runOperation,user);assert.equal(ran.status,200);assert.equal(ran.value.status,'completed');assert.equal(f.store.snapshot().notes.length,1);
+ const listed=await tool('list_workflows',{});assert.equal(listed.status,200);const revision=listed.value.result.revision,definitionHash=listed.value.result.workflows[0].definitionHash;
+ const editId=randomUUID(),args={workflowId,expectedRevision:revision,expectedDefinitionHash:definitionHash,name:'Changed existing routine'};
+ const edited=await tool('save_workflow',args,editId);assert.equal(edited.status,200);assert.equal(edited.value.result.workflow.id,workflowId);assert.equal(edited.value.result.workflow.name,args.name);assert.equal(f.store.snapshot().workflows.length,1);
+ assert.equal((await tool('save_workflow',{...args,name:'Must not overwrite the newer routine'})).status,409);
+ const paused=await tool('save_workflow',{workflowId,expectedRevision:f.store.snapshot().revision,enabled:false});assert.equal(paused.status,200);assert.equal(paused.value.result.workflow.enabled,false);const state=f.store.snapshot();
+ const retry=await tool('save_workflow',args,editId);assert.equal(retry.status,200);assert.equal(retry.value.result.replayed,true);assert.deepEqual(retry.value.result.workflow,edited.value.result.workflow);assert.equal(retry.value.result.appliedRevision,edited.value.result.appliedRevision);assert.deepEqual(f.store.snapshot(),state);
+ assert.equal((await f.request('POST',runRoute,{operationId:randomUUID()},user)).status,400);assert.equal(f.store.snapshot().notes.length,1);
+ const original=await f.request('POST',runRoute,runOperation,user);assert.equal(original.value.replayed,true);assert.deepEqual(original.value.steps,ran.value.steps);assert.equal(f.store.snapshot().notes.length,1);
+ await f.restart();const next=await f.session(),retried=await tool('save_workflow',args,editId,next);assert.equal(retried.status,200);assert.deepEqual(retried.value.result.workflow,edited.value.result.workflow);assert.equal(retried.value.result.appliedRevision,edited.value.result.appliedRevision);assert.deepEqual((await f.request('POST',runRoute,runOperation,next)).value.steps,ran.value.steps);assert.deepEqual((await f.request('GET','/api/assistant/workspace',undefined,next)).value,state);
+});
+
 test('explicit connection checks require authentication and exact metadata, retain one receipt and never use chat context',async t=>{
  const f=await fixture(t,{enableProviderChecks:true}),route='/api/assistant/provider-checks',id=randomUUID();assert.equal((await f.request('GET',route)).status,401);assert.equal(f.runtimeCount(),0);
  const user=await f.session(),before=f.store.snapshot(),providers=(await f.request('GET','/api/assistant/providers',undefined,user)).value,provider=providers.providers[0];assert.equal(provider.availability,'signed_in');assert.equal(provider.verified,false);assert.equal(provider.connectionCheck,null);assert.equal(providers.connectionChecksAvailable,true);assert.equal(f.probeCalls.length,0);
