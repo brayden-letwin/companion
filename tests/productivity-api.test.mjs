@@ -11,7 +11,7 @@ import { createProductivityTools } from '../server/productivity-tools.mjs';
 
 const stopped = () => Object.assign(new Error('Synthetic request stopped.'), { name: 'AbortError' });
 const unavailable = () => Object.assign(new Error('Synthetic provider unavailable.'), { code: 'provider_unavailable', statusCode: 503 });
-async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.', toolCalls: [] }) } = {}) {
+async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.', toolCalls: [] }), desktop } = {}) {
   const dataDirectory = await mkdtemp(path.join(tmpdir(), 'companion-productivity-api-'));
   let store = await createProductivityStore({ dataDirectory });
   const stores = [store], apps = [], calls = [], jobs = [], builderCalls = []; let runtimeCount = 0;
@@ -32,11 +32,12 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
     async apply(id, owner) { builderCalls.push({ type: 'apply', id, owner }); return { id, status: 'applied' }; },
     async rollback(id, owner) { builderCalls.push({ type: 'rollback', id, owner }); return { id, status: 'rolled_back' }; },
     async cancel(id, owner) { builderCalls.push({ type: 'cancel', id, owner }); return { id, status: 'cancelled' }; },
+    async stopPending(owner) { builderCalls.push({type:'stopPending',owner}); const builds=[]; for(const job of jobs) if(['queued','generating','validating'].includes(job.status)) builds.push(await this.cancel(job.id,owner)); return {stopped:true,builds}; },
     async close() {},
   };
-  let tools = createProductivityTools({ store, builder });
+  let tools = createProductivityTools({ store, builder, desktop });
   const legacyProvider = { getStatus: async () => ({ provider: 'local', reasoningReady: false, transcriptionReady: false }), ask: async () => ({ text: 'Legacy synthetic response.' }), transcribe: async () => ({ text: 'Synthetic transcript.' }), cancel() {}, cancelScope() {} };
-  const createApp = () => createSharedServer({ dbPath: path.join(dataDirectory, 'room.sqlite'), port: 0, assistantProvider: legacyProvider, assistantOptions: { createProductivityRuntime: async () => { runtimeCount += 1; return { router, store, builder, tools }; } } });
+  const createApp = () => createSharedServer({ dbPath: path.join(dataDirectory, 'room.sqlite'), port: 0, assistantProvider: legacyProvider, assistantOptions: { createProductivityRuntime: async () => { runtimeCount += 1; return { router, store, builder, tools, desktop }; } } });
   let app = await createApp(); apps.push(app);
   let address = await app.listen(), origin = new URL(address.url).origin;
   t.after(async () => { for (const item of apps) await item.close(); for (const item of stores) item.close(); const resolved = path.resolve(dataDirectory); assert.ok(resolved.startsWith(path.resolve(tmpdir()) + path.sep)); await rm(resolved, { recursive: true, force: true }); });
@@ -46,7 +47,7 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
   }
   async function session() { const result = await request('GET', '/api/assistant/session'); assert.equal(result.status, 200); return { csrfToken: result.value.csrfToken, cookie: result.headers.get('set-cookie').split(';')[0] }; }
   async function restart() {
-    await app.close(); store.close(); store = await createProductivityStore({ dataDirectory }); stores.push(store); tools = createProductivityTools({ store, builder });
+    await app.close(); store.close(); store = await createProductivityStore({ dataDirectory }); stores.push(store); tools = createProductivityTools({ store, builder, desktop });
     app = await createApp(); apps.push(app); address = await app.listen(); origin = new URL(address.url).origin; return store;
   }
   return { app, store, router, tools, calls, builderCalls, origin, request, session, restart, runtimeCount: () => runtimeCount };
@@ -54,7 +55,7 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
 
 test('new productivity routes require a personal session, exact Origin and CSRF before lazy initialization', async t => {
   const f = await fixture(t);
-  for (const route of ['/workspace', '/providers', '/features', '/features/source', '/integrations']) assert.equal((await f.request('GET', '/api/assistant' + route)).status, 401);
+  for (const route of ['/workspace', '/providers', '/features', '/features/source', '/integrations','/desktop','/desktop/actions']) assert.equal((await f.request('GET', '/api/assistant' + route)).status, 401);
   assert.equal(f.runtimeCount(), 0); const user = await f.session();
   const operation = { operationId: randomUUID(), expectedRevision: 0, type: 'addTask', title: 'Blocked forgery' };
   for (const headers of [{ Origin: 'https://example.invalid' }, { Origin: '' }, { 'X-CSRF-Token': 'forged' }]) assert.equal((await f.request('POST', '/api/assistant/workspace/operations', operation, user, headers)).status, 403);
@@ -145,6 +146,51 @@ test('an explicitly retried feature-build tool returns its first job instead of 
   const first = await f.request('POST', '/api/assistant/tools/run', body, user); assert.equal(first.status, 200); assert.ok(first.value.result.featureJob.id);
   const replay = await f.request('POST', '/api/assistant/tools/run', body, user); assert.equal(replay.status, 200); assert.equal(replay.value.result.featureJob.id, first.value.result.featureJob.id); assert.equal(f.builderCalls.filter(call => call.type === 'request').length, 1);
   const changed = await f.request('POST', '/api/assistant/tools/run', { ...body, arguments: { prompt: 'A different feature using the same operation ID.' } }, user); assert.equal(changed.status, 409);
+});
+
+test('desktop proposals stop the model turn before more actions and only the protected action route can approve', async t => {
+  const id = randomUUID(), desktopCalls = [], pending = { id, status: 'pending', summary: 'Type a synthetic draft in the selected test editor.', preview: { action: 'setText', text: 'Synthetic draft' }, requiresApproval: true };
+  const definition = { name: 'desktop_propose_action', parameters: { type: 'object', properties: { snapshotId: { type: 'string' } }, required: ['snapshotId'], additionalProperties: false } };
+  const desktop = { definitions: [definition], status: () => ({ available: true }), listActions: () => [pending], execute: async (...args) => { desktopCalls.push(args); return { desktopAction: { ...pending } }; }, approve: async actionId => { assert.equal(actionId,id); pending.status = 'completed'; pending.requiresApproval = false; return { ...pending }; }, cancel: async () => ({ ...pending,status:'cancelled' }), cancelAll: () => ({ cancelled: 1 }), close() {} };
+  const f = await fixture(t, { desktop, complete: async () => ({ text: 'I will prepare the action.', toolCalls: [{ id:'preview', name:definition.name, arguments:{snapshotId:'observed'} }, { id:'must_not_run', name:'create_task', arguments:{title:'Must not run before approval'} }] }) });
+  const user = await f.session();
+  const reply = await f.request('POST','/api/assistant/chat',{id:'desktop-review',message:'Prepare the synthetic desktop action.'},user);
+  assert.equal(reply.status,200); assert.equal(reply.value.actions.length,1); assert.equal(reply.value.actions[0].status,'pending'); assert.match(reply.value.text,/has not run/);
+  assert.equal(f.calls.length,1); assert.equal(desktopCalls.length,1); assert.equal(f.store.snapshot().revision,0);
+  const reviewRoute = `/api/assistant/desktop/actions/${id}/approve`;
+  assert.equal((await f.request('POST',reviewRoute,{},user,{Origin:'https://example.invalid'})).status,403);
+  assert.equal(pending.status,'pending');
+  assert.equal((await f.request('POST','/api/assistant/tools/run',{tool:'desktop_approve_action',arguments:{id}},user)).status,400);
+  const approved = await f.request('POST',reviewRoute,{},user); assert.equal(approved.status,200); assert.equal(approved.value.desktopAction.status,'completed');
+  assert.equal((await f.request('GET','/api/assistant/desktop/actions',undefined,user)).value.actions[0].status,'completed');
+  assert.equal((await f.request('POST','/api/assistant/desktop/stop',{},user)).value.stopped,true);
+});
+
+test('direct desktop effects retain a persistent retry receipt across HTTP requests and restart', async t => {
+  let launches = 0;
+  const desktop = { definitions:[{ name:'desktop_open_app',parameters:{type:'object',properties:{appId:{type:'string'}},required:['appId'],additionalProperties:false} }], execute:async (_name,args) => { launches++; return { opened:true,appId:args.appId }; }, close() {} };
+  const f = await fixture(t,{desktop}), user = await f.session();
+  const body = {tool:'desktop_open_app',arguments:{appId:'discovered-synthetic-app'},operationId:randomUUID()};
+  const first = await f.request('POST','/api/assistant/tools/run',body,user); assert.equal(first.status,200); assert.equal(first.value.result.opened,true);
+  const replay = await f.request('POST','/api/assistant/tools/run',body,user); assert.equal(replay.status,200); assert.equal(launches,1);
+  await f.restart(); const newSession = await f.session();
+  assert.equal((await f.request('POST','/api/assistant/tools/run',body,newSession)).status,200); assert.equal(launches,1);
+  assert.equal((await f.request('POST','/api/assistant/tools/run',{...body,arguments:{appId:'different-app'}},newSession)).status,409); assert.equal(launches,1);
+});
+
+test('global Stop cancels active reasoning, desktop work, and queued feature builds without changing saved data', async t => {
+  let begin, desktopStops = 0; const began = new Promise(resolve => { begin = resolve; });
+  const desktop = { definitions:[], cancelAll:() => { desktopStops++; return {cancelled:1}; }, close() {} };
+  const f = await fixture(t,{desktop,complete:input => { begin(); return new Promise((_resolve,reject) => input.signal.addEventListener('abort',()=>reject(stopped()),{once:true})); }});
+  const user = await f.session();
+  await f.request('POST','/api/assistant/workspace/operations',{operationId:randomUUID(),expectedRevision:0,type:'addTask',title:'Keep completed local changes'},user);
+  const build = await f.request('POST','/api/assistant/features',{prompt:'A queued synthetic feature.'},user); assert.equal(build.status,202);
+  const reasoning = f.request('POST','/api/assistant/chat',{id:'global-stop-test',message:'Wait for cancellation.'},user); await began;
+  assert.equal((await f.request('POST','/api/assistant/stop',{},user,{'X-CSRF-Token':'forged'})).status,403); assert.equal(desktopStops,0);
+  const stop = await f.request('POST','/api/assistant/stop',{},user); assert.equal(stop.status,200); assert.equal(desktopStops,1); assert.equal(stop.value.builds[0].status,'cancelled');
+  assert.equal((await reasoning).status,499); assert.equal(f.store.snapshot().tasks.length,1);
+  assert.equal(f.builderCalls.filter(call=>call.type==='cancel').length,1);
+  assert.equal(f.builderCalls.filter(call=>call.type==='stopPending').length,1);
 });
 
 test('an in-progress chat receipt survives API restart and refuses rerun in a fresh browser session', async t => {

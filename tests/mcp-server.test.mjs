@@ -39,7 +39,9 @@ test('MCP lifecycle negotiates tools, requires initialized, and keeps stdout pro
   const initialized = await f.request('initialize', { ...init, protocolVersion: '2024-11-05' }); assert.equal(initialized.result.protocolVersion, '2025-11-25'); assert.deepEqual(initialized.result.capabilities, { tools: { listChanged: false } });
   assert.equal(initialized.result.serverInfo.version, APP_VERSION);
   assert.equal((await f.request('tools/list')).error.code, -32002); f.notify('notifications/initialized');
-  const listed = await f.request('tools/list'); assert.equal(listed.result.tools.length, 12); assert.equal(listed.result.tools.find(item => item.name === 'companion_workspace').annotations.readOnlyHint, true); assert.equal(listed.result.tools.find(item => item.name === 'companion_apply_build').annotations.destructiveHint, true);
+  const listed = await f.request('tools/list'); assert.equal(listed.result.tools.length, 14); assert.equal(listed.result.tools.find(item => item.name === 'companion_workspace').annotations.readOnlyHint, true); assert.equal(listed.result.tools.find(item => item.name === 'companion_apply_build').annotations.destructiveHint, true);
+  assert.equal(listed.result.tools.find(item => item.name === 'companion_run_tool').annotations.openWorldHint, true);
+  assert.equal(listed.result.tools.some(item => /approve.*desktop|desktop.*approve/.test(item.name)), false);
   assert.equal(f.calls.length, 0); assert.equal(f.errorText(), ''); for (const line of f.outputText().trim().split('\n')) assert.equal(JSON.parse(line).jsonrpc, '2.0');
   assert.equal((await f.request('initialize', init)).error.code, -32600);
 });
@@ -51,6 +53,16 @@ test('MCP workspace and chat use fixed local endpoints with a private reusable s
   assert.equal(f.calls.filter(call => call.url.endsWith('/session')).length, 1);
   const post = f.calls.find(call => call.url.endsWith('/chat')); assert.equal(post.headers.Origin, ORIGIN); assert.equal(post.headers['X-CSRF-Token'], CSRF); assert.equal(post.headers.Cookie, `companion_assistant_session_v1_4174=${TOKEN}`); assert.equal(post.redirect, 'error');
   assert.ok(f.calls.every(call => call.url.startsWith(ORIGIN + '/api/assistant/'))); assert.ok(!f.outputText().includes(TOKEN)); assert.ok(!f.outputText().includes(CSRF));
+});
+
+test('MCP exposes desktop status and receipts without an approval or arbitrary route capability', async t => {
+  const f = await fixture(t, async url => response(url.endsWith('/desktop/actions') ? {actions:[{id:'observed',status:'pending'}]} : {available:true})); await f.initialize();
+  const status = await f.request('tools/call',tool('companion_desktop_status')); assert.equal(status.result.structuredContent.available,true);
+  const actions = await f.request('tools/call',tool('companion_desktop_actions')); assert.equal(actions.result.structuredContent.actions[0].status,'pending');
+  const denied = await f.request('tools/call',tool('companion_desktop_approve',{id:'observed'})); assert.ok(denied.error);
+  assert.ok(f.calls.some(call => call.url.endsWith('/api/assistant/desktop')));
+  assert.ok(f.calls.some(call => call.url.endsWith('/api/assistant/desktop/actions')));
+  assert.equal(f.calls.some(call => call.url.includes('/approve')),false);
 });
 
 test('MCP source, build, activation and patch tools map actual backend envelopes without arbitrary paths', async t => {

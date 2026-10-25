@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdtemp, mkdir, writeFile, readFile, rm, access, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, access, symlink, unlink } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { createFeatureBuilder } from '../server/feature-builder.mjs';
 import http from 'node:http';
@@ -99,6 +99,15 @@ test('CAS prevents activation when source changed after the verified snapshot', 
   await assert.rejects(f.builder.apply(ready.id, OWNER), { code: 'source_conflict' });
   assert.equal((await f.builder.get(ready.id, OWNER)).status, 'conflict');
   await absent(path.join(f.root, 'src/features/focus-timer.mjs'));
+});
+
+test('the desktop launcher and public MCP template remain editable protected source', async t => {
+  const f = await fixture(t, { complete: async () => ({ summary: 'Prepare a desktop launcher and public client template.', files: [{ path:'Start Desktop Companion.cmd',content:'@echo off\r\necho Companion desktop\r\n' },{ path:'mcp.example.json',content:'{"mcpServers":{}}\n' }], tests:[] }) });
+  const job = await finished(f.builder,(await f.builder.request({prompt:'Prepare the desktop integration source.',providerId:'synthetic',autoApply:true},OWNER)).id);
+  assert.equal(job.status,'review_required'); assert.equal(job.files.length,2); assert.ok(job.files.every(file=>file.protected));
+  await assert.rejects(readFile(path.join(f.root,'Start Desktop Companion.cmd')),{code:'ENOENT'});
+  await f.builder.apply(job.id,OWNER);
+  assert.match(await readFile(path.join(f.root,'Start Desktop Companion.cmd'),'utf8'),/Companion desktop/);
 });
 
 test('external tools submit actual patches with exact base hashes and cannot use outside paths', async t => {
@@ -266,4 +275,37 @@ test('a live writer lock is retained rather than guessed stale', async t => {
   const saved = { pid: process.pid, nonce: 'synthetic-live-owner' }; await writeFile(lock, JSON.stringify(saved));
   await assert.rejects(f.builder.apply(job.id, OWNER), { code: 'feature_writer_busy' });
   assert.deepEqual(JSON.parse(await readFile(lock, 'utf8')), saved);
+});
+
+test('Stop cancels an automatic ready candidate waiting for the source writer and preserves manual reviews', async t => {
+  const requests = [];
+  const f = await fixture(t, { complete: async input => {
+    const request = JSON.parse(input.messages[0].content).request;
+    requests.push(request);
+    return request.includes('Protected') ? { summary: 'Protected review candidate', files: [{ path: 'server/security.mjs', content: 'export const authenticationRequired = "review";' }], tests: [] } : feature;
+  } });
+  const manual = await finished(f.builder, (await f.builder.request({ prompt: 'Manual candidate', providerId: 'synthetic', autoApply: false }, OWNER)).id);
+  const review = await finished(f.builder, (await f.builder.request({ prompt: 'Protected candidate', providerId: 'synthetic' }, OWNER)).id);
+  assert.equal(manual.status, 'ready'); assert.equal(review.status, 'review_required');
+  const lock = path.join(f.root, '.companion-feature-writer.lock'); await writeFile(lock, JSON.stringify({ pid: process.pid, nonce: 'synthetic-held-writer' }));
+  const queued = await f.builder.request({ prompt: 'Automatic candidate', providerId: 'synthetic' }, OWNER);
+  const deadline = Date.now() + 10000;
+  while ((await f.builder.get(queued.id, OWNER)).status !== 'ready') {
+    if (Date.now() > deadline) throw new Error('Automatic candidate never reached its writer wait.');
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  await new Promise(resolve => setTimeout(resolve, 40));
+  const waiting = await f.builder.request({ prompt: 'Queued after writer wait', providerId: 'synthetic' }, OWNER);
+  assert.deepEqual((await f.builder.stopPending('another-owner')).builds, []);
+  const stopped = await f.builder.stopPending(OWNER);
+  assert.deepEqual(new Set(stopped.builds.map(job => job.id)), new Set([queued.id, waiting.id]));
+  assert.ok(stopped.builds.every(job => job.status === 'cancelled'));
+  await unlink(lock); await f.builder.close();
+  assert.equal((await f.builder.get(queued.id, OWNER)).status, 'cancelled');
+  assert.equal((await f.builder.get(waiting.id, OWNER)).status, 'cancelled');
+  assert.equal((await f.builder.get(manual.id, OWNER)).status, 'ready');
+  assert.equal((await f.builder.get(review.id, OWNER)).status, 'review_required');
+  assert.ok(!requests.includes('Queued after writer wait'));
+  await absent(path.join(f.root, 'src/features/focus-timer.mjs'));
+  await absent(path.join(f.root, 'src/features/manifest.json'));
 });
