@@ -37,6 +37,8 @@ Ask Companion to edit, rename, pause or enable an existing routine by voice or c
 
 Each workflow run retains its original definition and real partial results. An exact retry returns that run's receipt even if the workflow was later edited or disabled. A fresh run starts at step one and can repeat earlier effects, including actions completed inside a failed step. Changed or removed custom actions require review before a fresh run; they are never silently replaced. Generated capability behavior checks execute actual code with fixture-only host effects. Those checks supplement concrete review and live acceptance rather than proving every possible feature correct.
 
+Open **Workflows → Run history**, or say **“show run history”**, to inspect earlier results. Per-routine History controls filter that same saved evidence. The original name, steps and actual nested receipts remain available after edits, reload and restart; missing current routines still appear in global history. Older run times stay unknown. **Check last run** reads the exact original identity without sending another run request. Long records load in explicit revision-bound pages. You can also ask the selected AI what happened in a past run; it uses the same read-only evidence.
+
 **Tools → Files** connects a folder you choose to chat, voice, Work and connected AI tools. Read and save requested UTF-8 text/code files, inspect actual edit history, and Undo recent edits. Each request keeps its original folder; removing access stops dependent future operations. Companion’s own source and private data stay on the Build/review path. See [Project files](docs/PROJECT_FILES.md) for access, recovery and size limits.
 
 When a chat or voice task needs a missing tool, its linked build keeps **Your request** separate from **Build instructions**. Review and activate the change, wait for the callable tool and runtime to be ready, then choose **Continue original request**. You can also say that exact phrase while the intended build is open. The separate Work job keeps the original request, AI connection, project access and window selection; earlier completed actions are reused. It never resumes automatically or substitutes your current source. [Build follow-through](docs/BUILD_FOLLOW_THROUGH.md) explains the steps, Stop and read-only recovery checks.
@@ -47,11 +49,11 @@ When a chat or voice task needs a missing tool, its linked build keeps **Your re
 | **Tasks** | Search the full list, filter projects and Today/Overdue/Upcoming/No deadline, sort by priority or deadline, and read complete instructions. Edit calendar dates or precise times with explicit zone/clock-change choices; complete and reopen saved tasks. |
 | **Notes** | Save, search, edit, and archive persistent notes. Keeping an AI reply is an explicit action. |
 | **Files** | Choose a local project folder; read/edit text files, inspect saved changes and Undo. |
-| **Workflows** | Save a sequence of supported local actions and run it with actual step results. |
+| **Workflows** | Save routines, run supported actions, and inspect original history and actual partial effects. |
 | **Tools → Work** | Hand off independent requests, inspect actual results, stop one job, or open its saved conversation. |
 | **Computer** | Search/open installed apps, choose a window as question context, read a snapshot, and review prepared input. |
 | **Build a feature** | Request real source changes, follow their progress, inspect diffs and checks, activate, and roll back. |
-| **Settings** | Select or configure AI connections and optional offline read-aloud. |
+| **Settings** | Choose AI connections, review memory, control read-aloud and back up/recover workspace content. |
 
 Workflows currently use registered Companion actions such as creating tasks, saving notes, and starting focus time. They do not send email or operate other applications. A focus session is an in-app timer; it does not block applications or guarantee a system notification.
 
@@ -161,7 +163,9 @@ npm test
 npm run check
 ```
 
-The 0.21 update passed **853 Node tests** and **71 source syntax checks**. Actual browser download, selected-copy recovery, disabled routines and restart persistence were verified in an isolated workspace. The primary service serves 0.21 with existing workspace content and receipts preserved, including a new real conversation message received during the update. The user also reported that enabling voice once, then speaking without tapping the mic again, produced an answer aloud. The native download predicate is tested; the existing desktop shell still needs its next restart and an actual Save-dialog check. [QA.md](QA.md) distinguishes these reports from independently observed checks and remaining work.
+The 0.22 update passed **898 Node tests** and **73 source syntax checks**. Real GPT explained a past failure using original run receipts without repeating effects; browser and restart checks preserved original names, nested partial results and truthful legacy times. Exact voice-navigation aliases have integration checks. The primary service serves 0.22 with eleven original productivity tables preserved. [QA.md](QA.md) records concrete evidence and the separate native Save-dialog check still pending.
+
+The 0.21 update passed **853 Node tests** and **71 source syntax checks**. Actual browser download, selected-copy recovery, disabled routines and restart persistence were verified in an isolated workspace. Its primary rollout preserved existing workspace content and receipts, including a new real conversation message received during the update. The user also reported that enabling voice once, then speaking without tapping the mic again, produced an answer aloud. The native download predicate is tested; loading it into the existing desktop shell and an actual Save-dialog check remain separate work.
 
 The 0.20 update passed **806 Node tests** and **69 source syntax checks**. Real GPT saved a calendar deadline and an explicitly chosen precise time. Browser checks verified dates, named-zone display, repeated-hour choice, clearing and filter counts; restart preserved all five isolated test tasks.
 

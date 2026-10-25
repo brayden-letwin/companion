@@ -82,6 +82,7 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 - [ ] Add project organization and better task scheduling; extend the retained conversation/context foundation where real use needs it.
 - [x] Paginated task reads, explicit completeness metadata, complete detail sections, and actual full-set/project counts for larger workspaces.
 - [x] Edit existing routines through voice/chat with actual IDs, bounded exact-definition reads, revision/hash checks, preserved disabled state and capability pins. Explicit UI enable/disable and failed-step receipts keep outcomes visible; new runs still start at step one.
+- [x] Read-only original run history shared with voice/chat and connected AI tools: bounded row scans, revision-bound definition/outcome pages, truthful legacy times, exact GET-only pending checks, missing-routine access and verified nested custom-step receipts after interruption. A history read never starts or resumes a run.
 - [ ] Broader workflow recovery and targeted step editing for very large definitions, without replaying completed effects.
 - [ ] Extend workspace-content backup/recovery to full installation/build-history recovery, scheduled backups and migration without losing newer action receipts.
 - [ ] Keep the main interface simple as new tools are added; test whether people can find and use them by voice.
