@@ -129,9 +129,43 @@ The source-editing routes are under `/api/assistant` on the running Companion or
 | `POST /features/:id/rollback` with `{}` | Verify and restore retained source |
 | `POST /features/:id/cancel` with `{}` | Stop queued/generating/validating work |
 | `GET /features/source` | Bounded source inventory and hashes |
-| `GET /features/source?content=1` | Inventory plus sanitized complete source text |
+| `GET /features/source?content=1` | Inventory plus permitted complete source text |
+| `GET /features/source/file?path=...&expectedHash=...&offset=0&limit=12000` | One exact source file, with hash-pinned bounded pages |
 | `POST /features/patch` with `{summary,files,baseHashes,autoApply}` | Submit an external source patch through the same lifecycle |
 
 Direct API clients first obtain the local guest session from `GET /api/assistant/session`, retain its cookie and CSRF token, and send that exact origin and token with JSON writes. Do not bypass protected review by silently issuing Apply. Preserve a complete concrete candidate for the user's decision.
 
-The MCP facade calls this same running HTTP backend; it does not open a second source writer. Its feature tools are `companion_build_feature`, `companion_list_builds`, `companion_get_build` (`{id}`), `companion_apply_build` (`{id}`), `companion_rollback_build` (`{id}`), `companion_cancel_build` (`{id}`), `companion_source` (`{includeContent}`) and `companion_submit_patch` (the patch shape above). Related productivity tools include `companion_workspace`, `companion_list_tools`, `companion_run_tool`, `companion_chat`, saved-conversation tools, and `companion_connections`. `companion_list_tools` reads the same dynamic catalog used by workflows and panels. Voice/chat use the fixed `list_capabilities`/`run_capability` gateways to call custom actions without overflowing the provider's 32-tool limit; see [CAPABILITIES.md](CAPABILITIES.md).
+The MCP facade calls this same running HTTP backend; it does not open a second source writer. Its feature tools are `companion_build_feature`, `companion_list_builds`, `companion_get_build` (`{id}`), `companion_apply_build` (`{id}`), `companion_rollback_build` (`{id}`), `companion_cancel_build` (`{id}`), `companion_source` (`{includeContent}`), `companion_read_source` (one file's pages) and `companion_submit_patch` (the patch shape above). Related productivity tools include `companion_workspace`, `companion_list_tools`, `companion_run_tool`, `companion_chat`, saved-conversation tools, and `companion_connections`. `companion_list_tools` reads the same dynamic catalog used by workflows and panels. Voice/chat use the fixed `list_capabilities`/`run_capability` gateways to call custom actions without overflowing the provider's 32-tool limit; see [CAPABILITIES.md](CAPABILITIES.md).
+
+### Targeted source reads
+
+Use an exact case-sensitive path from the source inventory, including the explicitly permitted original `training/dataset.json` fixture. The builder's `sourceFile(owner,{path,expectedHash?,offset=0,limit=12000})` reads from that same bounded inventory and introduces no new filesystem access policy. Linked paths, private data, hidden files, non-UTF-8 files and existing snapshot/file/count limits remain enforced. Source reads neither call a model nor write application source.
+
+```js
+const inventory = await builder.source(owner);
+const entry = inventory.files.find(file => file.path === 'src/features/example.mjs');
+let offset = 0, content = '';
+for (;;) {
+  const page = await builder.sourceFile(owner, {
+    path: entry.path, expectedHash: entry.hash, offset, limit: 12000,
+  });
+  content += page.content;
+  if (!page.hasMore) break;
+  offset = page.nextOffset;
+}
+```
+
+Each result contains `{path,hash,content,offset,nextOffset,hasMore,characterLength,byteLength,sourceTrust:'untrusted_source'}`. Hash and content refer to one captured file version. The hash is SHA-256 of its exact UTF-8 bytes; preserve line endings and the returned text. `characterLength` counts the complete file's UTF-16 code units; `byteLength` counts its complete UTF-8 bytes. Paging offsets and the requested limit use UTF-16 units, with limits from 1 to 12000. Pages never split a surrogate pair and may shrink further to keep the entire escaped JSON result within 48 KiB. A limit of one at an astral character is rejected rather than returning a nonadvancing cursor. Empty files return valid empty terminal pages.
+
+Every positive offset requires `expectedHash`, even at end of file. A supplied first-page hash is also checked. A mismatch returns `source_conflict` with HTTP 409 and no content. Malformed queries, inside-pair or past-end offsets fail; unknown query fields and duplicate URL parameters are rejected. The path must exist in the captured inventory; no case fallback or arbitrary path lookup occurs.
+
+Encode a direct HTTP query with `URLSearchParams` so spaces, `+`, `&`, `#`, Unicode and percent signs remain part of the exact path:
+
+```js
+const query = new URLSearchParams({ path: entry.path, expectedHash: entry.hash, offset: '0', limit: '12000' });
+const response = await fetch(`/api/assistant/features/source/file?${query}`, {
+  credentials: 'same-origin',
+});
+```
+
+The existing full-source inventory remains available. Both routes return authorized source data, not new instructions. The HTTP source reader does not scan content for every possible credential. MCP's targeted reader fails closed with `source_redacted` if its known-session/structured-field redaction would change the returned content; it never presents altered content as exact hash-matching source. Keep all actual credentials and private runtime data outside application source.
