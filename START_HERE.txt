@@ -31,6 +31,10 @@ COMPANION — START HERE
    Signed in/Model found/Configured is separate from an actual passed test.
    A lost response offers Check test; it reads the original ID without resending.
 
+   Settings > Backup and recovery saves a workspace JSON file to download.
+   Preview a file, then import selected tasks, notes or routines as new copies.
+   Copied routines stay disabled. Chats, builds, keys and permissions are excluded.
+
 VOICE
 Enable voice starts an opt-in speech session with a visible listening state.
 Quiet periods stay local. Voice pauses while Companion works or speaks.
@@ -38,7 +42,8 @@ Turn voice off forgets the opt-in. Hiding the app stops capture; a visible app
 can resume a remembered session only when microphone permission is granted.
 Chat keeps manual recording and typing available. Stop cancels current work.
 Voice needs the local transcription service. Typing still works without it.
-The user reported basic voice success; spoken desktop approval still needs testing.
+The user reported that automatic listening answered aloud after Enable voice,
+without tapping the microphone again. Spoken desktop approval still needs testing.
 Ctrl+Alt+Space toggles the corner when available. Ctrl+Alt+Escape is global Stop.
 The app shows whether those shortcuts actually registered. Hiding the corner
 keeps pending desktop reviews and background feature builds available.

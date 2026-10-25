@@ -17,6 +17,7 @@ Companion's current direction is a minimal general productivity assistant in the
 - [x] Independent Work jobs with separate saved intent, two concurrent turns, a bounded queue, frozen app-provider settings, actual outcomes, per-job Stop and GET-only handoff checks.
 - [x] Reviewable explicitly taught preferences with archiving/reteaching; preferences shape context and never grant action permission.
 - [x] Direct task/note editing, completion/reopening, note archiving, and search.
+- [x] Human-created workspace JSON backups and explicit selected-copy recovery with fresh IDs, disabled routines, atomic original receipts, GET-only uncertain-result checks and bounded storage. Chats, builds, credentials and permissions are outside this content archive.
 - [x] Human-chosen local project folders shared with chat/voice/Work/MCP through exact bindings, paged UTF-8 reads, hash-checked writes, journals, recent Undo and GET-only uncertain-save checks.
 - [x] Linked build → original request: separate accepted intent/specification, current source/tool/runtime proof, one explicit follow-through Work identity, frozen context, prior-effect reuse and actual capability completion receipts.
 - [x] Full-list task search, exact project filters, priority/due sorting, progressive rendering, and expandable complete instructions.
@@ -54,7 +55,7 @@ The app can edit its own application source. It does not instantly acquire arbit
 - [ ] Test a real external Claude client and verify its action receipts and source-change lifecycle.
 - [x] User reported basic voice success; this does not independently verify native relaunch or spoken approval.
 - [x] Real MCP-to-app saved conversation continuity through GPT, reload, and managed restart; real GPT preference save plus Memory archive/restore.
-- [ ] Check the new automatic speech-detection mode with human speech; old manual-flow success does not establish it.
+- [x] User reported that enabling voice once and then saying “What time is it?” without tapping the mic again produced an answer aloud. Exact build/device and difficult audio conditions were not independently captured.
 - [x] Live native corner bounds/toggle and GPT installed-app search/open-Calculator chain checked on QA.
 - [x] Verify real GPT-prepared Notepad text input through frozen preview, human button approval, and actual editor contents.
 - [ ] Validate exact human voice approval on a live target.
@@ -82,7 +83,7 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 - [x] Paginated task reads, explicit completeness metadata, complete detail sections, and actual full-set/project counts for larger workspaces.
 - [x] Edit existing routines through voice/chat with actual IDs, bounded exact-definition reads, revision/hash checks, preserved disabled state and capability pins. Explicit UI enable/disable and failed-step receipts keep outcomes visible; new runs still start at step one.
 - [ ] Broader workflow recovery and targeted step editing for very large definitions, without replaying completed effects.
-- [ ] Add export, backup, restore, and migration for productivity data and build history.
+- [ ] Extend workspace-content backup/recovery to full installation/build-history recovery, scheduled backups and migration without losing newer action receipts.
 - [ ] Keep the main interface simple as new tools are added; test whether people can find and use them by voice.
 
 ## Broader original goals remain open
@@ -90,7 +91,7 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 - [x] A small native corner/tray for the general workspace, with registered-shortcut status and global Stop.
 - [ ] Validate shortcut conflicts, multi-monitor placement, scaling, and longer native sessions across target PCs.
 - [ ] A deliberate voice bridge into an existing Codex development conversation, if the user still wants that exact route.
-- [ ] Validate human voice coordination of the implemented independent Work streams; real GPT/MCP/browser handoffs and persisted outcomes are verified, while current automatic microphone behavior still needs a human check.
+- [ ] Validate human voice coordination of independent Work streams beyond the reported basic automatic-listening success; real GPT/MCP/browser handoffs and persisted outcomes are verified.
 - [x] Explicit selected-window accessibility reads with snapshot IDs, expiry, and no continuous screen monitoring.
 - [x] Human-selected window context bound to each question or background job, fresh on submit/start, with visible provenance and no silent fallback.
 - [ ] Add user-selected screen-region context and broader application coverage without inferring thought from pointer movement.

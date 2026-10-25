@@ -142,9 +142,11 @@ Recordings are processed in memory by Companion's transcription route. A submitt
 
 ## Data and running locally
 
-The default server data folder is `work/companion-shared`, outside this source checkout. It contains the productivity database, saved conversations and preferences, provider metadata and protected keys, group-room database, and private build history/candidates/backups. Keep the whole folder private and outside Git. Saved tasks, notes, workflows, preferences, recorded conversation turns, and activity survive a server restart. Unsent form drafts remain in the current window; exports, automatic backup, and cross-device synchronization remain separate work.
+The default server data folder is `work/companion-shared`, outside this source checkout. It contains the productivity database, saved conversations and preferences, provider metadata and protected keys, group-room database, and private build history/candidates/backups. Keep the whole folder private and outside Git. Saved tasks, notes, workflows, preferences, recorded conversation turns, and activity survive a server restart. Unsent form drafts remain in the current window.
 
-For a file-copy backup, stop the server before copying its full data folder. SQLite can have active sidecar files. DPAPI-protected keys are tied to the Windows user, so migration may require re-entering them. Automated backup, recovery, remote synchronization, and multi-user productivity accounts are not implemented.
+**Settings → Backup and recovery** creates a downloadable workspace JSON archive of tasks, notes, routines and remembered preferences. Preview a file, then explicitly import chosen tasks/notes/routines as new copies; copied routines start disabled. Current work and action receipts stay in place. Chats, builds, keys, permissions and project files are excluded. [Workspace backups](docs/WORKSPACE_BACKUPS.md) explains exact recovery, privacy and limits. Automatic backups and cross-device synchronization remain unfinished.
+
+For an entire installation file-copy backup, stop the server before copying its full data folder. SQLite can have active sidecar files. DPAPI-protected keys are tied to the Windows user, so migration may require re-entering them. Do not roll a running database back over newer action receipts.
 
 For a foreground development server:
 
@@ -159,7 +161,9 @@ npm test
 npm run check
 ```
 
-The 0.20 update passed **806 Node tests** and **69 source syntax checks**. Real GPT saved a calendar deadline and an explicitly chosen precise time. Browser checks verified dates, named-zone display, repeated-hour choice, clearing and filter counts; restart preserved all five isolated test tasks. The primary app serves 0.20 with all nine original productivity tables unchanged from its backup. [QA.md](QA.md) records live evidence separately from human-voice and account checks still open.
+The 0.21 update passed **853 Node tests** and **71 source syntax checks**. Actual browser download, selected-copy recovery, disabled routines and restart persistence were verified in an isolated workspace. The primary service serves 0.21 with existing workspace content and receipts preserved, including a new real conversation message received during the update. The user also reported that enabling voice once, then speaking without tapping the mic again, produced an answer aloud. The native download predicate is tested; the existing desktop shell still needs its next restart and an actual Save-dialog check. [QA.md](QA.md) distinguishes these reports from independently observed checks and remaining work.
+
+The 0.20 update passed **806 Node tests** and **69 source syntax checks**. Real GPT saved a calendar deadline and an explicitly chosen precise time. Browser checks verified dates, named-zone display, repeated-hour choice, clearing and filter counts; restart preserved all five isolated test tasks.
 
 The 0.19 update passed **745 Node tests** and **67 source syntax checks**. Real GPT edited one existing paused routine without duplicating or running it. The actual browser renamed, enabled, ran and disabled it; a service restart preserved its exact state and single note. Its rollout preserved all eight original productivity tables.
 
