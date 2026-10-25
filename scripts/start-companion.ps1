@@ -3,6 +3,7 @@ param(
     [string]$RuntimeRoot = (Join-Path $PSScriptRoot '..\..\companion-local'),
     [switch]$SkipAI,
     [switch]$StartLocalModel,
+    [switch]$Browser,
     [switch]$NoOpen
 )
 
@@ -28,4 +29,13 @@ if (-not $SkipAI) {
 Write-Output 'Companion: http://127.0.0.1:4174/assistant.html'
 Write-Output 'Tell Companion what you want to get done. Settings connects GPT, Claude, and other AI services.'
 Write-Output 'Build a feature adds missing capabilities through checked source changes with rollback.'
-if (-not $NoOpen) { Start-Process 'http://127.0.0.1:4174/assistant.html' | Out-Null }
+if (-not $NoOpen) {
+    $desktopRuntime = Join-Path $PSScriptRoot '..\node_modules\electron\dist\electron.exe'
+    if (-not $Browser -and (Test-Path -LiteralPath $desktopRuntime -PathType Leaf)) {
+        $desktopArguments = @{}
+        if ($NodePath) { $desktopArguments.NodePath = $NodePath }
+        & (Join-Path $PSScriptRoot 'start-desktop.ps1') @desktopArguments
+    } else {
+        Start-Process 'http://127.0.0.1:4174/assistant.html' | Out-Null
+    }
+}
