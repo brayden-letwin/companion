@@ -34,6 +34,7 @@ const ASSETS = new Map([
   ['/src/build-attempts.mjs', ['src/build-attempts.mjs', 'text/javascript; charset=utf-8']],
   ['/src/provider-checks.mjs', ['src/provider-checks.mjs', 'text/javascript; charset=utf-8']],
   ['/src/workspace-backups.mjs', ['src/workspace-backups.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/workflow-history.mjs', ['src/workflow-history.mjs', 'text/javascript; charset=utf-8']],
   ['/src/assistant.css', ['src/assistant.css', 'text/css; charset=utf-8']],
   ['/src/core/assistant.mjs', ['src/core/assistant.mjs', 'text/javascript; charset=utf-8']],
   ['/src/core/productivity-deadlines.mjs', ['src/core/productivity-deadlines.mjs', 'text/javascript; charset=utf-8']],

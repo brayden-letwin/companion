@@ -63,10 +63,20 @@ function deadlineQuery(req,allowed){
  }
  return result;
 }
+function workflowHistoryQuery(req,detail=false){
+  const params=new URL(req.url,'http://localhost').searchParams,allowed=detail?['definitionOffset','definitionLimit','outcomeOffset','outcomeLimit','expectedRunRevision']:['workflowId','before','limit'],result={};
+  for(const key of params.keys()){
+    const value=params.get(key);if(!allowed.includes(key)||params.getAll(key).length!==1)throw fail(400,'invalid_workflow_run_query','Use each supported routine history query field once.');
+    if(['definitionOffset','definitionLimit','outcomeOffset','outcomeLimit','limit'].includes(key)){if(!/^(0|[1-9]\d{0,6})$/.test(value)||!Number.isSafeInteger(Number(value)))throw fail(400,'invalid_workflow_run_query','Use returned bounded integer history offsets.');result[key]=Number(value);}
+    else{if(!value||value.length>(key==='expectedRunRevision'?64:key==='before'?20:36))throw fail(400,'invalid_workflow_run_query','Use the actual routine history identity or revision.');result[key]=value;}
+  }
+  return result;
+}
 const backupRouteMatches=route=>route===BASE+'/backups'||route===BASE+'/backup-recovery/preview'||route===BASE+'/backup-recovery/import'
   || /^\/api\/assistant\/backups\/[a-f\d-]+\/(?:download|delete)$/i.test(route)
   || /^\/api\/assistant\/backup-recovery\/(?:previews|imports)\/[a-f\d-]+$/i.test(route);
 const routeMatches = route => backupRouteMatches(route)||['/chat','/work','/continuations','/context','/projects','/projects/choose','/conversations','/providers','/provider-checks','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/deadline-context','/deadline-resolve','/task-deadlines','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
+  || route===BASE+'/workflow-runs'||/^\/api\/assistant\/workspace\/workflows\/[a-f\d-]+\/(?:runs|operations)\/[a-f\d-]+$/i.test(route)
   || /^\/api\/assistant\/provider-checks\/[a-f\d-]+(?:\/cancel)?$/i.test(route)
   || /^\/api\/assistant\/features\/[a-f\d-]+\/attempts\/[0-9]+$/i.test(route)
   || /^\/api\/assistant\/continuations\/[a-f\d-]+(?:\/(?:continue|cancel))?$/i.test(route)
@@ -266,12 +276,23 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         session.windows?.set('productivity', window);
         const services = await runtime();
         if(closed)throw fail(503,'shutting_down','Companion is shutting down.');
+        const historyDetail=/^\/api\/assistant\/workspace\/workflows\/([a-f\d-]+)\/(runs|operations)\/([a-f\d-]+)$/i.exec(route);
+        if((route===BASE+'/workflow-runs'||historyDetail)&&req.method!=='GET')throw fail(405,'method_not_allowed','Use GET to inspect retained routine runs.');
         if(['/deadline-context','/deadline-resolve','/task-deadlines'].some(suffix=>route===BASE+suffix)&&req.method!=='GET')throw fail(405,'method_not_allowed','Use GET to inspect deadline context and civil time.');
         if(route===BASE+'/provider-checks'||/^\/api\/assistant\/provider-checks\//i.test(route)){
           if(!services.providerChecks||services.providerChecks.unavailable)throw fail(503,'provider_checks_unavailable','Connection tests are unavailable in this runtime.');
         }
         if(req.method!=='GET'&&/^\/api\/assistant\/features\/[a-f\d-]+\/attempts\/[0-9]+$/i.test(route))throw fail(405,'method_not_allowed','Use GET to inspect retained build attempts.');
         if (req.method === 'GET') {
+          if(route===BASE+'/workflow-runs'){
+            if(typeof services.store.listWorkflowRuns!=='function')throw fail(503,'workflow_history_unavailable','Retained routine history is unavailable in this runtime.');
+            json(res,200,services.store.listWorkflowRuns(workflowHistoryQuery(req)));return true;
+          }
+          if(historyDetail){
+            if(!UUID.test(historyDetail[1])||!UUID.test(historyDetail[3]))throw fail(400,'invalid_workflow_run_query','Choose the actual routine and original run or operation UUID.');
+            if(typeof services.store.getWorkflowRun!=='function')throw fail(503,'workflow_history_unavailable','Retained routine history is unavailable in this runtime.');
+            json(res,200,services.store.getWorkflowRun({workflowId:historyDetail[1],[historyDetail[2]==='runs'?'runId':'operationId']:historyDetail[3],...workflowHistoryQuery(req,true)}));return true;
+          }
           if(route===BASE+'/backups'){projectQuery(req,[]);json(res,200,await (await backups(services)).list());return true;}
           const download=/^\/api\/assistant\/backups\/([a-f\d-]+)\/download$/i.exec(route);
           if(download){
@@ -439,7 +460,7 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
           json(res, 200, { tool: body.tool, result, requestId, workspace: services.store.snapshot() }); return true;
         }
         const workflow = /^\/api\/assistant\/workspace\/workflows\/([a-f\d-]+)\/run$/i.exec(route);
-        if (workflow) { fields(body, ['operationId']); const requestId=directOperationId(body); json(res, 200, await guardedRequest(req,res,session,requestId,signal=>services.tools.runWorkflow(workflow[1], { requestId: `${OWNER}:${requestId}`, signal }))); return true; }
+        if (workflow) { fields(body, ['operationId']); const requestId=directOperationId(body); json(res, 200, await guardedRequest(req,res,session,requestId,signal=>services.tools.runWorkflow(workflow[1], { requestId: `${OWNER}:${requestId}`,workflowOperationId:requestId,signal }))); return true; }
         if (route === BASE + '/features') {
           fields(body, ['prompt','providerId','autoApply']); const status = await services.router.getStatus();
           json(res, 202, await services.builder.request({ ...body, providerId: body.providerId || status.defaultProviderId }, OWNER)); return true;

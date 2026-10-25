@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { BUILTIN_TOOL_DEFINITIONS, builtinCatalog, validateToolArguments, capabilityHash, validateWorkflowSteps } from './capability-registry.mjs';
 import { listTasks, readTask, summarizeTasks } from './task-queries.mjs';
 import { listWorkflows, readWorkflow } from './workflow-queries.mjs';
+import {workflowRunId,workflowRunDigest} from './workflow-runs.mjs';
 import { createDeadlineContext, taskDeadline, resolveLocalDeadline } from '../src/core/productivity-deadlines.mjs';
 import { PROJECT_FILES_TOOL_NAME, projectFilesCatalogEntry } from './project-files-tool.mjs';
 import {continuationReference,continuationPriorEffect} from './continuation-context.mjs';
@@ -213,6 +214,13 @@ export function createProductivityTools({ store, builder, desktop, root, work, p
         store.finishChat(receiptId, digest, receipt, true); throw error;
       }
     }
+    if(name==='list_workflows'&&['runs','run'].includes(args.action)){
+      const method=args.action==='runs'?'listWorkflowRuns':'getWorkflowRun';
+      if(typeof store[method]!=='function')throw Object.assign(fail('Retained routine history is unavailable in this runtime.','workflow_history_unavailable'),{statusCode:503});
+      const allowed=args.action==='runs'?['action','workflowId','before','limit']:['action','workflowId','runId','definitionOffset','definitionLimit','outcomeOffset','outcomeLimit','expectedRunRevision'];
+      if(Object.keys(args).some(key=>!allowed.includes(key))||args.action==='run'&&(!args.workflowId||!args.runId))throw fail('Use only the selected history action and its returned identities or paging fields.','invalid_workflow_run_query');
+      const {action,...options}=args;return store[method](options);
+    }
     const state = store.snapshot();
     const mutate = (type, fields) => {
       const entityId = operationId(requestId || 'local', callId || JSON.stringify([name, args, state.revision]));
@@ -344,22 +352,23 @@ export function createProductivityTools({ store, builder, desktop, root, work, p
   async function runWorkflow(workflowId, context = {}) {
     executionBudget(context);
     if(context.signal?.aborted)throw Object.assign(new Error('Workflow stopped.'),{name:'AbortError'});
-    const receiptId=`workflow:${operationId(context.requestId||randomUUID(),context.callId||'workflow')}`,digest=capabilityHash({workflowId});
+    const runId=workflowRunId(context.requestId||randomUUID(),context.callId||'workflow'),receiptId=`workflow:${runId}`,digest=workflowRunDigest(workflowId);
     const replay=saved=>saved.state==='in_progress'?{id:workflowId,status:'running',steps:saved.checkpoint?.steps||[],message:'This workflow is still running. Check its saved result rather than starting it again.',code:'workflow_running',workspace:store.snapshot()}:saved.state==='interrupted'?{id:workflowId,status:'interrupted',steps:saved.checkpoint?.steps||[],error:'This workflow was already started. Inspect its completed actions before making a fresh request.',code:'workflow_interrupted',workspace:store.snapshot()}:{...saved.result,workspace:store.snapshot(),replayed:true};
-    const prior=store.executionReceipt(receiptId,digest);if(prior)return replay(prior);
+    const prior=store.executionReceipt(receiptId,digest);if(prior)return{...replay(prior),runId,...(typeof prior.definition?.name==='string'&&prior.definition.name.length<=200?{originalName:prior.definition.name}:{})};
     const workflow = store.snapshot().workflows.find(item => item.id === workflowId);
     if (!workflow || !workflow.enabled) throw fail('Choose an enabled saved workflow.', 'workflow_unavailable');
     const pinned={...structuredClone(workflow),steps:validateWorkflowSteps(workflow.steps,catalog(),{requirePins:true})};
-    const saved=store.beginExecution({id:receiptId,digest,definition:pinned});if(saved)return replay(saved);
+    const saved=store.beginExecution({id:receiptId,digest,definition:pinned,workflowRun:{workflowId,...(context.workflowOperationId?{operationId:context.workflowOperationId}:{})}});if(saved)return{...replay(saved),runId,...(typeof saved.definition?.name==='string'&&saved.definition.name.length<=200?{originalName:saved.definition.name}:{})};
     const results = [];
     for (const [index, step] of pinned.steps.entries()) {
       try {
         if(context.signal?.aborted)throw Object.assign(new Error('Workflow stopped.'),{name:'AbortError'});
+        store.checkpointExecution({id:receiptId,digest,checkpoint:{steps:results,activeStep:{index,tool:step.tool}}});
         results.push({tool:step.tool,result:await execute(step.tool,step.arguments,{...context,requestId:receiptId,callId:`step:${index}`})});
-        store.checkpointExecution({id:receiptId,digest,checkpoint:{steps:results}});
-      }catch(error){const result={id:workflowId,status:error.name==='AbortError'?'cancelled':'failed',steps:results,error:error.message,code:error.code|| (error.name==='AbortError'?'workflow_cancelled':'workflow_failed'),failedStep:{index,tool:step.tool,...(error.hostActions?.length?{hostActions:error.hostActions}:{})}};const finished=store.finishExecution({id:receiptId,digest,result,failed:true});return{...finished.result,workspace:store.snapshot()};}
+        store.checkpointExecution({id:receiptId,digest,checkpoint:{steps:results,activeStep:null}});
+      }catch(error){const result={id:workflowId,status:error.name==='AbortError'?'cancelled':'failed',steps:results,error:error.message,code:error.code|| (error.name==='AbortError'?'workflow_cancelled':'workflow_failed'),failedStep:{index,tool:step.tool,...(error.hostActions?.length?{hostActions:error.hostActions}:{})}};const finished=store.finishExecution({id:receiptId,digest,result,failed:true});return{...finished.result,runId,originalName:pinned.name,workspace:store.snapshot()};}
     }
-    const finished=store.finishExecution({id:receiptId,digest,result:{id:workflowId,status:'completed',steps:results}});return{...finished.result,workspace:store.snapshot()};
+    const finished=store.finishExecution({id:receiptId,digest,result:{id:workflowId,status:'completed',steps:results}});return{...finished.result,runId,originalName:pinned.name,workspace:store.snapshot()};
   }
   return { definitions, catalog, execute, runWorkflow, setContinuationService(service){if(!service||['requestBuild','continue','getByBuild'].some(name=>typeof service[name]!=='function'))throw new TypeError('Use the actual original-request service.');continuations=service;},setWorkService(service){if(!service||['create','list','get','cancel'].some(name=>typeof service[name]!=='function'))throw new TypeError('Use the actual work service.');work=service;} };
 }

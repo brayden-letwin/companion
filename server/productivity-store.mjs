@@ -10,6 +10,7 @@ import { installWorkStore } from './work-store.mjs';
 import { workflowDefinitionHash } from './workflow-queries.mjs';
 import { normalizeDeadline } from '../src/core/productivity-deadlines.mjs';
 import { validateWorkspaceRecoveryItem } from './workspace-backups.mjs';
+import {workflowRunId,workflowRunDigest,workflowRunRevision,workflowRunSummary,workflowRunNestedIdentity,formatWorkflowRun} from './workflow-runs.mjs';
 
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const fail = (code, message, statusCode = 400) => Object.assign(new Error(message), { code, statusCode });
@@ -46,6 +47,9 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
     CREATE INDEX IF NOT EXISTS conversation_turns_order ON conversation_turns(conversation_id,sequence);
     CREATE TABLE IF NOT EXISTS conversation_preferences(id INTEGER PRIMARY KEY CHECK(id=1),active_conversation_id TEXT);`);
   db.exec('CREATE TABLE IF NOT EXISTS execution_receipts(id TEXT PRIMARY KEY,hash TEXT NOT NULL,state TEXT NOT NULL,definition_json TEXT NOT NULL,checkpoint_json TEXT,result_json TEXT);');
+  // Additive index: old six-column execution writers remain compatible. Legacy
+  // rows have no invented start time and are discovered in bounded rowid scans.
+  db.exec('CREATE TABLE IF NOT EXISTS workflow_run_metadata(execution_id TEXT PRIMARY KEY,workflow_id TEXT NOT NULL,operation_id TEXT,started_at TEXT NOT NULL,updated_at TEXT NOT NULL,finished_at TEXT,run_revision TEXT NOT NULL); CREATE INDEX IF NOT EXISTS workflow_run_metadata_workflow ON workflow_run_metadata(workflow_id);');
   db.prepare('INSERT OR IGNORE INTO workspace VALUES(1,?)').run(JSON.stringify(initial()));
   const snapshot = () => { const state = JSON.parse(db.prepare('SELECT state FROM workspace WHERE id=1').get().state); if (!Object.hasOwn(state, 'preferences')) state.preferences = []; if (!Array.isArray(state.preferences)) throw fail('workspace_invalid', 'Saved preferences could not be loaded safely.', 503); return state; };
   let closed = false;
@@ -225,9 +229,59 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
   function executionIdentity(requestId,digest){if(typeof requestId!=='string'||!/^[A-Za-z0-9:_-]{1,200}$/.test(requestId)||typeof digest!=='string'||!/^[a-f\d]{64}$/.test(digest))throw fail('invalid_input','Use a bounded execution identity and SHA-256 digest.');}
   function executionReceipt(requestId,digest){checkOpen();executionIdentity(requestId,digest);const saved=db.prepare('SELECT * FROM execution_receipts WHERE id=?').get(requestId);if(!saved)return null;if(saved.hash!==digest)throw fail('request_conflict','That execution ID was used for different input.',409);return{state:saved.state,definition:JSON.parse(saved.definition_json),checkpoint:saved.checkpoint_json?JSON.parse(saved.checkpoint_json):null,result:saved.result_json?JSON.parse(saved.result_json):null};}
   function executionData(value){let result=dataCopy(value),encoded=JSON.stringify(result);if(Buffer.byteLength(encoded)>1024*1024){const trim=(item,depth=0,key='')=>{if(typeof item==='string')return item.length>600?item.slice(0,600)+'… [details truncated]':item;if(depth>14)return '[nested details omitted]';if(Array.isArray(item))return item.slice(0,['steps','hostActions'].includes(key)?12:8).map(part=>trim(part,depth+1));if(item&&typeof item==='object')return Object.fromEntries(Object.entries(item).map(([name,part])=>[name,trim(part,depth+1,name)]));return item;};result={...trim(result),detailsTruncated:true};encoded=JSON.stringify(result);}if(Buffer.byteLength(encoded)>1024*1024)throw fail('response_limit','This execution receipt exceeds its bound.');return encoded;}
-  function beginExecution({id:requestId,digest,definition}){return transaction(()=>{const saved=executionReceipt(requestId,digest);if(saved)return saved;if(db.prepare('SELECT count(*) AS count FROM execution_receipts').get().count>=20000)throw fail('workspace_limit','The workspace has reached its execution receipt limit.');db.prepare('INSERT INTO execution_receipts VALUES(?,?,?,?,NULL,NULL)').run(requestId,digest,'in_progress',executionData(definition));return null;});}
-  function checkpointExecution({id:requestId,digest,checkpoint}){return transaction(()=>{const saved=executionReceipt(requestId,digest);if(!saved||saved.state!=='in_progress')throw fail('execution_finished','This execution is no longer running.',409);db.prepare('UPDATE execution_receipts SET checkpoint_json=? WHERE id=? AND hash=?').run(executionData(checkpoint),requestId,digest);return executionReceipt(requestId,digest);});}
-  function finishExecution({id:requestId,digest,result,failed=false}){return transaction(()=>{const saved=executionReceipt(requestId,digest);if(!saved)throw fail('missing_request','This execution receipt was not found.',409);const encoded=executionData(result),state=failed?'failed':'completed';if(saved.state!=='in_progress'){if(saved.state!==state||hash(saved.result)!==hash(JSON.parse(encoded)))throw fail('request_conflict','This execution already has a different outcome.',409);return saved;}db.prepare('UPDATE execution_receipts SET state=?,result_json=? WHERE id=? AND hash=?').run(state,encoded,requestId,digest);return executionReceipt(requestId,digest);});}
+  function refreshWorkflowRun(requestId,{finished=false}={}){
+    const metadata=db.prepare('SELECT execution_id FROM workflow_run_metadata WHERE execution_id=?').get(requestId);if(!metadata)return;
+    const saved=db.prepare('SELECT * FROM execution_receipts WHERE id=?').get(requestId),at=iso(now());
+    db.prepare('UPDATE workflow_run_metadata SET updated_at=?,finished_at=CASE WHEN ? THEN ? ELSE finished_at END,run_revision=? WHERE execution_id=?').run(at,finished?1:0,at,workflowRunRevision(saved),requestId);
+  }
+  function beginExecution({id:requestId,digest,definition,workflowRun}){return transaction(()=>{
+    const saved=executionReceipt(requestId,digest);if(saved)return saved;
+    if(workflowRun!==undefined){
+      if(!workflowRun||typeof workflowRun!=='object'||Array.isArray(workflowRun)||Object.keys(workflowRun).some(key=>!['workflowId','operationId'].includes(key))||typeof workflowRun.workflowId!=='string'||!UUID.test(workflowRun.workflowId)||definition?.id!==workflowRun.workflowId||digest!==workflowRunDigest(workflowRun.workflowId)||!requestId.startsWith('workflow:')||!UUID.test(requestId.slice(9)))throw fail('invalid_workflow_run','Use the actual routine execution identity.');
+      if(workflowRun.operationId!==undefined&&(typeof workflowRun.operationId!=='string'||!UUID.test(workflowRun.operationId)||workflowRunId('local-workspace:'+workflowRun.operationId,'workflow')!==requestId.slice(9)))throw fail('invalid_workflow_run','The original operation does not match this routine run.');
+    }
+    if(db.prepare('SELECT count(*) AS count FROM execution_receipts').get().count>=20000)throw fail('workspace_limit','The workspace has reached its execution receipt limit.');
+    db.prepare('INSERT INTO execution_receipts VALUES(?,?,?,?,NULL,NULL)').run(requestId,digest,'in_progress',executionData(definition));
+    if(workflowRun){const at=iso(now()),row=db.prepare('SELECT * FROM execution_receipts WHERE id=?').get(requestId);db.prepare('INSERT INTO workflow_run_metadata VALUES(?,?,?,?,?,NULL,?)').run(requestId,workflowRun.workflowId,workflowRun.operationId??null,at,at,workflowRunRevision(row));}return null;
+  });}
+  function checkpointExecution({id:requestId,digest,checkpoint}){return transaction(()=>{const saved=executionReceipt(requestId,digest);if(!saved||saved.state!=='in_progress')throw fail('execution_finished','This execution is no longer running.',409);db.prepare('UPDATE execution_receipts SET checkpoint_json=? WHERE id=? AND hash=?').run(executionData(checkpoint),requestId,digest);refreshWorkflowRun(requestId);return executionReceipt(requestId,digest);});}
+  function finishExecution({id:requestId,digest,result,failed=false}){return transaction(()=>{const saved=executionReceipt(requestId,digest);if(!saved)throw fail('missing_request','This execution receipt was not found.',409);const encoded=executionData(result),state=failed?'failed':'completed';if(saved.state!=='in_progress'){if(saved.state!==state||hash(saved.result)!==hash(JSON.parse(encoded)))throw fail('request_conflict','This execution already has a different outcome.',409);return saved;}db.prepare('UPDATE execution_receipts SET state=?,result_json=? WHERE id=? AND hash=?').run(state,encoded,requestId,digest);refreshWorkflowRun(requestId,{finished:true});return executionReceipt(requestId,digest);});}
+
+  // Only an admitted candidate row is JSON-inspected. Filtering never asks
+  // SQLite or JavaScript to parse every historical 1 MiB receipt in one call.
+  const workflowRow=db.prepare(`SELECT e.*,e.rowid AS sequence,m.run_revision AS recorded_revision,m.started_at,m.updated_at,m.finished_at,
+    json_extract(e.definition_json,'$.id') AS workflow_id,json_extract(e.definition_json,'$.name') AS original_name,
+    json_array_length(e.definition_json,'$.steps') AS step_count,
+    json_extract(e.result_json,'$.id') AS result_workflow_id,json_extract(e.result_json,'$.status') AS result_status,
+    (SELECT count(*) FROM json_each(CASE WHEN e.state IN ('completed','failed') THEN e.result_json ELSE e.checkpoint_json END,'$.steps') AS s
+      WHERE coalesce(json_extract(s.value,'$.status'),'completed') NOT IN ('failed','pending') AND json_extract(s.value,'$.error') IS NULL AND json_extract(s.value,'$.result.error') IS NULL) AS completed_count
+    FROM execution_receipts e LEFT JOIN workflow_run_metadata m ON m.execution_id=e.id WHERE e.id=?`);
+  function readWorkflowRow(executionId){try{return workflowRow.get(executionId);}catch{throw fail('workflow_run_unavailable','This saved routine run could not be read safely. Retain its history for review.',503);}}
+  function workflowQuery(value,allowed){if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!allowed.includes(key)))throw fail('invalid_workflow_run_query','Use supported routine history query fields.');}
+  function listWorkflowRuns(options={}){
+    checkOpen();workflowQuery(options,['workflowId','before','limit']);if(options.workflowId!==undefined)id(options.workflowId,'workflow ID');
+    const limit=options.limit??20;if(!Number.isSafeInteger(limit)||limit<1||limit>20)throw fail('invalid_workflow_run_query','Use a routine history limit from 1 to 20.');
+    let before=Number.MAX_SAFE_INTEGER;if(options.before!==undefined){if(typeof options.before!=='string'||! /^[1-9]\d{0,15}$/.test(options.before)||!Number.isSafeInteger(Number(options.before)))throw fail('invalid_workflow_run_query','Use the returned routine history cursor.');before=Number(options.before);}
+    const candidates=db.prepare("SELECT rowid AS sequence,id FROM execution_receipts WHERE id LIKE 'workflow:%' AND rowid<? ORDER BY rowid DESC LIMIT 101").all(before),runs=[];let scanned=0,last=null;
+    for(const candidate of candidates.slice(0,100)){
+      let workflowId;try{workflowId=db.prepare("SELECT json_extract(definition_json,'$.id') AS workflow_id FROM execution_receipts WHERE id=?").get(candidate.id).workflow_id;}catch{throw fail('workflow_run_unavailable','A saved routine history record is malformed. Retain it for review.',503);}
+      scanned++;last=candidate.sequence;if(options.workflowId!==undefined&&workflowId!==options.workflowId)continue;
+      const row=readWorkflowRow(candidate.id);if(options.workflowId!==undefined&&row?.workflow_id!==options.workflowId)throw fail('workflow_run_changed','This saved routine history changed. Read a fresh first page.',409);
+      runs.push(workflowRunSummary(row));if(runs.length>=limit)break;
+    }
+    const hasMore=last!==null&&Boolean(db.prepare("SELECT 1 AS found FROM execution_receipts WHERE id LIKE 'workflow:%' AND rowid<? LIMIT 1").get(last));
+    const response={runs,returned:runs.length,limit,scanned,scanHasMore:hasMore,hasMore,nextCursor:hasMore?String(last):null};if(Buffer.byteLength(JSON.stringify(response))>48*1024)throw fail('workflow_run_page_limit','The routine history page exceeds its response bound.',503);return response;
+  }
+  function getWorkflowRun(options={}){
+    checkOpen();workflowQuery(options,['workflowId','runId','operationId','definitionOffset','definitionLimit','outcomeOffset','outcomeLimit','expectedRunRevision']);id(options.workflowId,'workflow ID');
+    if((options.runId===undefined)===(options.operationId===undefined))throw fail('invalid_workflow_run_query','Choose exactly one actual run or original operation ID.');
+    const runId=options.runId!==undefined?id(options.runId,'run ID').toLowerCase():workflowRunId('local-workspace:'+id(options.operationId,'operation ID'),'workflow'),key='workflow:'+runId;
+    const binding=db.prepare('SELECT hash FROM execution_receipts WHERE id=?').get(key);if(!binding)throw fail('workflow_run_not_found','That original routine run was not found.',404);
+    if(binding.hash!==workflowRunDigest(options.workflowId))throw fail('workflow_run_binding','That run belongs to a different original routine.',409);
+    const row=readWorkflowRow(key);if(!row||row.hash!==workflowRunDigest(options.workflowId)||row.workflow_id!==options.workflowId)throw fail('workflow_run_binding','That run could not be matched to this original routine.',409);
+    const nested=workflowRunNestedIdentity(row);if(nested)row.nested_execution={id:nested.id,record:db.prepare('SELECT * FROM execution_receipts WHERE id=?').get(nested.id)??null};
+    const {workflowId:_workflow,runId:_run,operationId:_operation,...paging}=options;return formatWorkflowRun(row,paging);
+  }
   function conversationRow(conversationId) { id(conversationId, 'conversation ID'); const row = db.prepare('SELECT * FROM conversations WHERE id=?').get(conversationId); if (!row) throw fail('conversation_not_found', 'That conversation was not found.', 404); return row; }
   function requestIdentity(value) { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(value)) throw fail('invalid_id', 'Choose a valid conversation request ID.'); return value; }
   function requestDigest(value) { if (typeof value !== 'string' || !/^[a-f\d]{64}$/.test(value)) throw fail('invalid_input', 'Use the conversation request SHA-256 digest.'); return value; }
@@ -387,7 +441,9 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
   // A fresh worker never resumes an old model/action turn. Preserve its last
   // durable tool checkpoint and close the paired receipt in one transaction.
   transaction(() => {
+    const interruptedRuns=db.prepare("SELECT m.execution_id FROM workflow_run_metadata m JOIN execution_receipts e ON e.id=m.execution_id WHERE e.state='in_progress'").all();
     db.exec("UPDATE execution_receipts SET state='interrupted' WHERE state='in_progress';");
+    for(const row of interruptedRuns)refreshWorkflowRun(row.execution_id,{finished:true});
     for (const saved of db.prepare("SELECT * FROM conversation_turns WHERE status='running'").all()) {
       const partial = saved.outcome_json ? JSON.parse(saved.outcome_json) : {}, context=windowContextReference(partial.windowContext), project=projectReference(partial.projectContext), outcome = boundedOutcome({ statusCode: 409, code: 'request_interrupted', message: 'Companion restarted during this request. Any recorded actions remain; inspect the workspace and build history before starting another request.', actions: partial.actions || [], featureJob: partial.featureJob || null, ...(context?{windowContext:context}:{}),...(project?{projectContext:project}:{}),...(continuationReference(partial.continuation)?{continuation:continuationReference(partial.continuation)}:{}), conversationId: saved.conversation_id, conversationRevision: conversationRow(saved.conversation_id).revision + 1 });
       const receipt = chatReceipt(saved.request_id, saved.digest); const at = iso(now());
@@ -430,5 +486,5 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
     });
   }
   const work=installWorkStore({db,now,conversationLimit:limits.conversations,checkOpen});
-  return { snapshot, apply, configureWorkflowTools, workspaceImportCatalog:()=>structuredClone(workflowCatalog), getWorkspaceImport, importWorkspaceContent, executionReceipt, beginExecution, checkpointExecution, finishExecution, chatReceipt, beginChat, finishChat, listConversations, createConversation, getConversation, beginConversationTurn, recordConversationActions, finishConversationTurn, ...work, close() { if (!closed) { closed = true; db.close(); } } };
+  return { snapshot, apply, configureWorkflowTools, workspaceImportCatalog:()=>structuredClone(workflowCatalog), getWorkspaceImport, importWorkspaceContent, executionReceipt, beginExecution, checkpointExecution, finishExecution, listWorkflowRuns, getWorkflowRun, chatReceipt, beginChat, finishChat, listConversations, createConversation, getConversation, beginConversationTurn, recordConversationActions, finishConversationTurn, ...work, close() { if (!closed) { closed = true; db.close(); } } };
 }
