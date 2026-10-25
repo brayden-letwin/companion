@@ -1,3 +1,4 @@
+import { createProjectFileSearchUI } from './project-file-search.mjs';
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const STORAGE_KEY = 'companion.project.files.pending.v1';
 const TERMINAL = new Set(['applied', 'failed', 'interrupted', 'recovery_required']);
@@ -23,6 +24,7 @@ export function createProjectFilesUI({ container, api, onSelect = () => {}, onRe
   const node = (tag, className, text) => { const result = doc.createElement(tag); if (className) result.className = className; if (text !== undefined) result.textContent = String(text); return result; };
   const cleanups = [], requests = new Set(), drafts = new Map(), pending = new Map(), pendingPayloads = new Map();
   let closed = false, generation = 0, chooser = 0, choosing = false, refreshing = false, revoking = false, mutationBusy = false;
+  let searchAllowed = false;
   let selection = null, projects = [], directory = '', directoryPage = null, entries = [], listing = false, file = null, reading = false;
   let fileGeneration = 0, directoryGeneration = 0, history = [], historyPage = null, historyBusy = false, inspection = null, inspecting = false, error = '';
   let storage = null;
@@ -44,7 +46,9 @@ export function createProjectFilesUI({ container, api, onSelect = () => {}, onRe
   const saveButton = node('button', 'primary-button', 'Save file'), reloadButton = node('button', 'quiet-button', 'Reload file'), moreText = node('button', 'quiet-button', 'Load more text'); saveButton.type = reloadButton.type = moreText.type = 'button'; editorActions.append(saveButton, reloadButton, moreText); editorPanel.append(editorTitle, editorStatus, editor, editorActions);
   const historyPanel = node('section', 'project-history'), historyHeading = node('div', 'project-folder-heading'), historyButton = node('button', 'quiet-button', 'Load recent edits'), historyList = node('div'), historyMore = node('button', 'quiet-button', 'Load more edits'); historyButton.type = historyMore.type = 'button'; historyHeading.append(node('h2', '', 'Recent edits'), historyButton); historyPanel.append(historyHeading, historyList, historyMore);
   const inspectionPanel = node('section', 'project-inspection'), inspectionTitle = node('h3'), inspectionNote = node('p', 'project-hint'), inspectionText = node('textarea'), inspectionMore = node('button', 'quiet-button', 'Load more saved text'); inspectionText.readOnly = true; inspectionText.rows = 9; inspectionText.setAttribute('aria-label', 'Saved edit text'); inspectionMore.type = 'button'; inspectionPanel.append(inspectionTitle, inspectionNote, inspectionText, inspectionMore); historyPanel.append(inspectionPanel);
-  root.append(heading, consent, chooserRow, projectList, selected, errors, pendingBox, browser, editorPanel, historyPanel); container.append(root);
+  const searchContainer = node('div');
+  root.append(heading, consent, chooserRow, projectList, selected, errors, pendingBox, searchContainer, browser, editorPanel, historyPanel); container.append(root);
+  const fileSearch = createProjectFileSearchUI({container:searchContainer,api,onOpen:async(hit,{signal})=>{if(!same(hit,selection)||grantUnavailable()||!searchAllowed)throw new Error('The original folder selection is unavailable. Choose it again before opening this result.');const result=await readFile(hit.path,{expectedHash:hit.hash,signal,fromSearch:true});if(!result?.opened)throw new Error('This file read was cancelled or its original folder changed.');return result;},notify});
 
   function listen(target, type, callback) { target.addEventListener(type, callback); cleanups.push(() => target.removeEventListener(type, callback)); }
   function button(text, callback, className = 'quiet-button') { const result = node('button', className, text); result.type = 'button'; result.addEventListener('click', callback); return result; }
@@ -57,9 +61,9 @@ export function createProjectFilesUI({ container, api, onSelect = () => {}, onRe
   }
   function forgetPending(id) { pending.delete(id); pendingPayloads.delete(id); persistPending(id); }
   async function request(path, options = {}, timeout = 15000) {
-    const controller = new AbortController(); requests.add(controller);
+    const controller = new AbortController(),abort=()=>controller.abort(); requests.add(controller);options.signal?.addEventListener('abort',abort,{once:true});if(options.signal?.aborted)controller.abort();
     try { return await api(path, { ...options, signal: controller.signal }, timeout); }
-    finally { requests.delete(controller); }
+    finally { requests.delete(controller);options.signal?.removeEventListener('abort',abort); }
   }
   function query(binding, fields = {}) { const params = new URLSearchParams({ grantEpoch: String(binding.grantEpoch) }); for (const [key, value] of Object.entries(fields)) if (value !== undefined && value !== null) params.set(key, String(value)); return params.toString(); }
   const projectRoute = binding => 'projects/' + encodeURIComponent(binding.projectId);
@@ -73,6 +77,7 @@ export function createProjectFilesUI({ container, api, onSelect = () => {}, onRe
 
   function render() {
     if (closed) return;
+    fileSearch.selectionChanged(selection&&searchAllowed&&!grantUnavailable()?selection:null);
     chooseButton.disabled = choosing; chooseButton.textContent = choosing ? 'Choosing folder…' : 'Choose project folder'; refreshButton.disabled = refreshing;
     errors.textContent = error; selected.hidden = !selection; browser.hidden = !selection; editorPanel.hidden = !selection || !file; historyPanel.hidden = !selection;
     projectList.replaceChildren();
@@ -89,7 +94,7 @@ export function createProjectFilesUI({ container, api, onSelect = () => {}, onRe
     for (const item of pending.values()) { const row = node('div', 'project-pending-row'); row.append(node('span', '', 'An edit has not been confirmed.'), button('Check save', () => { void checkSave(item); })); pendingBox.append(row); }
     breadcrumbs.replaceChildren(); if (selection) { breadcrumbs.append(button(selection.label, () => { void listDirectory(''); })); let prefix = ''; for (const part of directory.split('/').filter(Boolean)) { prefix += (prefix ? '/' : '') + part; const target = prefix; breadcrumbs.append(node('span', '', '/'), button(part, () => { void listDirectory(target); })); } }
     fileList.replaceChildren(); for (const entry of entries) { const row = node('div', 'project-file-row'), open = button(entry.name, () => { if (entry.kind === 'directory') void listDirectory(entry.path); else void readFile(entry.path); }); open.setAttribute('aria-label', (entry.kind === 'directory' ? 'Open folder: ' : 'Read file: ') + entry.path); row.append(open, node('small', '', entry.kind === 'directory' ? 'Folder' : entry.reason || (Number.isFinite(entry.byteLength) ? entry.byteLength + ' bytes' : 'Text file'))); fileList.append(row); }
-    browseStatus.textContent = listing ? 'Reading folder…' : directoryPage ? 'Showing ' + entries.length + ' entries.' + (directoryPage.scanLimitReached ? ' The folder scan limit was reached; this is not the complete folder.' : directoryPage.complete === false && !directoryPage.hasMore ? ' This folder list is incomplete.' : '') : 'Choose a file or browse this folder.';
+    browseStatus.textContent = listing ? 'Reading folder…' : directoryPage ? 'Showing ' + entries.length + ' entries.' + (directoryPage.scanLimitReached ? ' The folder scan limit was reached; this is not the complete folder.' : directoryPage.complete === false && !directoryPage.hasMore ? ' This folder list is incomplete.' : '') + (directoryPage.skippedProtected ? ' Protected names were excluded.' : '') : 'Choose a file or browse this folder.';
     moreFiles.hidden = !directoryPage?.hasMore; moreFiles.disabled = listing;
     if (file) {
       const canEdit = editable(); editorTitle.textContent = file.path; if (editor.value !== file.text) editor.value = file.text; editor.readOnly = !canEdit || reading;
@@ -110,6 +115,7 @@ export function createProjectFilesUI({ container, api, onSelect = () => {}, onRe
   function selectionChanged(value) {
     if (closed) return;
     if (value !== null && !validBinding(value)) throw new TypeError('A valid project binding is required.');
+    searchAllowed=!!value&&!['checking','unavailable'].includes(value.status)&&value.available!==false&&value.revoked!==true;
     if (value && same(value, selection)) { selection = bindingOf(value); render(); return; }
     rememberDraft(); generation++; fileGeneration++; directoryGeneration++; selection = value ? bindingOf(value) : null; directory = ''; entries = []; directoryPage = null; file = null; history = []; historyPage = null; inspection = null; error = ''; listing = reading = historyBusy = inspecting = false; render();
   }
@@ -144,17 +150,17 @@ export function createProjectFilesUI({ container, api, onSelect = () => {}, onRe
     catch (failure) { if (alive(binding, stamp) && ticket === directoryGeneration) error = failure.message; }
     finally { if (alive(binding, stamp) && ticket === directoryGeneration) listing = false; render(); }
   }
-  async function readFile(path, { more = false, discard = false } = {}) {
-    if (!selection || closed || more && reading) return;
+  async function readFile(path, { more = false, discard = false, expectedHash, signal, fromSearch = false } = {}) {
+    if (!selection || closed || signal?.aborted || more && reading) return;
     const binding = clone(selection), stamp = generation, ticket = ++fileGeneration, previous = file;
     const offset = more ? previous?.nextOffset : 0; if (more && (!previous?.hasMore || !Number.isSafeInteger(offset))) return;
     rememberDraft(); if (discard) drafts.delete(draftKey(binding, path)); reading = true; error = ''; render();
-    try { const value = await request(projectRoute(binding) + '/file?' + query(binding, { path, offset, limit: 12000, expectedHash: more ? previous.hash : undefined })); if (!alive(binding, stamp) || ticket !== fileGeneration) return; if (!same(value, binding) || value.path !== path || value.offset !== offset || typeof value.hash !== 'string' || typeof value.content !== 'string' || !Number.isSafeInteger(value.characterLength) || value.characterLength < 0 || !['none', 'lf', 'crlf', 'cr', 'mixed'].includes(value.lineEndings) || typeof value.bom !== 'boolean') throw new Error('The file page could not be matched. Reload the file.'); if (more && (value.hash !== previous.hash || value.characterLength !== previous.characterLength)) throw new Error('The file changed while reading. Reload the file.');
+    try { const value = await request(projectRoute(binding) + '/file?' + query(binding, { path, offset, limit: 12000, expectedHash: more ? previous.hash : expectedHash }),{signal}); if (!alive(binding, stamp) || ticket !== fileGeneration || signal?.aborted) return; if (!same(value, binding) || value.path !== path || value.offset !== offset || typeof value.hash !== 'string' || typeof value.content !== 'string' || !Number.isSafeInteger(value.characterLength) || value.characterLength < 0 || !['none', 'lf', 'crlf', 'cr', 'mixed'].includes(value.lineEndings) || typeof value.bom !== 'boolean') throw new Error('The file page could not be matched. Reload the file.'); if(!more&&expectedHash&&value.hash!==expectedHash)throw Object.assign(new Error('The file changed since this search result was read.'),{status:409}); if (more && (value.hash !== previous.hash || value.characterLength !== previous.characterLength)) throw new Error('The file changed while reading. Reload the file.');
       const draft = !more && !discard ? drafts.get(draftKey(binding, path)) : null;
       if (draft?.dirty) { file = draft; file.stale = file.hash !== value.hash; }
       else { const raw = (more ? previous.raw : '') + value.content; file = { path, hash: value.hash, raw, characterLength: value.characterLength, text: normalText(raw), hasMore: value.hasMore === true, nextOffset: value.nextOffset, lineEndings: more ? previous.lineEndings : value.lineEndings, bom: more ? previous.bom : value.bom === true, readAt: value.readAt, dirty: false, stale: false, blocked: false }; }
-      rememberDraft();
-    } catch (failure) { if (alive(binding, stamp) && ticket === fileGeneration) error = failure.message; }
+      rememberDraft();return{opened:true,draft:!!file.dirty};
+    } catch (failure) { if (alive(binding, stamp) && ticket === fileGeneration&&!signal?.aborted) error = failure.message;if(fromSearch)throw failure; }
     finally { if (alive(binding, stamp) && ticket === fileGeneration) reading = false; render(); }
   }
   function newFile() { if (!selection || closed) return; const path = newPath.value; if (!path.trim()) return; if (path.length > 240) { error = 'Use a relative file path of at most 240 characters.'; render(); return; } rememberDraft(); fileGeneration++; const existing = drafts.get(draftKey(selection, path)); file = existing?.isNew ? existing : { path, hash: null, raw: '', characterLength: 0, text: '', hasMore: false, lineEndings: 'lf', bom: false, dirty: true, stale: false, blocked: false }; file.isNew = true; rememberDraft(); newPath.value = ''; render(); editor.focus(); }
@@ -196,14 +202,14 @@ export function createProjectFilesUI({ container, api, onSelect = () => {}, onRe
     finally { if (alive(binding, stamp)) inspecting = false; render(); }
   }
   async function revoke() {
-    if (!selection || closed || revoking) return; const binding = clone(selection); revoking = true; error = ''; render();
+    if (!selection || closed || revoking) return; const binding = clone(selection); searchAllowed=false; revoking = true; error = ''; render();
     try { const value = await request(projectRoute(binding) + '/revoke', { method: 'POST', body: JSON.stringify({ grantEpoch: binding.grantEpoch }) }); if (closed) return; if (value.revoked !== true || value.project?.projectId !== binding.projectId) throw new Error('Folder access removal was not confirmed.'); upsertProject(value.project); await onRevoke({ projectId: binding.projectId, grantEpoch: binding.grantEpoch }); if (same(selection, binding)) selectionChanged(null); notify('Folder access removed. Saved receipts remain.'); }
     catch (failure) { if (!closed) error = failure.message; }
     finally { revoking = false; render(); }
   }
 
   listen(chooseButton, 'click', () => { void choose(); }); listen(refreshButton, 'click', () => { void refresh(); });
-  listen(leaveButton, 'click', () => { const stamp = generation; Promise.resolve().then(() => onSelect(null)).then(accepted => { if (!closed && accepted !== false && stamp === generation) selectionChanged(null); }).catch(failure => { error = failure.message; render(); }); });
+  listen(leaveButton, 'click', () => { searchAllowed=false;fileSearch.selectionChanged(null);const stamp = generation; Promise.resolve().then(() => onSelect(null)).then(accepted => { if (!closed && accepted !== false && stamp === generation) selectionChanged(null); }).catch(failure => { error = failure.message; render(); }); });
   listen(revokeButton, 'click', () => { void revoke(); }); listen(moreFiles, 'click', () => { void listDirectory(directory, true); });
   listen(newForm, 'submit', event => { event.preventDefault(); newFile(); });
   listen(editor, 'input', () => { if (!file || !editable()) return; file.text = editor.value; file.dirty = file.isNew || serialize(file.text, file) !== file.raw; rememberDraft(); render(); });
@@ -212,5 +218,5 @@ export function createProjectFilesUI({ container, api, onSelect = () => {}, onRe
   listen(historyButton, 'click', () => { void loadHistory(); }); listen(historyMore, 'click', () => { void loadHistory(true); });
   listen(inspectionMore, 'click', () => { if (inspection) void inspectEdit(inspection.edit, inspection.part, true); });
   render();
-  return Object.freeze({ refresh, selectionChanged, close() { if (closed) return; closed = true; generation++; chooser++; fileGeneration++; for (const controller of requests) controller.abort(); for (const cleanup of cleanups) cleanup(); root.remove(); } });
+  return Object.freeze({ refresh, selectionChanged, close() { if (closed) return; fileSearch.close();closed = true; generation++; chooser++; fileGeneration++; for (const controller of requests) controller.abort(); for (const cleanup of cleanups) cleanup(); root.remove(); } });
 }
