@@ -10,7 +10,7 @@ A quiet, voice-first workspace for getting things done—and adding the tools yo
 
 No group account is needed. The existing development PC has a working Codex sign-in. On another PC, install **Node.js 24.15 or newer**, then use an existing Codex CLI sign-in or connect a provider in Settings. API keys belong in the app's password field, never in a chat or a Git commit.
 
-The full workspace is at **http://127.0.0.1:4174/assistant.html**. It runs on this computer; it is not a hosted service. Closing a page or hiding the corner leaves the local server running. Double-click the same launcher next time. The main local service was upgraded to 0.10 after a consistent private SQLite backup. [QA.md](QA.md) records live checks separately from automated tests and remaining hardware checks.
+The full workspace is at **http://127.0.0.1:4174/assistant.html**. It runs on this computer; it is not a hosted service. Closing a page or hiding the corner leaves the local server running. Double-click the same launcher next time. [QA.md](QA.md) records live checks separately from automated tests and remaining hardware checks.
 
 Try a concrete request:
 
@@ -40,7 +40,7 @@ Each workflow run retains its original definition and real partial results. An e
 | **Tasks** | Search the full list, filter projects, sort by priority or due date, read complete instructions, and load more results. Create, edit, complete, and reopen persistent tasks. |
 | **Notes** | Save, search, edit, and archive persistent notes. Keeping an AI reply is an explicit action. |
 | **Workflows** | Save a sequence of supported local actions and run it with actual step results. |
-| **Computer** | Search/open installed apps, list/focus windows, explicitly read a selected window, and review prepared input. |
+| **Computer** | Search/open installed apps, choose a window as question context, read a snapshot, and review prepared input. |
 | **Build a feature** | Request real source changes, follow their progress, inspect diffs and checks, activate, and roll back. |
 | **Settings** | Select or configure AI connections and optional offline read-aloud. |
 
@@ -61,6 +61,10 @@ Settings offers **Restart desktop app** for the current native app. When it is r
 ## Computer actions
 
 Ask for an action, or use **Computer** to find an installed app or explicitly list and read a window. A read returns bounded accessibility text and controls from that chosen window; it does not continuously watch the screen. Launch receipts distinguish an accepted launch from an observed app window. Unsupported or unavailable controls return a failure rather than a claim of success.
+
+To ask about another app, open **Computer → List open windows → Use as context** beside that window. Selecting it checks its identity and privacy without reading document text. A small source label appears above the voice controls. Each question then reads fresh text from that same window and sends it to your chosen AI. Actual source text and its read time are retained with the local conversation. **Clear** removes the selection and cancels its current recording or question; it does not erase earlier saved replies. Selection is kept only in this window's memory and expires after eight hours or a server restart.
+
+The returned answer identifies the actual source title, read time, and any truncation. An empty, closed, replaced, or protected window stops that question before the AI; Companion does not quietly answer without the selected source. Accessibility text can omit graphics, equations, or parts of a document. The source selection follows that window's observed identity, including ordinary title changes; it does not follow the mouse or foreground app. A one-shot Windows observation cannot universally detect a handle destroyed and reused within the same process with identical observable identity. Window text is untrusted evidence and cannot grant approval or new permissions.
 
 Clicks, text replacement, and supported keys are first prepared as a target-bound action. **Review the actual window/control and exact input**, then use its action button or, while that same preview is open, say or type exactly **“approve desktop action”** or **“cancel desktop action.”** The review has its own microphone control. Approval is tied to the visible, unexpired preview captured before recording; a closed, changed, or different preview cannot receive that old command. Assistant replies and read-aloud text do not trigger approval.
 
@@ -129,7 +133,7 @@ npm test
 npm run check
 ```
 
-The 0.10 update passed 342 Node tests and 40 JavaScript syntax checks. Real GPT retrieved complete older-task instructions and accurate counts in a 147-task synthetic workspace. A real MCP client read every task and ran the new reads in a workflow. Browser checks verified search, project distinctions, sorting, progressive display, full details, and completion/reopening. See QA.md for the exact scope; the pure query tests additionally cover 2,000-record bounds.
+The 0.11 update passed 380 Node tests and 41 JavaScript syntax checks. Real Windows and GPT checks used a synthetic selected window: the next question picked up changed text and title through the same pin, and Clear stopped source reads. Browser checks verified accessible selection controls and saved provenance. Earlier complete-task and MCP checks remain recorded in [QA.md](QA.md), alongside exact coverage and hardware checks still outstanding.
 
 The 0.9.1 checkpoint passed 320 Node tests and 39 JavaScript syntax checks. Real GPT inspected a retained failed build, read its complete original request through paged inspection, and generated a Project board candidate that passed its nine builder checks plus four independent fixture checks. It remains awaiting protected-code activation in the isolated test app. Source planning now fits complete reference files within measured fixed context limits, with one bounded re-selection. Build headings stay concise while the full request remains expandable. See QA.md for live outcomes and remaining generated-feature checks.
 
