@@ -9,6 +9,7 @@ import { createSharedServer } from '../server/shared-server.mjs';
 import { createProductivityStore } from '../server/productivity-store.mjs';
 import { createProductivityTools } from '../server/productivity-tools.mjs';
 import { loadCapabilities } from '../server/capability-registry.mjs';
+import { formatSourceFile } from '../server/source-read.mjs';
 
 const stopped = () => Object.assign(new Error('Synthetic request stopped.'), { name: 'AbortError' });
 const unavailable = () => Object.assign(new Error('Synthetic provider unavailable.'), { code: 'provider_unavailable', statusCode: 503 });
@@ -37,6 +38,7 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
     async list(owner) { builderCalls.push({ type: 'list', owner }); return jobs; },
     async get(id, owner) { builderCalls.push({ type: 'get', id, owner }); return jobs.find(job => job.id === id); },
     async source(owner, options) { builderCalls.push({ type: 'source', owner, options }); return { revision: 'synthetic-source-hash', files: [{ path: 'src/example.mjs', hash: 'synthetic-file-hash', ...(options.includeContent ? { content: 'export const example = true;' } : {}) }] }; },
+    async sourceFile(owner,options){builderCalls.push({type:'sourceFile',owner,options});const content=options.path==='docs/notes & examples + 研究 # 100%.md'?'A😀B\r\nExact source text.':options.path==='src/example.mjs'?'export const example = true;\n':null;if(content===null)throw Object.assign(new Error('Source not found.'),{statusCode:404,code:'source_not_found'});return formatSourceFile({path:options.path,content,hash:createHash('sha256').update(content).digest('hex'),bytes:Buffer.byteLength(content)},options);},
     async submitPatch(input, owner) { builderCalls.push({ type: 'patch', input, owner }); return this.request({ prompt: 'External patch' }, owner); },
     async apply(id, owner) { builderCalls.push({ type: 'apply', id, owner }); return { id, status: 'applied' }; },
     async rollback(id, owner) { builderCalls.push({ type: 'rollback', id, owner }); return { id, status: 'rolled_back' }; },
@@ -71,6 +73,14 @@ async function capabilityFixture(t, {workspace=false,code}={}) {
 }
 
 async function waitForWork(f,user,id,status){const until=Date.now()+4000;for(;;){const result=await f.request('GET','/api/assistant/work/'+id,undefined,user);assert.equal(result.status,200,JSON.stringify(result.value.error));if(result.value.job.status===status)return result.value.job;assert.ok(Date.now()<until,'Work remained '+result.value.job.status+' instead of '+status);await new Promise(resolve=>setTimeout(resolve,25));}}
+
+test('targeted source HTTP reads preserve encoded exact paths, hashes and Unicode pages without model or workspace effects',async t=>{
+  const f=await fixture(t),route='/api/assistant/features/source/file',path='docs/notes & examples + 研究 # 100%.md';assert.equal((await f.request('GET',route+'?path='+encodeURIComponent(path))).status,401);assert.equal(f.runtimeCount(),0);const user=await f.session(),before=f.store.snapshot();
+  let query=new URLSearchParams({path,limit:'2'}),page=await f.request('GET',route+'?'+query,undefined,user);assert.equal(page.status,200);assert.equal(page.value.path,path);assert.equal(page.value.content,'A');assert.equal(page.value.nextOffset,1);assert.equal(page.value.sourceTrust,'untrusted_source');const hash=page.value.hash;let text=page.value.content;
+  while(page.value.hasMore){query=new URLSearchParams({path,offset:String(page.value.nextOffset),limit:'2',expectedHash:hash});page=await f.request('GET',route+'?'+query,undefined,user);assert.equal(page.status,200);assert.equal(page.value.hash,hash);text+=page.value.content;assert.ok(Buffer.byteLength(JSON.stringify(page.value))<=48*1024);}assert.equal(text,'A😀B\r\nExact source text.');assert.ok(f.builderCalls.filter(call=>call.type==='sourceFile').every(call=>call.owner==='local-workspace'&&call.options.path===path));
+  const calls=f.builderCalls.length;for(const suffix of ['?path=x&path=y','?path=x&offset=1','?path=x&offset=-1','?path=x&limit=12001','?path=x&owner=foreign','?path=x&expectedHash=bad','?limit=5'])assert.equal((await f.request('GET',route+suffix,undefined,user)).status,400);assert.equal(f.builderCalls.length,calls);
+  const stale=await f.request('GET',route+'?'+new URLSearchParams({path,offset:'1',expectedHash:'0'.repeat(64)}),undefined,user);assert.equal(stale.status,409);assert.equal(stale.value.error.code,'source_conflict');assert.ok(!Object.hasOwn(stale.value,'content'));assert.equal((await f.request('GET',route+'?'+new URLSearchParams({path,offset:'2',expectedHash:hash}),undefined,user)).status,400);assert.equal((await f.request('GET',route+'?path=src%2Fmissing.mjs',undefined,user)).status,404);assert.deepEqual(f.store.snapshot(),before);assert.equal(f.calls.length,0);
+});
 
 test('global Stop prevents late work acceptance while readiness is pending for direct and delegated handoffs',async t=>{
   for(const delegated of [false,true]){

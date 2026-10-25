@@ -42,13 +42,24 @@ test('MCP work handoff and paged inspection retain stable identities without rer
   const count=sent.length;for(const[name,args]of[['companion_start_work',{...body,contextId:randomUUID()}],['companion_get_work',{id:id+'?forged=1'}],['companion_get_work',{id,textLimit:4001}],['companion_list_work',{limit:21}],['companion_cancel_work',{id,scope:'forged'}]])assert.equal((await f.request('tools/call',tool(name,args))).error.code,-32602);assert.equal(sent.length,count);
 });
 
+test('targeted source MCP reads encode exact paths and preserve source without granting arbitrary file access',async t=>{
+  const path='docs/notes & examples + 研究 # 100%.md',hash='a'.repeat(64),content='const apiKey = "synthetic-example";\r\nconst text = "😀";\n',sent=[];
+  const f=await fixture(t,async(url,request)=>{sent.push({url,method:request.method});return response({path,hash,content,offset:0,nextOffset:null,hasMore:false,characterLength:content.length,byteLength:Buffer.byteLength(content),sourceTrust:'untrusted_source'});});await f.initialize();
+  const read=await f.request('tools/call',tool('companion_read_source',{path,expectedHash:hash,limit:12000}));assert.equal(read.result.isError,false);assert.equal(read.result.structuredContent.content,content);const url=new URL(sent[0].url);assert.equal(url.pathname,'/api/assistant/features/source/file');assert.equal(url.searchParams.get('path'),path);assert.equal(url.searchParams.get('expectedHash'),hash);assert.equal(sent[0].method,'GET');
+  const count=sent.length;for(const args of [{path:'../private.txt'},{path:'.env'},{path:'server/.env'},{path:'data/productivity.sqlite'},{path:'src\\app.mjs'},{path,offset:1},{path,owner:'foreign'},{path,expectedHash:'z'.repeat(64)},{path,limit:12001}])assert.equal((await f.request('tools/call',tool('companion_read_source',args))).error.code,-32602);assert.equal(sent.length,count);
+});
+
+test('an exact source page cannot silently change its content under credential redaction',async t=>{
+  const f=await fixture(t,async()=>response({path:'src/fixture.mjs',hash:'a'.repeat(64),content:'const leakedSession = "'+TOKEN+'";\n',offset:0,nextOffset:null,hasMore:false,sourceTrust:'untrusted_source'}));await f.initialize();const result=await f.request('tools/call',tool('companion_read_source',{path:'src/fixture.mjs'}));assert.equal(result.result.isError,true);assert.equal(result.result.structuredContent.error.code,'source_redacted');assert.ok(!Object.hasOwn(result.result.structuredContent,'content'));assert.ok(!JSON.stringify(result).includes(TOKEN));
+});
+
 test('MCP lifecycle negotiates tools, requires initialized, and keeps stdout protocol only', async t => {
   const f = await fixture(t); assert.equal((await f.request('ping')).result.constructor, Object);
   assert.equal((await f.request('tools/list')).error.code, -32002);
   const initialized = await f.request('initialize', { ...init, protocolVersion: '2024-11-05' }); assert.equal(initialized.result.protocolVersion, '2025-11-25'); assert.deepEqual(initialized.result.capabilities, { tools: { listChanged: false } });
   assert.equal(initialized.result.serverInfo.version, APP_VERSION);
   assert.equal((await f.request('tools/list')).error.code, -32002); f.notify('notifications/initialized');
-  const listed = await f.request('tools/list'); assert.equal(listed.result.tools.length, 22); assert.equal(listed.result.tools.find(item => item.name === 'companion_workspace').annotations.readOnlyHint, true); assert.equal(listed.result.tools.find(item => item.name === 'companion_apply_build').annotations.destructiveHint, true);
+  const listed = await f.request('tools/list'); assert.equal(listed.result.tools.length, 23); assert.equal(listed.result.tools.find(item => item.name === 'companion_workspace').annotations.readOnlyHint, true); assert.equal(listed.result.tools.find(item => item.name === 'companion_read_source').annotations.readOnlyHint,true);assert.equal(listed.result.tools.find(item => item.name === 'companion_apply_build').annotations.destructiveHint, true);
   assert.equal(listed.result.tools.find(item => item.name === 'companion_run_tool').annotations.openWorldHint, true);
   assert.equal(listed.result.tools.some(item => /approve.*desktop|desktop.*approve/.test(item.name)), false);
   assert.equal(f.calls.length, 0); assert.equal(f.errorText(), ''); for (const line of f.outputText().trim().split('\n')) assert.equal(JSON.parse(line).jsonrpc, '2.0');
