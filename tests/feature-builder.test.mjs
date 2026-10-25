@@ -239,6 +239,11 @@ test('large repositories use planning and bounded lossless source messages with 
   const job = await finished(f.builder, (await f.builder.request({ prompt: 'Add focus', providerId: 'synthetic', autoApply: false }, OWNER)).id);
   assert.equal(job.status, 'ready', job.error);
   assert.equal(calls.length, 2); assert.ok(calls[0].schema.required.includes('paths'));
+  const planning=JSON.parse(calls[0].messages[0].content),inventoryPaths=planning.inventory.map(file=>file.path);
+  assert.deepEqual(calls[0].schema.properties.paths.items.enum,inventoryPaths);
+  assert.ok(planning.requiredContext.every(file=>inventoryPaths.includes(file)));
+  assert.ok(planning.requiredContext.includes('server/capabilities/manifest.json'));
+  assert.match(calls[0].system,/phase selects files to READ/);
   const generation = calls[1]; assert.ok(generation.schema.required.includes('tests'));
   const supplied=generation.messages.slice(1).map(message=>JSON.parse(message.content));assert.ok(supplied.some(file=>file.source_file==='server/capabilities/manifest.json'&&file.content==='{"version":1,"capabilities":[]}'));assert.ok(supplied.some(file=>file.source_file==='docs/CAPABILITIES.md'&&file.content.includes('CAPABILITY_CONTRACT_MUST_BE_SUPPLIED')));
   assert.ok(generation.messages.every(message => Buffer.byteLength(message.content) <= 90000));
@@ -247,6 +252,107 @@ test('large repositories use planning and bounded lossless source messages with 
   assert.ok(generation.messages[0].content.includes('src/large.mjs'));
   const summaries = await f.builder.list(OWNER); assert.equal(summaries[0].fileCount, 3); assert.equal(summaries[0].files, undefined);
   assert.ok((await f.builder.get(job.id, OWNER)).files.some(file => file.diff.includes('mount')));
+});
+
+test('source selection only requires existing context and leaves missing manifests for generation',async t=>{
+  const calls=[];
+  const f=await fixture(t,{complete:async input=>{calls.push(input);return{text:JSON.stringify(input.schema.properties.paths?{paths:['src/runtime.mjs'],reason:'Read the existing runtime; create the new panel files next.'}:feature)};}});
+  await writeFile(path.join(f.root,'src/large.mjs'),'// source that requires planning\n'.repeat(6000));
+  const job=await finished(f.builder,(await f.builder.request({prompt:'Add the first new panel; its manifest does not exist yet.',providerId:'synthetic',autoApply:false},OWNER)).id);
+  assert.equal(job.status,'ready',job.error);assert.equal(calls.length,2);
+  const planning=JSON.parse(calls[0].messages[0].content);
+  assert.deepEqual(planning.requiredContext,['package.json']);
+  for(const missing of ['server/capabilities/manifest.json','src/features/manifest.json','docs/CAPABILITIES.md']){assert.equal(planning.requiredContext.includes(missing),false);assert.equal(calls[0].schema.properties.paths.items.enum.includes(missing),false);}
+  const generation=JSON.parse(calls[1].messages[0].content);assert.equal(generation.selectedPaths.includes('src/features/manifest.json'),false);
+  assert.ok(job.files.some(file=>file.path==='src/features/manifest.json'&&file.beforeHash===null));
+});
+
+test('source selection still rejects unknown planned files before generation',async t=>{
+  let calls=0;
+  const f=await fixture(t,{complete:async()=>{calls++;return{text:JSON.stringify({paths:['server/capabilities/manifest.json'],reason:'An absent file is not a valid existing source selection.'})};}});
+  await writeFile(path.join(f.root,'src/large.mjs'),'// source that requires planning\n'.repeat(6000));
+  const job=await finished(f.builder,(await f.builder.request({prompt:'Add a capability',providerId:'synthetic',autoApply:false},OWNER)).id);
+  assert.equal(job.status,'failed');assert.match(job.error,/source selection contains unknown paths/);assert.equal(calls,1);
+  await absent(path.join(f.root,'server/capabilities/manifest.json'));
+  assert.equal(await readFile(path.join(f.root,'src/runtime.mjs'),'utf8'),'export const answer = 42;\n');
+});
+
+test('source selection does not authorize replacing an existing file the model was not supplied',async t=>{
+  let calls=0;
+  const f=await fixture(t,{complete:async input=>{calls++;return{text:JSON.stringify(input.schema.properties.paths?{paths:[],reason:'Only the existing required context is selected.'}:{summary:'Attempted unread rewrite',files:[{path:'src/runtime.mjs',content:'export const answer=41;'}],tests:[]})};}});
+  await writeFile(path.join(f.root,'src/large.mjs'),'// source that requires planning\n'.repeat(6000));
+  const job=await finished(f.builder,(await f.builder.request({prompt:'A scoped change',providerId:'synthetic',autoApply:false},OWNER)).id);
+  assert.equal(job.status,'failed');assert.match(job.error,/replace an existing file it had not read/);assert.equal(calls,2);
+  assert.equal(await readFile(path.join(f.root,'src/runtime.mjs'),'utf8'),'export const answer = 42;\n');
+});
+
+async function budgetReferences(root) {
+  const paths=['src/bridge-reference.mjs','src/ui-reference.mjs','src/test-reference.mjs'];
+  for(const file of paths)await writeFile(path.join(root,file),'// complete reference source line\n'.repeat(6500));
+  return paths;
+}
+
+test('an oversized valid selection gets one measured re-selection and supplies complete focused source',async t=>{
+  const calls=[];let references;
+  const f=await fixture(t,{complete:async input=>{
+    calls.push(input);
+    if(input.schema.properties.paths){const payload=JSON.parse(input.messages[0].content);return{text:JSON.stringify(payload.selectionFeedback?{paths:['src/runtime.mjs'],reason:'Use supplied contracts and isolated new panel modules; preserve all requested behavior.'}:{paths:references,reason:'Initial broad existing-source reference selection.'})};}
+    return{text:JSON.stringify(feature)};
+  }});
+  references=await budgetReferences(f.root);
+  const prompt='Add the complete focus feature, preserve current behavior, and keep its requested controls.';
+  const job=await finished(f.builder,(await f.builder.request({prompt,providerId:'synthetic',autoApply:false},OWNER)).id);
+  assert.equal(job.status,'ready',job.error);assert.equal(calls.length,3);
+  const first=JSON.parse(calls[0].messages[0].content),second=JSON.parse(calls[1].messages[0].content),generation=calls[2];
+  assert.deepEqual(first.budgets,{maxMessages:100,maxMessageBytes:90000,maxContentBytes:420000,maxSerializedBytes:470000});
+  assert.ok(first.requiredContextUsage.contentBytes<first.budgets.maxContentBytes);
+  for(const file of references){const entry=first.inventory.find(item=>item.path===file);assert.ok(entry.contextBytes>entry.bytes);assert.ok(entry.serializedBytes>entry.contextBytes);assert.ok(entry.parts>1);}
+  assert.deepEqual(second.selectionFeedback.previousPaths,references);assert.ok(second.selectionFeedback.overruns.some(item=>item.kind==='contentBytes'&&item.actual-item.limit===item.overBy&&item.overBy>0));
+  assert.deepEqual(second.inventory,first.inventory);assert.deepEqual(second.requiredContext,first.requiredContext);assert.equal(second.request,prompt);
+  assert.equal(job.contextPlans.length,2);assert.ok(job.contextPlans[0].overruns.length);assert.deepEqual(job.contextPlans[1].overruns,[]);
+  assert.equal(job.contextPlans[1].usage.contentBytes,generation.messages.reduce((sum,message)=>sum+Buffer.byteLength(message.content),0));
+  assert.equal(job.contextPlans[1].usage.serializedBytes,Buffer.byteLength(JSON.stringify(generation.messages)));
+  const supplied=generation.messages.slice(1).map(message=>JSON.parse(message.content));
+  assert.equal(supplied.filter(file=>file.source_file==='src/runtime.mjs').map(file=>file.content).join(''),await readFile(path.join(f.root,'src/runtime.mjs'),'utf8'));
+  assert.ok(!supplied.some(file=>references.includes(file.source_file)));
+  assert.ok(job.events.some(item=>/Re-selecting source once/u.test(item.message)));assert.ok(job.events.some(item=>/full files.*content bytes.*serialized bytes/u.test(item.message)));
+});
+
+test('a second oversized selection fails truthfully before generation instead of changing scope or budgets',async t=>{
+  let selections=0,generations=0,references;
+  const f=await fixture(t,{complete:async input=>{if(!input.schema.properties.paths){generations++;return{text:JSON.stringify(feature)};}selections++;return{text:JSON.stringify({paths:references,reason:'Still selecting the same large references.'})};}});
+  references=await budgetReferences(f.root);
+  const job=await finished(f.builder,(await f.builder.request({prompt:'Implement the full requested feature.',providerId:'synthetic',autoApply:false},OWNER)).id);
+  assert.equal(job.status,'failed');assert.match(job.error,/after one measured re-selection/u);assert.match(job.error,/generation did not run/u);assert.equal(selections,2);assert.equal(generations,0);
+  assert.equal(job.contextPlans.length,2);assert.ok(job.contextPlans.every(plan=>plan.overruns.length>0));
+  await absent(path.join(f.root,'src/features/manifest.json'));assert.equal(await readFile(path.join(f.root,'src/runtime.mjs'),'utf8'),'export const answer = 42;\n');
+});
+
+test('a small repository with too many source messages uses focused selection before the router limit',async t=>{
+  const calls=[];
+  const f=await fixture(t,{complete:async input=>{calls.push(input);return{text:JSON.stringify(input.schema.properties.paths?{paths:['src/runtime.mjs'],reason:'Read only relevant existing source; preserve the requested new feature.'}:feature)};}});
+  for(let index=0;index<105;index++)await writeFile(path.join(f.root,'src',`tiny-${index}.mjs`),'// tiny existing source\n');
+  const job=await finished(f.builder,(await f.builder.request({prompt:'Add the complete focus feature.',providerId:'synthetic',autoApply:false},OWNER)).id);
+  assert.equal(job.status,'ready',job.error);assert.equal(calls.length,2);assert.ok(calls[0].schema.properties.paths);
+  const planning=JSON.parse(calls[0].messages[0].content);assert.equal(planning.budgets.maxMessages,100);assert.ok(planning.inventory.length>100);
+  assert.ok(calls[1].messages.length<=100);assert.equal(job.contextPlans[0].usage.messages,calls[1].messages.length);
+});
+
+test('context re-selection still rejects an unknown path and never reaches generation',async t=>{
+  let calls=0,references;
+  const f=await fixture(t,{complete:async input=>{calls++;assert.ok(input.schema.properties.paths);return{text:JSON.stringify({paths:calls===1?references:['src/future-file.mjs'],reason:'An unknown path remains invalid on re-selection.'})};}});
+  references=await budgetReferences(f.root);
+  const job=await finished(f.builder,(await f.builder.request({prompt:'Add the complete feature.',providerId:'synthetic',autoApply:false},OWNER)).id);
+  assert.equal(job.status,'failed');assert.match(job.error,/unknown paths/u);assert.equal(calls,2);assert.equal(job.contextPlans.length,1);await absent(path.join(f.root,'src/future-file.mjs'));
+});
+
+test('cancelling a pending context re-selection prevents late generation and keeps its measured evidence',async t=>{
+  let calls=0,references,began,release;const pending=new Promise(resolve=>{began=resolve;});
+  const f=await fixture(t,{complete:async input=>{calls++;assert.ok(input.schema.properties.paths);if(calls===1)return{text:JSON.stringify({paths:references,reason:'Initial broad source selection.'})};began();return new Promise(resolve=>{release=resolve;});}});
+  references=await budgetReferences(f.root);
+  const queued=await f.builder.request({prompt:'Implement the feature without losing its scope.',providerId:'synthetic',autoApply:false},OWNER);await pending;
+  await f.builder.cancel(queued.id,OWNER);release({text:JSON.stringify({paths:['src/runtime.mjs'],reason:'A late response must not restart work.'})});
+  const job=await finished(f.builder,queued.id);assert.equal(job.status,'cancelled');assert.equal(calls,2);assert.equal(job.contextPlans.length,1);assert.ok(job.contextPlans[0].overruns.length);await absent(path.join(f.root,'src/features/manifest.json'));
 });
 
 test('closing stops queued and uncooperative generation before any later source activation', async t => {

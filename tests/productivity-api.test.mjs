@@ -51,7 +51,7 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
     await app.close(); store.close(); store = await createProductivityStore({ dataDirectory }); stores.push(store); if(capabilityRoot)capabilities=await loadCapabilities({root:capabilityRoot}); tools = createProductivityTools({ store, builder, desktop, capabilities, root:capabilityRoot });
     app = await createApp(); apps.push(app); address = await app.listen(); origin = new URL(address.url).origin; return store;
   }
-  return { app, store, router, tools, calls, builderCalls, origin, request, session, restart, runtimeCount: () => runtimeCount };
+  return { app, store, router, tools, calls, jobs, builderCalls, origin, request, session, restart, runtimeCount: () => runtimeCount };
 }
 
 async function capabilityFixture(t, {workspace=false,code}={}) {
@@ -332,6 +332,30 @@ test('an explicitly retried feature-build tool returns its first job instead of 
   const first = await f.request('POST', '/api/assistant/tools/run', body, user); assert.equal(first.status, 200); assert.ok(first.value.result.featureJob.id);
   const replay = await f.request('POST', '/api/assistant/tools/run', body, user); assert.equal(replay.status, 200); assert.equal(replay.value.result.featureJob.id, first.value.result.featureJob.id); assert.equal(f.builderCalls.filter(call => call.type === 'request').length, 1);
   const changed = await f.request('POST', '/api/assistant/tools/run', { ...body, arguments: { prompt: 'A different feature using the same operation ID.' } }, user); assert.equal(changed.status, 409);
+});
+
+test('chat can inspect a failed build before requesting a correction with the original acceptance criteria',async t=>{
+  let failedId;
+  const f=await fixture(t,{complete:async(input,round)=>{
+    if(round===1){assert.ok(input.tools.some(tool=>tool.name==='inspect_feature_build'));return{text:'',toolCalls:[{id:'inspect-failed-build',name:'inspect_feature_build',arguments:{jobId:failedId}}]};}
+    if(round===2){
+      const evidence=JSON.parse(input.messages.at(-1).content).featureBuild;
+      assert.equal(evidence.id,failedId);assert.equal(evidence.status,'failed');assert.equal(evidence.verification.passed,false);
+      assert.match(evidence.request,/empty input must show zero/);assert.match(evidence.verification.checks[0].diagnostics,/ReferenceError: missingTotal is not defined/);
+      assert.match(evidence.diagnosticsTrust,/untrusted/i);assert.equal(evidence.activation.runtimeVerified,false);
+      assert.ok(!JSON.stringify(evidence).includes('SYNTHETIC_FULL_DIFF'));assert.ok(!JSON.stringify(evidence).includes('privateBackup'));
+      assert.match(input.system,/status question alone does not request another build/);
+      return{text:'',toolCalls:[{id:'focused-correction',name:'build_feature',arguments:{prompt:'Fix the undefined missingTotal reference in the requested project summary. Preserve grouping and the original acceptance criterion: empty input must show zero. Keep all changes focused on that failure.'}}]};
+    }
+    return{text:'The failed check found an undefined value. A focused correction is queued; it has not been installed.',toolCalls:[]};
+  }});
+  const user=await f.session();const original=await f.request('POST','/api/assistant/features',{prompt:'Build a project summary; empty input must show zero.'},user);failedId=original.value.id;
+  Object.assign(f.jobs[0],{status:'failed',error:'The candidate failed verification.',privateBackup:'privateBackup',files:[{path:'src/features/summary.mjs',protected:false,diff:'SYNTHETIC_FULL_DIFF'}],verification:{passed:false,checks:[{name:'Feature-specific tests',passed:false,output:'ReferenceError: missingTotal is not defined'}]}});
+  const reply=await f.request('POST','/api/assistant/chat',{id:'fix-known-failure',message:'Inspect the failed build '+failedId+' and fix it while keeping what I originally asked for.'},user);
+  assert.equal(reply.status,200);assert.deepEqual(reply.value.actions.map(action=>action.tool),['inspect_feature_build','build_feature']);
+  assert.equal(reply.value.actions[0].result.featureBuild.status,'failed');assert.equal(reply.value.featureJob.status,'queued');
+  assert.match(f.builderCalls.filter(call=>call.type==='request').at(-1).input.prompt,/empty input must show zero/);
+  assert.equal(f.builderCalls.filter(call=>call.type==='apply').length,0);assert.equal(f.builderCalls.filter(call=>call.type==='get')[0].owner,'local-workspace');
 });
 
 test('desktop proposals stop the model turn before more actions and only the protected action route can approve', async t => {
