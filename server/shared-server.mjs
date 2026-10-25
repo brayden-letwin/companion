@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { PAPER, PASSAGES } from '../src/core/discussion.mjs';
 import { createSharedState, applySharedOperation } from '../src/core/shared-discussion.mjs';
+import { createAssistantApi } from './assistant-api.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const COOKIE_PREFIX = 'companion_shared_session_v1_';
@@ -18,7 +19,18 @@ const derive = promisify(scrypt);
 const PASSWORD_OPTIONS = Object.freeze({ N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
 const SHARED_PAPER = Object.freeze({ id: 'fixed-points-v1', title: PAPER, version: 'original-v1', passages: PASSAGES.map(p => ({ ...p, page: 1 })) });
 const ASSETS = new Map([
-  ['/', ['room.html', 'text/html; charset=utf-8']],
+  ['/', ['assistant.html', 'text/html; charset=utf-8']],
+  ['/assistant.html', ['assistant.html', 'text/html; charset=utf-8']],
+  ['/src/assistant.mjs', ['src/assistant.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/assistant.css', ['src/assistant.css', 'text/css; charset=utf-8']],
+  ['/src/core/assistant.mjs', ['src/core/assistant.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/core/discussion.mjs', ['src/core/discussion.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/core/math.mjs', ['src/core/math.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/core/tutor.mjs', ['src/core/tutor.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/core/pdf-reader.mjs', ['src/core/pdf-reader.mjs', 'text/javascript; charset=utf-8']],
+  ['/node_modules/pdfjs-dist/build/pdf.mjs', ['node_modules/pdfjs-dist/build/pdf.mjs', 'text/javascript; charset=utf-8']],
+  ['/node_modules/pdfjs-dist/build/pdf.worker.mjs', ['node_modules/pdfjs-dist/build/pdf.worker.mjs', 'text/javascript; charset=utf-8']],
+  ['/node_modules/pdfjs-dist/web/pdf_viewer.css', ['node_modules/pdfjs-dist/web/pdf_viewer.css', 'text/css; charset=utf-8']],
   ['/room.html', ['room.html', 'text/html; charset=utf-8']],
   ['/src/room.mjs', ['src/room.mjs', 'text/javascript; charset=utf-8']],
   ['/src/room.css', ['src/room.css', 'text/css; charset=utf-8']],
@@ -50,7 +62,7 @@ function canonical(value) {
 }
 
 /** One local group, authenticated members, and atomic versioned discussion state. */
-export async function createSharedServer({ dbPath, port = 4174, root = REPO_ROOT, now = Date.now, authLimit = 20 } = {}) {
+export async function createSharedServer({ dbPath, port = 4174, root = REPO_ROOT, now = Date.now, authLimit = 20, assistantProvider, assistantOptions = {} } = {}) {
   if (typeof dbPath !== 'string' || !dbPath) throw new Error('An explicit SQLite database path is required.');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid shared-room port.');
   const rootReal = await realpath(root);
@@ -66,6 +78,7 @@ export async function createSharedServer({ dbPath, port = 4174, root = REPO_ROOT
   let passwordJobs = 0;
   const authWindows = new Map();
   let closed = false;
+  const assistant = createAssistantApi({ ...assistantOptions, ...(assistantProvider ? { provider: assistantProvider } : {}), now, getPort: () => server.address()?.port || port });
 
   function transact(callback) {
     db.exec('BEGIN IMMEDIATE');
@@ -156,13 +169,19 @@ export async function createSharedServer({ dbPath, port = 4174, root = REPO_ROOT
     catch { throw failure(400, 'invalid_json', 'The request must contain a JSON object.'); }
   }
   async function assets(req, res, route) {
-    const asset = ASSETS.get(route);
+    let asset = ASSETS.get(route);
+    // PDF.js needs only these published binary resources, not its source tree,
+    // package metadata, maps, or arbitrary files in node_modules.
+    if (!asset && /^\/node_modules\/pdfjs-dist\/cmaps\/[A-Za-z0-9_-]+\.bcmap$/.test(route)) asset = [route.slice(1), 'application/octet-stream'];
+    if (!asset && /^\/node_modules\/pdfjs-dist\/standard_fonts\/[A-Za-z0-9_-]+\.(?:pfb|ttf)$/.test(route)) asset = [route.slice(1), 'application/octet-stream'];
+    if (!asset && /^\/node_modules\/pdfjs-dist\/wasm\/(?:jbig2|openjpeg|qcms_bg)\.wasm$/.test(route)) asset = [route.slice(1), 'application/wasm'];
+    if (!asset && /^\/node_modules\/pdfjs-dist\/wasm\/(?:jbig2|openjpeg)_nowasm_fallback\.js$/.test(route)) asset = [route.slice(1), 'text/javascript; charset=utf-8'];
     if (!asset) throw failure(404, 'not_found', 'That resource was not found.');
     const file = await realpath(path.join(rootReal, asset[0])).catch(() => { throw failure(404, 'not_found', 'That resource was not found.'); });
     if (!file.startsWith(rootReal + path.sep)) throw failure(403, 'invalid_path', 'That resource is outside the reading room.');
     const info = await stat(file);
     if (!info.isFile()) throw failure(404, 'not_found', 'That resource was not found.');
-    res.writeHead(200, { 'Content-Type': asset[1], 'Content-Length': info.size, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" });
+    res.writeHead(200, { 'Content-Type': asset[1], 'Content-Length': info.size, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; worker-src 'self' blob:; img-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" });
     if (req.method === 'HEAD') res.end();
     else createReadStream(file).on('error', () => res.destroy()).pipe(res);
   }
@@ -175,12 +194,13 @@ export async function createSharedServer({ dbPath, port = 4174, root = REPO_ROOT
       catch { throw failure(400, 'invalid_path', 'Invalid request path.'); }
       if (!route.startsWith('/') || /[\\\0:]/.test(route) || route.split('/').some(part => part.startsWith('.'))) throw failure(403, 'invalid_path', 'That path is not allowed.');
       if (req.method === 'OPTIONS') throw failure(403, 'cross_origin_denied', 'Cross-origin requests are not allowed.');
+      if (await assistant.handle(req, res, route, origin)) return;
       if (!route.startsWith('/api/')) {
         if (!['GET', 'HEAD'].includes(req.method)) throw failure(405, 'method_not_allowed', 'This resource is read-only.');
         await assets(req, res, route); return;
       }
       if (req.method === 'GET') {
-        if (route === '/api/health') { json(res, 200, { service: 'companion-shared', version: '0.4.0', setupRequired: !roomRow() }); return; }
+        if (route === '/api/health') { json(res, 200, { service: 'companion-shared', version: '0.5.0', setupRequired: !roomRow() }); return; }
         if (route === '/api/session') {
           const session = requestSession(req);
           json(res, 200, { setupRequired: !roomRow(), user: session?.user || null, ...(session ? { csrfToken: session.csrf } : {}) }); return;
@@ -294,6 +314,7 @@ export async function createSharedServer({ dbPath, port = 4174, root = REPO_ROOT
     },
     async close() {
       if (closed) return; closed = true;
+      assistant.close();
       if (server.listening) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       db.close();
     },

@@ -14,7 +14,7 @@ const port = Number(process.env.COMPANION_SHARED_PORT || 4174);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('COMPANION_SHARED_PORT must be an integer from 1024 to 65535.');
 const app = await createSharedServer({ dbPath: path.join(path.resolve(dataDirectory), 'room.sqlite'), port });
 const address = await app.listen();
-console.log(`Companion shared room: ${address.url}\nLocal pilot only. Create the first administrator in the browser; no account is pre-created.`);
+console.log(`Companion local assistant: ${address.url.replace('/room.html', '/assistant.html')}\nShared reading room: ${address.url}\nThe personal assistant needs no group account. Everything listens only on this PC.`);
 const stop = () => { app.close().catch(() => { process.exitCode = 1; }); };
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
