@@ -49,6 +49,7 @@ public static class CompanionProjectFiles {
         }
         lock(Control){Cancelled=true;CommitDecision=-1;CommitGate.Set();}
         if(worker!=null)worker.Join();
+        CloseAllScans();
     }
     [StructLayout(LayoutKind.Sequential)] struct Info {
         public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh, WriteLow, WriteHigh;
@@ -96,6 +97,110 @@ public static class CompanionProjectFiles {
     static string Decode(byte[] b){if(Array.IndexOf(b,(byte)0)>=0)throw new Fault("project_text_required","Only UTF-8 text files are supported.",415);try{return Utf8.GetString(b);}catch(DecoderFallbackException){throw new Fault("project_text_required","Only valid UTF-8 text files are supported.",415);}}
     static byte[] Encode(string text){byte[] b;try{b=Utf8.GetBytes(text);}catch(EncoderFallbackException){throw new Fault("project_text_required","Use complete Unicode characters.",400);}if(b.Length>MaxFile||Array.IndexOf(b,(byte)0)>=0)throw new Fault("project_file_limit","Use bounded UTF-8 project text without null bytes.",413);return b;}
     static Dictionary<string,object> Content(byte[] b){string s=Decode(b);int crlf=0,lf=0,cr=0;for(int i=0;i<s.Length;i++){if(s[i]=='\r'){if(i+1<s.Length&&s[i+1]=='\n'){crlf++;i++;}else cr++;}else if(s[i]=='\n')lf++;}int kinds=(crlf>0?1:0)+(lf>0?1:0)+(cr>0?1:0);return D("content",s,"hash",Hash(b),"byteLength",b.Length,"characterLength",s.Length,"readAt",DateTime.UtcNow.ToString("o"),"lineEndings",kinds>1?"mixed":crlf>0?"crlf":lf>0?"lf":cr>0?"cr":"none","bom",b.Length>=3&&b[0]==239&&b[1]==187&&b[2]==191);}
+    // Private directory cursors retain verified ancestors and an immutable bounded metadata
+    // snapshot. Public list remains unchanged. Every continuation rechecks membership and
+    // opened identities; numeric offsets into a live directory are never accepted.
+    const int ScanPage = 200, ScanEntries = 20000, ScanBytes = 4*1024*1024, AllScanBytes = 16*1024*1024;
+    static readonly object ScanControl = new object();
+    static readonly Dictionary<string,DirectoryScan> Scans = new Dictionary<string,DirectoryScan>();
+    static long RetainedScanBytes;
+    static readonly Timer ScanExpiry = new Timer(delegate(object ignored){lock(ScanControl)ExpireScans();},null,1000,1000);
+    sealed class ScanEntry {
+        public string Name, Path, Kind, Identity, Version, Issue;
+        public long Bytes;
+        public bool Matches(ScanEntry other){return Name==other.Name&&Path==other.Path&&Kind==other.Kind&&Identity==other.Identity&&Version==other.Version&&Issue==other.Issue&&Bytes==other.Bytes;}
+    }
+    sealed class DirectoryScan : IDisposable {
+        public string Cursor, Binding, RelativePath, Directory, Identity, Version;
+        public Scope RootScope, DirectoryScope;
+        public List<ScanEntry> Entries;
+        public int Offset;
+        public long Bytes;
+        public DateTime ExpiresAt;
+        public bool InUse, Disposed;
+        public void Dispose(){if(Disposed)return;Disposed=true;if(DirectoryScope!=null)DirectoryScope.Dispose();if(RootScope!=null)RootScope.Dispose();}
+    }
+    static void RemoveScan(DirectoryScan scan){
+        if(scan.Cursor!=null&&Scans.ContainsKey(scan.Cursor)&&Object.ReferenceEquals(Scans[scan.Cursor],scan)){Scans.Remove(scan.Cursor);RetainedScanBytes-=scan.Bytes;}
+        scan.Cursor=null;scan.Dispose();
+    }
+    static void ExpireScans(){var expired=new List<DirectoryScan>();foreach(var scan in Scans.Values)if(!scan.InUse&&scan.ExpiresAt<=DateTime.UtcNow)expired.Add(scan);foreach(var scan in expired)RemoveScan(scan);}
+    static void CloseAllScans(){lock(ScanControl){foreach(var scan in new List<DirectoryScan>(Scans.Values))RemoveScan(scan);}}
+    static string CursorValue(IDictionary<string,object> f){string value=S(f,"cursor");Guid id;if(!Guid.TryParseExact(value,"D",out id))throw new Fault("invalid_project_input","Use a private directory cursor.");return value;}
+    static object CloseScan(IDictionary<string,object> f){Fields(f,"cursor");string cursor=CursorValue(f);lock(ScanControl){DirectoryScan scan;if(Scans.TryGetValue(cursor,out scan))RemoveScan(scan);}return D("closed",true);}
+    static string ScanBinding(IDictionary<string,object> f,string relative){
+        string root=Full(S(f,"root"));ProtectedRoot(root,f);object protectedRoots;f.TryGetValue("protectedRoots",out protectedRoots);
+        return Hash(Utf8.GetBytes(Json.Serialize(new object[]{root,S(f,"rootIdentity"),relative,protectedRoots})));
+    }
+    static void ScanDeadline(System.Diagnostics.Stopwatch elapsed){CheckCancelled();if(elapsed.ElapsedMilliseconds>15000)throw new Fault("project_scan_limit","Directory verification exceeded its bounded scan time.",413);}
+    static string DirectoryVersion(DirectoryScan scan){
+        var handle=scan.DirectoryScope.Handles[scan.DirectoryScope.Handles.Count-1];Info info=Get(handle);
+        if((info.Attributes&(0x400|6))!=0||(info.Attributes&0x10)==0||Id(info)!=scan.Identity||!Same(Final(handle),scan.Directory))throw new Fault("project_directory_changed","The scanned directory changed identity.",409);
+        var root=scan.RootScope.Handles[scan.RootScope.Handles.Count-1];if(!Same(Final(root),scan.RootScope.Root))throw new Fault("project_directory_changed","The scanned project changed identity.",409);
+        return Id(info)+":"+info.WriteHigh.ToString("x8")+info.WriteLow.ToString("x8");
+    }
+    static List<ScanEntry> DirectorySnapshot(DirectoryScan scan,System.Diagnostics.Stopwatch elapsed,out long bytes){
+        string before=DirectoryVersion(scan);var entries=new List<ScanEntry>();bytes=0;
+        foreach(string entry in Directory.EnumerateFileSystemEntries(scan.Directory)){
+            ScanDeadline(elapsed);if(entries.Count>=ScanEntries)throw new Fault("project_scan_limit","A directory exceeds the 20000-entry private scan limit.",413);
+            string name=Path.GetFileName(entry);var item=new ScanEntry{Name=name,Issue=null};
+            try{
+                item.Path=Relative((scan.RelativePath.Length>0?scan.RelativePath+"/":"")+name);Utf8.GetBytes(item.Path);
+                FileAttributes attr=File.GetAttributes(entry);bool directory=(attr&FileAttributes.Directory)!=0;
+                using(var h=Open(entry,Attr,3,3,directory)){
+                    Info info=Get(h);if((info.Attributes&(0x400|6))!=0||!directory&&info.Links!=1||((info.Attributes&0x10)!=0)!=directory||!Same(Final(h),Full(entry)))throw new Fault("project_path_forbidden","Unavailable directory entry.",403);
+                    item.Kind=directory?"directory":"file";item.Identity=Id(info);item.Bytes=directory?0:(long)info.SizeHigh*4294967296L+info.SizeLow;
+                    item.Version=info.Attributes.ToString("x8")+":"+info.WriteHigh.ToString("x8")+info.WriteLow.ToString("x8");
+                }
+            }catch(Fault error){if(error.Code=="request_cancelled")throw;item.Issue=error.Status==403?"protected":"unavailable";item.Path=null;item.Kind=null;item.Identity=null;item.Version=error.Code;item.Bytes=0;}
+            catch(EncoderFallbackException){item.Issue="protected";item.Path=null;}
+            catch(IOException){item.Issue="unavailable";item.Path=null;}
+            catch(UnauthorizedAccessException){item.Issue="unavailable";item.Path=null;}
+            // Conservative managed metadata charge; no file contents are read or retained.
+            bytes+=512L+name.Length*2L+(item.Path==null?0:item.Path.Length*2L);
+            if(bytes+16384>ScanBytes)throw new Fault("project_scan_limit","Directory metadata exceeds its 4MiB private scan limit.",413);entries.Add(item);
+        }
+        ScanDeadline(elapsed);if(before!=DirectoryVersion(scan))throw new Fault("project_directory_changed","Directory membership changed during enumeration. Start a new search.",409);
+        entries.Sort(delegate(ScanEntry left,ScanEntry right){return StringComparer.Ordinal.Compare(left.Name,right.Name);});
+        if(scan.Version!=null&&scan.Version!=before)throw new Fault("project_directory_changed","Directory membership changed between pages. Start a new search.",409);
+        scan.Version=before;return entries;
+    }
+    static void VerifySnapshot(DirectoryScan scan,System.Diagnostics.Stopwatch elapsed){
+        long bytes;var observed=DirectorySnapshot(scan,elapsed,out bytes);if(observed.Count!=scan.Entries.Count)throw new Fault("project_directory_changed","Directory membership changed between pages. Start a new search.",409);
+        for(int index=0;index<observed.Count;index++){ScanDeadline(elapsed);if(!observed[index].Matches(scan.Entries[index]))throw new Fault("project_directory_changed","Directory entries changed between pages. Start a new search.",409);}
+    }
+    static object ScanDirectory(IDictionary<string,object> f){
+        Fields(f,"root","rootIdentity","path","protectedRoots","cursor");string cursor=S(f,"cursor",true);DirectoryScan scan=null;
+        var elapsed=System.Diagnostics.Stopwatch.StartNew();
+        try{
+            if(cursor!=null){
+                cursor=CursorValue(f);lock(ScanControl){ExpireScans();if(!Scans.TryGetValue(cursor,out scan))throw new Fault("project_scan_expired","This private directory scan expired or finished. Start a new search.",409);scan.InUse=true;}
+            }
+            string relative=Relative(S(f,"path"),true),binding=ScanBinding(f,relative);
+            if(scan!=null){
+                if(scan.Binding!=binding)throw new Fault("project_scan_conflict","The cursor belongs to another project directory.",409);
+                VerifySnapshot(scan,elapsed);
+            }else{
+                lock(ScanControl){ExpireScans();if(Scans.Count>=8)throw new Fault("project_scan_busy","Eight private directory scans are already retained.",429);}
+                scan=new DirectoryScan{Binding=binding,RelativePath=relative,ExpiresAt=DateTime.UtcNow.AddMinutes(10),InUse=true};
+                scan.RootScope=Root(f);scan.Directory=relative.Length==0?scan.RootScope.Root:Path.Combine(scan.RootScope.Root,relative.Replace('/','\\'));
+                scan.DirectoryScope=Directories(scan.Directory,true);scan.Identity=Id(Get(scan.DirectoryScope.Handles[scan.DirectoryScope.Handles.Count-1]));
+                long bytes;scan.Entries=DirectorySnapshot(scan,elapsed,out bytes);scan.Bytes=bytes+16384;VerifySnapshot(scan,elapsed);
+                lock(ScanControl)if(RetainedScanBytes+scan.Bytes>AllScanBytes)throw new Fault("project_scan_limit","Private directory scan metadata reached its 16MiB limit.",413);
+            }
+            ScanDeadline(elapsed);if(scan.ExpiresAt<=DateTime.UtcNow)throw new Fault("project_scan_expired","This private directory scan expired. Start a new search.",409);
+            var entries=new List<object>();int count=0,protectedCount=0,unavailable=0;
+            while(scan.Offset<scan.Entries.Count&&count<ScanPage){ScanDeadline(elapsed);var item=scan.Entries[scan.Offset++];count++;if(item.Issue=="protected")protectedCount++;else if(item.Issue!=null)unavailable++;else entries.Add(D("name",item.Name,"path",item.Path,"kind",item.Kind,"byteLength",item.Bytes));}
+            ScanDeadline(elapsed);if(scan.Version!=DirectoryVersion(scan))throw new Fault("project_directory_changed","Directory membership changed before returning its page.",409);bool more=scan.Offset<scan.Entries.Count;string next=null;
+            lock(ScanControl){
+                // Consume each cursor exactly once. A lost private ACK cannot advance it again.
+                if(scan.Cursor!=null){Scans.Remove(scan.Cursor);RetainedScanBytes-=scan.Bytes;scan.Cursor=null;}
+                if(more){next=Guid.NewGuid().ToString("D");scan.Cursor=next;Scans.Add(next,scan);RetainedScanBytes+=scan.Bytes;}else scan.Dispose();
+            }
+            return D("entries",entries,"scanned",count,"scanLimit",ScanPage,"skipped",D("protected",protectedCount,"unavailable",unavailable),"hasMore",more,"nextCursor",next,"directoryIdentity",scan.Identity);
+        }catch{if(scan!=null)lock(ScanControl)RemoveScan(scan);throw;}
+        finally{if(scan!=null)lock(ScanControl)scan.InUse=false;}
+    }
     static string EditDirectory(IDictionary<string,object> f,string key="editDirectory"){string dir=Full(S(f,key)),id=Path.GetFileName(dir);Guid parsed;if(!Guid.TryParseExact(id,"D",out parsed)||!Same(Path.GetDirectoryName(dir),Path.Combine(DataRoot,"project-files","edits")))throw new Fault("invalid_project_input","Use an owned private edit directory.");if(key=="editDirectory"&&id!=S(f,"operationId"))throw new Fault("invalid_project_input","The edit identity does not match its directory.");return dir;}
     static byte[] PrivateRead(string path,int limit){using(var dirs=Directories(Path.GetDirectoryName(path),false))using(var h=Open(path,Read,1,3,false)){Info i=Get(h);if((i.Attributes&(0x400|0x10))!=0||i.Links!=1||i.SizeHigh!=0||i.SizeLow>limit||!Same(Final(h),Full(path)))throw new Fault("project_journal_invalid","The private edit evidence is invalid.",409);using(var s=new FileStream(h,FileAccess.Read)){if(s.Length>limit)throw new Fault("project_journal_invalid","The private edit evidence is too large.",409);byte[] b=new byte[(int)s.Length];int n=0;while(n<b.Length){int k=s.Read(b,n,b.Length-n);if(k==0)throw new Fault("project_journal_invalid","Private edit evidence is incomplete.",409);n+=k;}return b;}}}
     static Dictionary<string,object> Journal(string dir){try{var d=Json.Deserialize<Dictionary<string,object>>(Utf8.GetString(PrivateRead(Path.Combine(dir,"journal.json"),32000)));if(d==null||Convert.ToInt32(d["version"])!=1||S(d,"id")!=Path.GetFileName(dir))throw new Exception();return d;}catch(Fault){throw;}catch{throw new Fault("project_journal_invalid","The private edit journal is invalid.",409);}}
@@ -142,6 +247,8 @@ public static class CompanionProjectFiles {
     public static string Dispatch(string line){object id=null;try{var request=Json.Deserialize<Dictionary<string,object>>(line);id=request["id"];string action=(string)request["action"];var f=request["fields"] as Dictionary<string,object>;if(f==null)throw new Fault("invalid_project_input","Use JSON project fields.");
         if(action=="init"){if(SourceRoot!=null)throw new Fault("invalid_project_input","The broker is already initialized.");Fields(f,"sourceRoot","dataDirectory");SourceRoot=Full(S(f,"sourceRoot"));DataRoot=Full(S(f,"dataDirectory"));return Json.Serialize(D("id",id,"value",D("ready",true)));}if(SourceRoot==null)throw new Fault("project_native_unavailable","Initialize the project broker first.",503);
         if(action=="inspectRoot"){Fields(f,"path","protectedRoots");string path=Full(S(f,"path"));ProtectedRoot(path,f);using(var scope=Directories(path,true)){var value=D("canonicalPath",scope.Root,"identity",Id(Get(scope.Handles[scope.Handles.Count-1])),"label",Path.GetFileName(scope.Root));return Json.Serialize(D("id",id,"value",value));}}
+        if(action=="closeScan")return Json.Serialize(D("id",id,"value",CloseScan(f)));
+        if(action=="scanDirectory")return Json.Serialize(D("id",id,"value",ScanDirectory(f)));
         Fields(f,"root","rootIdentity","path","protectedRoots","operationId","editDirectory","expectedHash","content","oldText","newText","originalEditDirectory","part","terminalOnly");
         object result;
         if(action=="recover")result=Recover(f);
