@@ -38,6 +38,11 @@ const workflowFieldDrafts=new WeakMap();
 const runningWorkflows = new Set(), workflowResults = new Map();
 const jobDetails = new Map(), jobDetailPending = new Set();
 const jobDetailRetryAt = new Map();
+const WORK_ACTIVE = new Set(['queued','running']);
+const WORK_LABELS = {queued:'Queued',running:'Working',waiting_for_review:'Needs your review',completed:'Result ready',failed:'Could not finish',cancelled:'Stopped',interrupted:'Interrupted'};
+let workJobs=[],workTotal=0,workNextOffset=null,workHasMore=false,selectedWorkId=null,workSelectionGeneration=0,workListPending=null,workSubmitting=false,workError='';
+const workDetails=new Map(),workDetailPending=new Map(),workChecks=new Set(),workCancelling=new Set();
+const pendingWorkIds=new Set();
 const CONVERSATION_ID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const pendingWorkflowRuns=new Map();
 syncPendingWorkflowRuns();
@@ -48,6 +53,7 @@ let conversationListPending=null, conversationDetailRequest=null, conversationLo
 let localChatTurn=null, newConversationRequest=null, conversationOptionsKey='';
 const conversationDrafts=new Map(), conversationUncertain=new Map();
 let conversationEarlierTurns=[],conversationEarlierCursor=null,conversationHasEarlier=false,conversationEarlierLoaded=false,conversationEarlierRequest=null;
+syncPendingWorkIds();
 const preferences = readStored('preferences', {});
 $('read-aloud').checked = preferences?.readAloud === true;
 $('settings-read-aloud').checked = $('read-aloud').checked;
@@ -77,6 +83,7 @@ function renderConversationControls(){
   const contextBlocked=!!selectedWindowContext&&selectedWindowContext.status!=='ready';
   const cannotSend=turnBusy||!!runtimeReconnectPromise||desktopToolBusy||desktopMutationBusy||conversationLoading||running||!!uncertain||contextBlocked;
   $('send-question').disabled=cannotSend;
+  for(const open of $('work-detail').querySelectorAll('.work-conversation-open'))open.disabled=busy;
   if(running||uncertain||conversationLoading||contextBlocked)$('mic-button').disabled=true;
   else if(!runtimeReconnectPromise&&!desktopToolBusy&&!desktopMutationBusy)$('mic-button').disabled=false;
 }
@@ -102,7 +109,7 @@ function renderSavedConversation(){
   const labels={running:'Working…',failed:'Could not finish',cancelled:'Stopped',interrupted:'Interrupted'};
   for(const turn of turns){
     const user=addMessage('user',typeof turn.message==='string'?turn.message:'');user.dataset.turnId=turn.id;
-    if(turn.reply&&typeof turn.reply.text==='string'){const provider=providers.find(item=>item.id===(turn.reply.providerId||turn.providerId));const answer=addMessage('assistant',turn.reply.text,'Companion'+(provider?' · '+provider.label:''));renderActionReceipts(answer,turn.reply.actions,{historical:true});appendWindowContextProvenance(answer,turn.reply.windowContext);attachSavedFeatureLink(answer,turn.reply.featureJob);}
+    if(turn.reply&&typeof turn.reply.text==='string'){const provider=providers.find(item=>item.id===(turn.reply.providerId||turn.providerId));const answer=addMessage('assistant',turn.reply.text,'Companion'+(provider?' · '+provider.label:''));renderActionReceipts(answer,turn.reply.actions,{historical:true});appendWindowContextProvenance(answer,turn.reply.windowContext);attachSavedFeatureLink(answer,turn.reply.featureJob);appendWorkLink(answer,turn.reply.workJob);}
     else if(turn.status!=='completed'){const fallback=turn.status==='interrupted'?'Companion restarted before this request finished. Check completed actions before sending a new request.':turn.status==='cancelled'?'Stopped. Actions already completed remain saved.':turn.status==='failed'?'This request did not finish. Completed actions remain saved.':'This request is saved and running.';user.append(element('p','saved-turn-status status-'+turn.status,labels[turn.status]||turn.status),element('p','saved-turn-detail',turn.error?.message||fallback));renderActionReceipts(user,turn.error?.actions,{historical:true});appendWindowContextProvenance(user,turn.error?.windowContext);}
   }
   updateCornerPreview(turns.at(-1)?.reply?.text||turns.at(-1)?.message||'');renderCorner();
@@ -189,15 +196,16 @@ function setChatOpen(value){chatOpen=!!value;document.body.classList.toggle('cha
 $('chat-toggle').addEventListener('click',()=>setChatOpen(!chatOpen));
 $('voice-home').addEventListener('click',()=>setChatOpen(false));
 function showView(view) {
-  if(!['today','tasks','notes','workflows','build','settings','desktop'].includes(view)&&!extensions.has(view))return;
+  if(!['today','tasks','notes','workflows','build','settings','desktop','work'].includes(view)&&!extensions.has(view))return;
   currentView=view;document.body.classList.toggle('tools-open',view!=='today');$('voice-home').setAttribute('aria-pressed',String(view==='today'&&!chatOpen));
   document.querySelectorAll('.view-panel').forEach(panel=>panel.hidden=panel.id!==view+'-view');
   document.querySelectorAll('[data-view]').forEach(item=>{item.classList.toggle('active',item.dataset.view===view);item.setAttribute('aria-current',item.dataset.view===view?'page':'false');});
-  $('view-title').textContent=extensions.get(view)?.title||({today:'Chat',tasks:'Tasks',notes:'Notes',workflows:'Workflows',build:'Build a feature',settings:'Settings',desktop:'Computer'})[view];
+  $('view-title').textContent=extensions.get(view)?.title||({today:'Chat',tasks:'Tasks',notes:'Notes',workflows:'Workflows',build:'Build a feature',settings:'Settings',desktop:'Computer',work:'Work'})[view];
   $('content-scroll').scrollTop=0;
   if(view==='settings'){renderMemory();renderProviders();renderRuntime();if(!mcpConfiguration)void loadIntegrations();void refreshDesktop().catch(error=>{$('desktop-settings-status').textContent=error.message;});}
   if(view==='build'){renderJobs();refreshJobsSafely();}
   if(view==='workflows')void refreshToolCatalog({quiet:true});
+  if(view==='work'){ensureCornerExpanded();$('tools-menu').open=false;renderWork();void refreshWork({quiet:true});}
   if(view==='desktop')void refreshDesktop().catch(error=>{$('desktop-error').textContent=error.message;});
   if(view!=='settings')$('provider-key').value='';
 }
@@ -211,7 +219,7 @@ async function api(path,options={}) {
   try{response=await fetch('/api/assistant/'+path,{...rest,headers,credentials:'same-origin',cache:'no-store',redirect:'error',signal});}
   catch(error){if(error.name==='AbortError')throw error;throw new Error('Companion’s service could not be reached. Double-click Start Companion.cmd, then check again.');}
   let data;try{data=await response.json();}catch{throw new Error('The service returned an unreadable response. Check the connection and try again.');}
-  if(!response.ok){const error=new Error(data?.error?.message||'This request could not be completed.');error.code=data?.error?.code;error.status=response.status;error.workspace=data?.workspace;error.actions=data?.actions;error.conversation=data?.conversation;error.conversationId=data?.conversationId;error.hostActions=data?.hostActions;error.capability=data?.capability;throw error;}
+  if(!response.ok){const error=new Error(data?.error?.message||'This request could not be completed.');error.code=data?.error?.code;error.status=response.status;error.workspace=data?.workspace;error.actions=data?.actions;error.conversation=data?.conversation;error.conversationId=data?.conversationId;error.hostActions=data?.hostActions;error.capability=data?.capability;error.workJob=data?.workJob;throw error;}
   return data;
 }
 async function boundedApi(path,options={},milliseconds=15000){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),milliseconds);try{return await api(path,{...options,signal:controller.signal});}catch(error){if(error.name==='AbortError')throw new Error('This request took too long. Check the connection and try again.');throw error;}finally{clearTimeout(timeout);}}
@@ -235,7 +243,7 @@ async function checkService({reconnecting=false,force=false,deadline=Infinity}={
       if(results[3].status==='fulfilled'&&Array.isArray(results[3].value.jobs)){jobs=results[3].value.jobs;if(!selectedJobId&&jobs.length)selectedJobId=jobs[0].id;renderJobs();}else if(results[3].status==='rejected')serviceError||=results[3].reason.message;
       if(results[4].status==='fulfilled')applyRuntime(results[4].value);
       if(results[5].status==='fulfilled')applyDesktopStatus(results[5].value);
-      void refreshConversations({initialize:true,quiet:true});void refreshToolCatalog({quiet:true});
+      void refreshConversations({initialize:true,quiet:true});void refreshToolCatalog({quiet:true});void refreshWork({quiet:true});
       return {workspaceReady:results[2].status==='fulfilled',jobsReady:results[3].status==='fulfilled',runtimeReady:results[4].status==='fulfilled'};
     }catch(error){if(check===serviceCheckGeneration){serviceError=error.message;providers=[];activeProviderId='';service={transcriptionReady:false};}return {workspaceReady:false,jobsReady:false,runtimeReady:false};}
     finally{if(check===serviceCheckGeneration){renderProviders();renderService();renderRuntime();$('connection-refresh').disabled=!!runtimeReconnectPromise;$('retry-service').disabled=!!runtimeReconnectPromise;checkingService=null;}}
@@ -281,7 +289,7 @@ function renderRuntime(){
   $('provider-select').disabled=busy||providerBusy||!providers.length;
   $('provider-save').disabled=busy||providerBusy;
   $('build-submit').disabled=busy||featureBusy;
-  renderConversationControls();renderVoiceControls();
+  renderConversationControls();renderVoiceControls();renderWork();
   if(busy||desktopToolBusy||desktopMutationBusy)$('hands-free').disabled=true;if(busy){$('connection-label').textContent='Reconnecting to Companion…';$('connection-dot').className='status-dot offline';}
 }
 async function reconnectAfterRestart(metadata,{jobId=null,action='restart'}={}){
@@ -394,7 +402,7 @@ function renderWindowContext(){
   checkWindowContextExpiry();const current=selectedWindowContext,pill=$('selected-window-context');pill.hidden=!current;
   const key=JSON.stringify(current);if(key===windowContextRenderKey)return;windowContextRenderKey=key;
   if(current){const title=contextWindowTitle(current.window);pill.setAttribute('aria-label','Selected window context: '+title);$('window-context-label').textContent='Context: '+title;$('window-context-status').textContent=current.status==='selecting'?'Selecting window…':current.status==='unavailable'?current.reason||'This window context is unavailable. Clear it or select the window again.':'Current text goes to your chosen AI with each question.';pill.classList.toggle('context-unavailable',current.status==='unavailable');}
-  renderConversationControls();renderVoiceControls();
+  renderConversationControls();renderVoiceControls();renderWork();
 }
 function markWindowContextUnavailable(reason){if(!selectedWindowContext)return;selectedWindowContext.status='unavailable';selectedWindowContext.reason=reason;renderWindowContext();}
 async function releaseWindowContext(id){if(typeof id!=='string'||!id)return;return boundedApi('context/'+encodeURIComponent(id)+'/clear',{method:'POST',body:JSON.stringify({})},5000);}
@@ -571,8 +579,8 @@ async function postStopWithFreshSession(path){
 }
 function stopAllActivity(announce=false,{global=false}={}){
   cancelTurn(false);desktopExecutionGeneration+=1;activeDesktopRequest?.controller.abort();activeDesktopRequest=null;desktopToolBusy=false;desktopMutationBusy=false;
-  const stop=global?Promise.resolve().then(async()=>{const result=await postStopWithFreshSession('stop');await Promise.allSettled([refreshDesktop(),refreshJobs()]);return result;}):stopDesktopActions();
-  void stop.then(()=>{if(announce||global){const message=global?'Stopped running requests. Completed work is preserved.':'Stopped. Completed work is preserved.';toast(message);updateCornerPreview(message);}}).catch(error=>{if(global)void stopDesktopActions().catch(()=>{});if(announce||global)$('question-error').textContent='The current turn stopped, but the computer stop could not be confirmed. '+error.message;}).finally(()=>{renderDesktopStatus();renderDesktopReview();renderRuntime();});
+  const stop=global?Promise.resolve().then(async()=>{const result=await postStopWithFreshSession('stop');await Promise.allSettled([refreshDesktop(),refreshJobs(),refreshWork({quiet:true})]);return result;}):stopDesktopActions();
+  void stop.then(()=>{if(announce||global){const message=global?'Stop requested. Completed work is preserved.':'Stopped. Completed work is preserved.';toast(message);updateCornerPreview(message);}}).catch(error=>{if(global)void stopDesktopActions().catch(()=>{});if(announce||global)$('question-error').textContent='The current turn stopped, but '+(global?'the global stop':'the computer stop')+' could not be confirmed. '+error.message;}).finally(()=>{renderDesktopStatus();renderDesktopReview();renderRuntime();});
 }
 $('connection-refresh').addEventListener('click',()=>void checkService());$('retry-service').addEventListener('click',()=>void checkService());
 $('service-details').addEventListener('click',()=>{renderService();showDialog('service-dialog');});
@@ -831,7 +839,7 @@ async function jobAction(job,action){
 $('build-form').addEventListener('submit',async event=>{event.preventDefault();if(featureBusy||runtimeReconnectPromise)return;const prompt=$('feature-prompt').value.trim();if(!prompt)return;$('build-error').textContent='';const provider=activeProvider();if(!provider?.ready){$('build-error').textContent=provider?.unavailableReason||'Choose a ready AI connection in Settings first.';return;}featureBusy=true;$('build-submit').disabled=true;try{const value=await boundedApi('features',{method:'POST',body:JSON.stringify({prompt,providerId:provider.id,autoApply:$('feature-auto-apply').checked})},30000);const job=value.job||value;rememberJob(job);if(!job.id)throw new Error('The build could not be opened. Refresh to check build history.');jobs=[job,...jobs.filter(item=>item.id!==job.id)];selectedJobId=job.id;renderJobs();if($('feature-prompt').value.trim()===prompt)$('feature-prompt').value='';}catch(error){$('build-error').textContent=error.message;refreshJobsSafely();}finally{featureBusy=false;$('build-submit').disabled=false;}});
 async function runInstalledTool(tool,args={}){
   if(runtimeReconnectPromise)throw new Error('Companion is reconnecting. Try this action again when it is ready.');
-  try{const value=await boundedApi('tools/run',{method:'POST',body:JSON.stringify({tool,arguments:args,operationId:crypto.randomUUID()})},45000);if(value.workspace)applyWorkspace(value.workspace);ingestDesktopResult(value.result);for(const action of value.result?.hostActions||[])ingestDesktopResult(action.result);if(value.result?.desktopAction)void refreshDesktop().catch(error=>toast(error.message));if(value.result?.error){const error=new Error(typeof value.result.error==='string'?value.result.error:value.result.error.message||'This action could not finish.');error.hostActions=value.result.hostActions;throw error;}return value;}
+  try{const value=await boundedApi('tools/run',{method:'POST',body:JSON.stringify({tool,arguments:args,operationId:crypto.randomUUID()})},45000);if(value.workspace)applyWorkspace(value.workspace);ingestDesktopResult(value.result);if(value.result?.workJob)rememberWorkJob(value.result.workJob);for(const action of value.result?.hostActions||[])ingestDesktopResult(action.result);if(value.result?.desktopAction)void refreshDesktop().catch(error=>toast(error.message));if(value.result?.error){const error=new Error(typeof value.result.error==='string'?value.result.error:value.result.error.message||'This action could not finish.');error.hostActions=value.result.hostActions;throw error;}return value;}
   catch(error){void refreshWorkspace().catch(()=>{});throw error;}
 }
 async function loadExtensionModule(url){return import(url);}
@@ -867,6 +875,78 @@ function appendInstalledFeatureReady(container,job){
     else{row.append(element('span','',(installed.title||'The tool')+(entry?.error?' could not open.':' is not currently available.')),button('Check tool','quiet-button',()=>showToolsList(entry?.error||'Check that this tool is available below.')));}container.append(row);
   }
 }
+function syncPendingWorkIds(){
+  const stored=readStored('pendingWorkIds',[]);if(Array.isArray(stored))for(const id of stored.slice(0,50))if(typeof id==='string'&&CONVERSATION_ID.test(id))pendingWorkIds.add(id);
+}
+function persistPendingWork(id,{remove=false}={}){syncPendingWorkIds();if(remove)pendingWorkIds.delete(id);else pendingWorkIds.add(id);store('pendingWorkIds',[...pendingWorkIds]);}
+function validWorkJob(job,id=job?.id){if(!job||!CONVERSATION_ID.test(job.id)||job.id!==id||!Object.hasOwn(WORK_LABELS,job.status))throw new Error('The saved work could not be read.');return job;}
+function rememberWorkJob(value,{detail=false}={}){
+  const job=clone(validWorkJob(value)),previous=workJobs.find(item=>item.id===job.id);
+  if(previous&&String(previous.updatedAt)>String(job.updatedAt))return previous;
+  workJobs=[job,...workJobs.filter(item=>item.id!==job.id)];
+  if(detail){const old=workDetails.get(job.id),a=old?.outcome,b=job.outcome;
+    if(a&&b&&a.status===b.status){if(a.totalTextCharacters===b.totalTextCharacters&&typeof a.text==='string'&&a.text.startsWith(b.text||'')){b.text=a.text;b.nextTextOffset=a.nextTextOffset;b.textHasMore=a.textHasMore;}if(a.totalActions===b.totalActions&&Array.isArray(a.actions)&&Array.isArray(b.actions)&&b.actions.every((action,index)=>JSON.stringify(action)===JSON.stringify(a.actions[index]))){b.actions=a.actions;b.nextActionOffset=a.nextActionOffset;b.actionsHasMore=a.actionsHasMore;}}
+    workDetails.set(job.id,job);
+  }
+  renderWork();return job;
+}
+function workTitle(job,limit=76){const text=String(job.title||job.promptPreview||'Work').replace(/\s+/g,' ').trim();return text.length>limit?text.slice(0,limit-1).trimEnd()+'…':text;}
+function workStatusLabel(job){return job.cancelRequested&&WORK_ACTIVE.has(job.status)?'Stopping…':WORK_LABELS[job.status]||job.status;}
+function selectWork(id){if(!CONVERSATION_ID.test(id))return;workSelectionGeneration++;selectedWorkId=id;renderWork();void refreshWorkDetail(id,{quiet:true});}
+function openWork(id){showView('work');if(id)selectWork(id);}
+function appendWorkLink(container,job){if(!job?.id||!CONVERSATION_ID.test(job.id))return;container.append(button('Open work','quiet-button',()=>openWork(job.id)));}
+function renderWork(){
+  const active=workJobs.filter(job=>WORK_ACTIVE.has(job.status)).length;$('work-active-count').hidden=!active;$('work-active-count').textContent=active?String(active):'';$('work-open').setAttribute('aria-label',active?'Work, '+active+' active':'Work');
+  const provider=activeProvider();$('work-route').textContent=provider?(provider.label+(provider.model?' · '+provider.model:'')+(selectedWindowContext?' · '+contextWindowTitle(selectedWindowContext.window):'')+(selectedWindowContext&&!windowContextReady()?' · context unavailable':'')):'Choose an AI connection in Settings.';
+  $('work-submit').disabled=workSubmitting||pendingWorkIds.size>0||!!runtimeReconnectPromise||!provider?.ready||!windowContextReady();$('work-submit').textContent=workSubmitting?'Handing off…':'Hand off';$('work-refresh').disabled=!!workListPending||!!runtimeReconnectPromise;$('work-more').hidden=!workHasMore;$('work-more').disabled=!!workListPending||!!runtimeReconnectPromise;
+  $('work-error').textContent=workError;$('work-count').textContent=workTotal?'Showing '+Math.min(workJobs.length,workTotal)+' of '+workTotal+' saved work item'+(workTotal===1?'':'s')+'.':'';
+  const handoffs=$('work-handoffs');handoffs.replaceChildren();handoffs.hidden=!pendingWorkIds.size;
+  for(const id of pendingWorkIds){const row=element('div','work-handoff');row.append(element('span','',workSubmitting?'Confirming handoff…':'A handoff has not been confirmed.'),button('Check handoff','quiet-button',()=>void checkWorkHandoff(id)));row.children[1].disabled=workChecks.has(id)||workSubmitting||!!runtimeReconnectPromise;handoffs.append(row);}
+  const list=$('work-list');list.replaceChildren();for(const job of [...workJobs].sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt)))){const item=button('','work-item'+(selectedWorkId===job.id?' active':''),()=>selectWork(job.id));item.setAttribute('aria-label',workTitle(job)+' · '+workStatusLabel(job));item.setAttribute('aria-pressed',String(selectedWorkId===job.id));item.append(element('strong','',workTitle(job)),element('small','',workStatusLabel(job)+(job.provider?.label?' · '+job.provider.label:'')));list.append(item);}
+  const detail=$('work-detail'),originalOpen=[...detail.querySelectorAll('.work-original')].some(node=>node.open&&node.dataset.jobId===selectedWorkId),progressOpen=[...detail.querySelectorAll('.work-progress')].some(node=>node.open&&node.dataset.jobId===selectedWorkId);detail.replaceChildren();const summary=workJobs.find(job=>job.id===selectedWorkId),cached=workDetails.get(selectedWorkId),stale=!!summary&&!!cached&&String(summary.updatedAt)>String(cached.updatedAt),job=stale?{...cached,...summary,prompt:cached.prompt,outcome:cached.outcome}:cached||summary;
+  if(!job){detail.append(element('p','','Hand off a request above, or say “work on this in the background” to your AI. Your saved work will appear here.'));return;}
+  detail.append(element('h2','',workTitle(job)),element('span','work-status',workStatusLabel(job)),element('p','form-hint',job.provider?job.provider.label+(job.provider.model?' · '+job.provider.model:''):'Provider details are loading.'));
+  if(stale)detail.append(element('p','form-hint','Loading its latest saved result…'));
+  if(job.progress?.message)detail.append(element('p','',job.progress.message));
+  const actions=element('div','work-actions');if(WORK_ACTIVE.has(job.status)){const stop=button('Stop this work','quiet-button',()=>void cancelWork(job.id));stop.disabled=workCancelling.has(job.id)||job.cancelRequested===true||!!runtimeReconnectPromise;actions.append(stop);}
+  const open=button('Open conversation','quiet-button work-conversation-open',()=>void openWorkConversation(job.id));open.disabled=conversationLocallyBusy()||conversationLoading||!!runtimeReconnectPromise;actions.append(open);detail.append(actions);
+  if(job.status==='waiting_for_review'){detail.append(element('p','','This run stopped at a computer action that needs your review. Approving it does not restart the work automatically.'));const pending=(job.outcome?.actions||[]).find(action=>action.result?.desktopAction?.id);if(pending)detail.append(button('Review computer action','secondary-button',()=>void openDesktopReview(pending.result.desktopAction.id)));}
+  const outcome=job.outcome;if(outcome){if(outcome.error)detail.append(element('p','inline-error',outcome.error.message||'This work could not finish. Completed actions remain saved.'));if(typeof outcome.text==='string'&&outcome.text){detail.append(element('h3','','Result'),element('div','work-output',outcome.text));}if(outcome.textHasMore){const more=button('Load more result','quiet-button',()=>void loadWorkOutcome(job.id,'text'));more.disabled=workDetailPending.has(job.id);detail.append(more);}if(Array.isArray(outcome.actions)&&outcome.actions.length){detail.append(element('h3','','Saved actions'));renderActionReceipts(detail,outcome.actions,{historical:true});const builds=new Set();for(const action of outcome.actions){const build=action.result?.featureJob?.job||action.result?.featureJob;if(build?.id&&!builds.has(build.id)){builds.add(build.id);detail.append(element('p','form-hint','Feature build · '+(JOB_LABELS[build.status]||build.status||'Requested')+' (saved status). Open the build for its current state.'));attachSavedFeatureLink(detail,build);}}}if(outcome.actionsHasMore){const more=button('Load more actions','quiet-button',()=>void loadWorkOutcome(job.id,'actions'));more.disabled=workDetailPending.has(job.id);detail.append(more);}appendWindowContextProvenance(detail,outcome.windowContext);}
+  if(typeof job.prompt==='string'){const original=element('details','work-original');original.dataset.jobId=job.id;original.open=originalOpen;original.append(element('summary','','Original request'),element('p','',job.prompt));detail.append(original);}else if(workDetailPending.has(job.id))detail.append(element('p','form-hint','Loading the original request and saved result…'));
+  if(job.progress?.events?.length){const events=element('details','work-events work-progress');events.dataset.jobId=job.id;events.open=progressOpen;events.append(element('summary','','Progress'));for(const event of job.progress.events.slice(-12).reverse())events.append(element('p','',(timeLabel(event.at)?timeLabel(event.at)+' · ':'')+(event.message||event.type||'')));detail.append(events);}
+}
+async function refreshWork({more=false,quiet=false}={}){
+  if(workListPending||destroyed||runtimeReconnectPromise)return workListPending;const offset=more?workNextOffset:0;if(more&&(!workHasMore||!Number.isSafeInteger(offset)))return;
+  workListPending=(async()=>{try{const value=await boundedApi('work?offset='+offset+'&limit=20');if(!Array.isArray(value.jobs)||!Number.isSafeInteger(value.total))throw new Error('Saved work could not be read.');for(const job of value.jobs)rememberWorkJob(job);workTotal=value.total;if(more||workNextOffset===null){workNextOffset=value.nextOffset;workHasMore=value.hasMore===true;}else{workHasMore=workJobs.length<workTotal;if(!workHasMore)workNextOffset=null;}if(!selectedWorkId&&workJobs.length){selectedWorkId=workJobs[0].id;workSelectionGeneration++;}workError='';if(selectedWorkId)await refreshWorkDetail(selectedWorkId,{quiet:true});}
+    catch(error){workError=error.message;if(!quiet)throw error;}finally{workListPending=null;renderWork();}})();renderWork();return workListPending;
+}
+async function refreshWorkDetail(id,{quiet=false}={}){
+  if(workDetailPending.has(id))return workDetailPending.get(id);const selection=workSelectionGeneration;
+  const request=(async()=>{try{const value=await boundedApi('work/'+encodeURIComponent(id)+'?textOffset=0&textLimit=4000&actionOffset=0&actionLimit=12');validWorkJob(value.job,id);rememberWorkJob(value.job,{detail:true});if(selectedWorkId===id&&selection===workSelectionGeneration)workError='';return value.job;}
+    catch(error){if(selectedWorkId===id&&selection===workSelectionGeneration)workError=error.message;if(!quiet)throw error;return null;}finally{if(workDetailPending.get(id)===request)workDetailPending.delete(id);renderWork();}})();workDetailPending.set(id,request);renderWork();return request;
+}
+async function loadWorkOutcome(id,part){
+  if(workDetailPending.has(id)||runtimeReconnectPromise)return;const previous=workDetails.get(id),outcome=previous?.outcome,offset=part==='text'?outcome?.nextTextOffset:outcome?.nextActionOffset;if(!Number.isSafeInteger(offset))return;
+  const request=(async()=>{try{const value=await boundedApi('work/'+encodeURIComponent(id)+'?textOffset='+(part==='text'?offset:0)+'&textLimit=4000&actionOffset='+(part==='actions'?offset:0)+'&actionLimit=12'),job=validWorkJob(value.job,id);if(workDetails.get(id)!==previous)return;const next=job.outcome;if(!next)throw new Error('The saved result is not available.');if(part==='text'){if(next.textOffset!==offset)throw new Error('The saved result page could not be matched.');job.outcome={...outcome,text:(outcome.text||'')+(next.text||''),nextTextOffset:next.nextTextOffset,textHasMore:next.textHasMore};}else{if(next.actionOffset!==offset)throw new Error('The saved action page could not be matched.');job.outcome={...outcome,actions:[...(outcome.actions||[]),...(next.actions||[])],nextActionOffset:next.nextActionOffset,actionsHasMore:next.actionsHasMore};}workDetails.set(id,job);}
+    catch(error){if(selectedWorkId===id)workError=error.message;}finally{if(workDetailPending.get(id)===request)workDetailPending.delete(id);renderWork();}})();workDetailPending.set(id,request);renderWork();return request;
+}
+async function submitWork(){
+  syncPendingWorkIds();if(workSubmitting||pendingWorkIds.size||runtimeReconnectPromise)return;const prompt=$('work-prompt').value.trim();if(!prompt)return;const provider=activeProvider(),source=captureWindowContext();if(!provider?.ready||!currentWindowContext(source)||!windowContextReady()){workError='Choose a ready AI connection and an available window context before handing off.';renderWork();return;}
+  const id=crypto.randomUUID(),selection=workSelectionGeneration,body={id,prompt,providerId:provider.id,...(source.id?{contextId:source.id}:{})};workSubmitting=true;workError='';persistPendingWork(id);renderWork();
+  try{const value=await boundedApi('work',{method:'POST',body:JSON.stringify(body)},20000);validWorkJob(value.job,id);rememberWorkJob(value.job,{detail:true});persistPendingWork(id,{remove:true});workTotal=Math.max(workTotal,workJobs.length);if($('work-prompt').value.trim()===prompt)$('work-prompt').value='';if(selection===workSelectionGeneration){selectedWorkId=id;workSelectionGeneration++;}toast('Work handed off. You can keep talking.');}
+  catch(error){if(error.status&&error.status>=400&&error.status<500&&![408,409,429,499].includes(error.status))persistPendingWork(id,{remove:true});workError=pendingWorkIds.has(id)?'The handoff has not been confirmed. Check handoff before starting it again.':error.message;}
+  finally{workSubmitting=false;renderWork();}
+}
+async function checkWorkHandoff(id){
+  if(workChecks.has(id)||workSubmitting||runtimeReconnectPromise)return;const selection=workSelectionGeneration;workChecks.add(id);renderWork();try{const job=await refreshWorkDetail(id);persistPendingWork(id,{remove:true});if(selection===workSelectionGeneration){selectedWorkId=id;workSelectionGeneration++;}workTotal=Math.max(workTotal,workJobs.length);if(selection===workSelectionGeneration||selectedWorkId===id)workError='';if(job)toast('Saved handoff found.');}
+  catch(error){if(error.status===404){persistPendingWork(id,{remove:true});workError='No saved handoff was found. Review your request and hand it off again if you still want it.';}else workError='The handoff still could not be confirmed. Check again when the connection is ready.';}
+  finally{workChecks.delete(id);renderWork();}
+}
+async function cancelWork(id){if(workCancelling.has(id)||runtimeReconnectPromise)return;const selection=workSelectionGeneration;workCancelling.add(id);renderWork();try{const value=await boundedApi('work/'+encodeURIComponent(id)+'/cancel',{method:'POST',body:JSON.stringify({})});validWorkJob(value.job,id);rememberWorkJob(value.job,{detail:true});if(selection===workSelectionGeneration&&selectedWorkId===id)workError='';}catch(error){if(selection===workSelectionGeneration&&selectedWorkId===id)workError='The stop was not confirmed. Refresh this work to check its saved status. '+error.message;else toast('A work stop was not confirmed. Open that work to check its saved status.');void refreshWorkDetail(id,{quiet:true});}finally{workCancelling.delete(id);renderWork();}}
+async function openWorkConversation(id){const workSelection=workSelectionGeneration,conversationSelection=conversationSelectionGeneration;if(conversationLocallyBusy()||conversationLoading||runtimeReconnectPromise){toast('Finish recording or stop the current turn before opening another conversation.');return;}await refreshConversations({quiet:true});if(workSelection!==workSelectionGeneration||conversationSelection!==conversationSelectionGeneration)return;if(await selectConversation(id)){setChatOpen(true);ensureCornerExpanded();}}
+$('work-form').addEventListener('submit',event=>{event.preventDefault();void submitWork();});
+$('work-refresh').addEventListener('click',()=>void refreshWork({quiet:true}));
+$('work-more').addEventListener('click',()=>void refreshWork({more:true,quiet:true}));
 function setState(state,detail=''){
   const labels={idle:voiceSessionState.enabled?'Microphone paused':'Microphone off',opening:'Opening your microphone…',listening:'Listening…',transcribing:'Turning speech into text…',thinking:'Working…',desktop:'Working with your computer…',speaking:'Reading the reply aloud.'};
   $('voice-state').textContent=labels[state]||state;$('voice-detail').textContent=detail||(state==='idle'?'Type, or tap the mic.':'');
@@ -885,12 +965,13 @@ function addMessage(role,text,label=role==='user'?'You':'Companion'){
 }
 function renderActionReceipts(container,actions,{historical=false,nested=false}={}){
   if(!container||!Array.isArray(actions))return;
-  const labels={create_task:'Task saved',update_task:'Task updated',complete_task:'Task completed',save_note:'Note saved',list_tasks:'Tasks checked',read_task:'Task opened',summarize_tasks:'Tasks counted',window_context:'Window read',list_notes:'Notes checked',search_notes:'Notes searched',read_note:'Note opened',start_focus:'Focus started',stop_focus:'Focus ended',save_workflow:'Workflow saved',run_workflow:'Workflow run',build_feature:'Feature build',list_feature_builds:'Builds checked',inspect_feature_build:'Build checked',list_capabilities:'Tools checked',run_capability:'Tool run',get_time:'Current time'};
+  const labels={manage_work:'Work',create_task:'Task saved',update_task:'Task updated',complete_task:'Task completed',save_note:'Note saved',list_tasks:'Tasks checked',read_task:'Task opened',summarize_tasks:'Tasks counted',window_context:'Window read',list_notes:'Notes checked',search_notes:'Notes searched',read_note:'Note opened',start_focus:'Focus started',stop_focus:'Focus ended',save_workflow:'Workflow saved',run_workflow:'Workflow run',build_feature:'Feature build',list_feature_builds:'Builds checked',inspect_feature_build:'Build checked',list_capabilities:'Tools checked',run_capability:'Tool run',get_time:'Current time'};
   for(const action of actions){let result=action.result||{};if(historical&&result.desktopAction){const current=desktopActions.find(item=>item.id===result.desktopAction.id);if(current)result={...result,desktopAction:current};}const failed=action.status==='failed'||!!action.error||!!result.error;let text;
     if(failed){const error=result.error||action.error;text=(labels[action.tool]||toolLabel(action.arguments?.name||action.tool)||'Action')+' · could not finish: '+(typeof error==='string'?error:error?.message||'Unknown error');}
     else if(result.desktopAction){if(!historical)ingestDesktopResult(result);text=(desktopPending(result.desktopAction)?(historical?'Prepared desktop action · ':'Needs your review · '):DESKTOP_LABELS[result.desktopAction.status]+' · ')+result.desktopAction.summary;}
     else if(result.desktopReceipt){if(!historical)ingestDesktopResult(result);text=result.desktopReceipt.summary;}
     else if(result.capability)text=toolLabel(result.capability.name||action.arguments?.name||action.tool)+' · completed';
+    else if(result.workJob)text=(action.arguments?.action==='start'?'Work handed off':historical?'Work record':'Work · '+workStatusLabel(result.workJob))+' · '+(result.workJob.title||'Open its saved status');
     else if(result.featureJob)text=historical?'Feature build requested · check build history for its current state':'Feature build started · '+(JOB_LABELS[result.featureJob.status]||result.featureJob.status);
     else if(result.task)text=(labels[action.tool]||'Task updated')+' · '+result.task.title;
     else if(result.note)text=(labels[action.tool]||'Note opened')+' · '+result.note.title;
@@ -899,6 +980,7 @@ function renderActionReceipts(container,actions,{historical=false,nested=false}=
     else if(result.formatted)text=result.formatted;
     else text=action.summary||result.summary||result.message||labels[action.tool]||action.tool||'Action completed';
     const receipt=element('div','action-receipt'+(failed?' receipt-failed':''),text);container.append(receipt);
+    if(result.workJob)appendWorkLink(receipt,result.workJob,{historical});
     if(!failed&&result.capability&&result.value)receipt.append(element('pre','capability-output',JSON.stringify(result.value,null,2).slice(0,4000)));
     if(!nested&&Array.isArray(result.hostActions))renderActionReceipts(receipt,result.hostActions,{historical,nested:true});
     if(!failed&&desktopPending(result.desktopAction))receipt.append(button('Review action ↗','quiet-button',()=>void openDesktopReview(result.desktopAction.id)));
@@ -930,6 +1012,8 @@ async function runCommand(value,options={}){
     if(result.windowContext&&selectedWindowContext?.id===result.windowContext.contextId){selectedWindowContext.window={...selectedWindowContext.window,title:result.windowContext.title||selectedWindowContext.window.title,appName:result.windowContext.appName||selectedWindowContext.window.appName};renderWindowContext();}
     clearAcceptedDraft(localChatTurn);if(result.workspace)applyWorkspace(result.workspace);else void refreshWorkspace().catch(error=>toast(error.message));
     for(const action of result.actions||[])ingestDesktopResult(action.result);
+    if(result.workJob)rememberWorkJob(result.workJob);
+    for(const action of result.actions||[])if(action.result?.workJob)rememberWorkJob(action.result.workJob);
     if(result.featureJob){const job=result.featureJob.job||result.featureJob;rememberJob(job);if(job.id){jobs=[job,...jobs.filter(item=>item.id!==job.id)];selectedJobId=job.id;renderJobs();}else refreshJobsSafely();}
     await refreshConversation();if(turn!==generation||!currentConversationContext(context))return;await speakText(result.text,turn);
   }catch(error){
@@ -1037,7 +1121,7 @@ async function localVoiceCommand(message,options={}){
   if(!options.voice)return false;const phrase=message.trim().toLowerCase().replace(/[.!?]+$/,'');
   if(['stop listening','microphone off','mic off','turn voice off','disable voice'].includes(phrase)){voiceSession?.disable();stopSpeech();$('question').value='';return true;}
   if(['stop','cancel','stop current work','cancel current work','stop everything'].includes(phrase)){void stopAllActivity(true,{global:true});$('question').value='';return true;}
-  const views={'show tasks':'tasks','open tasks':'tasks','show notes':'notes','open notes':'notes','show workflows':'workflows','open workflows':'workflows','show computer':'desktop','open computer':'desktop','show settings':'settings','open settings':'settings','show memory':'settings','open memory':'settings','show build':'build','open build':'build','build a feature':'build'};
+  const views={'show work':'work','open work':'work','show tasks':'tasks','open tasks':'tasks','show notes':'notes','open notes':'notes','show workflows':'workflows','open workflows':'workflows','show computer':'desktop','open computer':'desktop','show settings':'settings','open settings':'settings','show memory':'settings','open memory':'settings','show build':'build','open build':'build','build a feature':'build'};
   const featureMatch=/^(?:open|show) (?:the )?(?:(?:tool|feature) )?(.+)$/.exec(phrase),featureName=featureMatch?.[1],dynamicMatch=featureName&&[...extensions.values()].some(entry=>featureNames(entry).includes(normalizedFeatureName(featureName))),capabilityMatch=featureName&&toolCatalog.some(item=>item.kind==='capability'&&[item.title,item.name].some(value=>normalizedFeatureName(value)===normalizedFeatureName(featureName))),toolList=['show tools','open tools','list tools','show installed tools'].includes(phrase);
   const recognized=toolList||!!dynamicMatch||!!capabilityMatch||!!(featureName&&knownFeatureNames.has(normalizedFeatureName(featureName)))||/^(?:open|show) (?:the )?(?:tool|feature) /i.test(phrase)||['show chat','open chat','hide chat','close chat','new conversation','review desktop action','review computer action','close preview'].includes(phrase)||Object.hasOwn(views,phrase);if(!recognized)return false;
   if(!currentConversationContext(options.conversationContext)){$('question-error').textContent='The conversation changed. Repeat that command here.';voiceSession?.disable({remember:false});return true;}
@@ -1061,7 +1145,7 @@ $('read-aloud').addEventListener('change',()=>{$('settings-read-aloud').checked=
 document.addEventListener('visibilitychange',()=>{if(document.hidden){setVoiceVisible(false);if(voicePipeline||recording||microphoneOpening)cancelTurn(false,{preserveVoice:true});else{disableHandsFree();stopSpeech();}$('provider-key').value='';}else{void setVoiceVisible(true);void checkService();void refreshConversations({initialize:true,quiet:true});}});
 window.addEventListener('pagehide',event=>{setVoiceVisible(false);cancelTurn(false,{preserveVoice:true});if(!event.persisted)voiceSession?.destroy();extensionGeneration+=1;$('provider-key').value='';if(!event.persisted){destroyed=true;for(const unsubscribe of shellSubscriptions)if(typeof unsubscribe==='function')unsubscribe();}});
 window.addEventListener('pageshow',event=>{if(!event.persisted)return;destroyed=false;setBusy(false);setState('idle');updateVoiceHelp();void setVoiceVisible(true);void checkService();void loadExtensions();});
-initNativeShell();initVoiceSession();renderWindowContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();updateVoiceHelp();
+initNativeShell();initVoiceSession();renderWindowContext();renderConversationControls();renderDesktopStatus();renderDesktopActions();providerFormType();renderTasks();renderNotes();renderWorkflows();renderJobs();renderWork();updateVoiceHelp();
 void checkService();void loadExtensions();
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;renderFocus();if(jobs.some(job=>ACTIVE_JOBS.has(job.status))||currentView==='build')void refreshJobs().catch(error=>{$('build-error').textContent=error.message;});},2000);
 setInterval(()=>{if(!document.hidden&&!destroyed&&!operationBusy&&!runtimeReconnectPromise)void refreshWorkspace().catch(error=>{$('connection-label').textContent=error.message;});},5000);
@@ -1075,3 +1159,5 @@ setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;i
 setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;void refreshConversations({initialize:true,quiet:true});},12000);
 
 setInterval(()=>{if(destroyed||!selectedWindowContext)return;if(checkWindowContextExpiry()){cancelTurn(false);renderWindowContext();}},1000);
+
+setInterval(()=>{if(document.hidden||destroyed||runtimeReconnectPromise)return;if(currentView==='work'||workJobs.some(job=>WORK_ACTIVE.has(job.status)))void refreshWork({quiet:true});},2500);
