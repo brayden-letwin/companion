@@ -106,6 +106,12 @@ test('workspace recovery controls require review before generated code can affec
  assert.equal(job.status,'review_required');assert.equal(job.files[0].protected,true);await absent(path.join(f.root,file));
 });
 
+test('routine history controls require review before generated code can change exact receipt inspection',async t=>{
+ const file='src/workflow-history.mjs',f=await fixture(t,{complete:async()=>({summary:'Prepare reviewed routine history UI.',files:[{path:file,content:'export const historyPolicy = "review required";\n'}],tests:[]})});
+ const job=await finished(f.builder,(await f.builder.request({prompt:'Prepare changes to original routine-run inspection controls.',providerId:'synthetic',autoApply:true},OWNER)).id);
+ assert.equal(job.status,'review_required');assert.equal(job.files[0].protected,true);await absent(path.join(f.root,file));
+});
+
 function executablePatch(code='export function execute(args){return {total:args.value*2};}') {
   const capability={id:'double-value',title:'Double value',module:'./double-value.mjs',version:1,tool:{name:'cap_double_value',description:'Double one number.',parameters:{type:'object',properties:{value:{type:'integer'}},required:['value'],additionalProperties:false}},workflowAllowed:true,effectPolicy:'pure',acceptance:[{name:'Known result',arguments:{value:3},expected:{total:6}}]};
   return {summary:'Add one executable registered capability.',files:[{path:'server/capabilities/manifest.json',content:JSON.stringify({version:1,capabilities:[capability]})},{path:'server/capabilities/double-value.mjs',content:code}],tests:[]};
