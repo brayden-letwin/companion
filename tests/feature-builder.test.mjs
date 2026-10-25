@@ -48,6 +48,19 @@ async function finished(builder, id, statuses = ['applied', 'ready', 'review_req
 }
 async function absent(file) { await assert.rejects(access(file), { code: 'ENOENT' }); }
 
+test('project-search controls keep protected review after extraction',async t=>{
+  const file='src/project-file-search.mjs',f=await fixture(t,{complete:async()=>({summary:'Review the folder search controls.',files:[{path:file,content:'export const searchPolicy = "review required";\n'}],tests:[]})});
+  const job=await finished(f.builder,(await f.builder.request({prompt:'Prepare folder search controls.',providerId:'synthetic',autoApply:true},OWNER)).id);assert.equal(job.status,'review_required');assert.equal(job.reviewRequired,true);assert.equal(job.verification.passed,true);await absent(path.join(f.root,file));
+});
+
+test('the separate fixed project-search baseline retains original tests and cannot accept a weakened candidate copy',async t=>{
+  const f=await fixture(t),module='src/search-context-fixture.mjs',file='tests/project-files-search-context.test.mjs',original='export const actual=42;\n',check='import test from "node:test";import assert from "node:assert/strict";import{actual}from"../src/search-context-fixture.mjs";test("real original search behavior",()=>assert.equal(actual,42));\n';
+  await writeFile(path.join(f.root,module),original);await writeFile(path.join(f.root,file),check);let baseline=await f.builder.source(OWNER);
+  const positive=await finished(f.builder,(await f.builder.submitPatch({summary:'Check both complete frozen groups.',files:[{path:'README.md',content:'Synthetic documentation check.\n'}],baseHashes:{'README.md':null},autoApply:false},OWNER)).id);assert.equal(positive.status,'ready');for(const name of ['Existing trusted regression tests','Existing trusted project-search tests'])assert.equal(positive.verification.checks.find(item=>item.name===name)?.passed,true);
+  const files=[{path:module,content:'export const actual=41;\n'},{path:file,content:check.replace('actual,42','actual,41')}],bad=await finished(f.builder,(await f.builder.submitPatch({summary:'Try weakening search assertions.',files,baseHashes:Object.fromEntries(files.map(item=>[item.path,baseline.files.find(base=>base.path===item.path).hash])),autoApply:false},OWNER)).id);
+  assert.equal(bad.status,'failed');assert.equal(bad.verification.checks.find(item=>item.name==='Existing trusted regression tests')?.passed,true);assert.equal(bad.verification.checks.find(item=>item.name==='Existing trusted project-search tests')?.passed,false);await assert.rejects(f.builder.apply(bad.id,OWNER),{code:'feature_not_ready'});assert.equal(await readFile(path.join(f.root,module),'utf8'),original);assert.equal(await readFile(path.join(f.root,file),'utf8'),check);
+});
+
 test('a requested feature becomes real verified source, registered runtime behavior and retained rollback', async t => {
   const f = await fixture(t);
   const queued = await f.builder.request({ prompt: 'Add a focus timer panel', providerId: 'synthetic-codex' }, OWNER);

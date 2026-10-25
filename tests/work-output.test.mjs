@@ -7,6 +7,11 @@ const job=(status='completed')=>({requestId:'synthetic-work-request',status});
 const action=(index,result={})=>({id:'call-'+index,tool:'synthetic_tool',arguments:{index},result,status:'completed'});
 function turn(text,actions=[]){return{id:'synthetic-work-request',status:'completed',reply:{text,actions}};}
 
+test('a narrow Work page keeps original search identity, completeness and file hashes while omitting large snippets',()=>{
+  const search={projectId:randomUUID(),grantEpoch:1,searchId:randomUUID(),path:'',query:'PRIVATE_QUERY_MARKER',sourceTrust:'untrusted_project_search',snapshot:false,complete:false,scanHasMore:true,returned:20,stopReason:null,scanned:{directories:1,entries:20,files:20,bytes:20000},skipped:{protected:0,unavailable:0,binary:0,oversized:0},matches:Array.from({length:20},(_,index)=>({path:'note-'+index+'.txt',hash:'a'.repeat(64),line:index+1,readAt:'2026-10-25T12:00:00Z',snippet:'PRIVATE_SNIPPET_MARKER'+'😀'.repeat(180)}))};
+  const actual=turn('Actual search results.',[action(1,search)]),outcome=formatWorkOutcome(job(),actual,{maxBytes:16384});assert.equal(outcome.actions[0].resultTruncated,true);const retained=outcome.actions[0].result.projectFileSearch;assert.equal(retained.searchId,search.searchId);assert.equal(retained.complete,false);assert.equal(retained.scanHasMore,true);assert.equal(retained.files.length,20);assert.equal(retained.files[0].hash,'a'.repeat(64));assert.ok(!JSON.stringify(outcome).includes('PRIVATE_'));assert.ok(Buffer.byteLength(JSON.stringify(outcome))<=16384);assert.equal(actual.reply.actions[0].result.matches[0].snippet,search.matches[0].snippet);
+});
+
 test('actual reply text and action pages reconstruct without missing or duplicated receipts',()=>{
   const text=('A😀\\\n\"Z'.repeat(1300)),actions=Array.from({length:24},(_,index)=>action(index,{task:{id:randomUUID()},text:'receipt-'+index})),actual=turn(text,actions);
   let textOffset=0,actionOffset=0,reconstructed='',seen=[];

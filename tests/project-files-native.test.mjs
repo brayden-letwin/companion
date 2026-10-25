@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID,createHash} from 'node:crypto';
-import {mkdir,mkdtemp,writeFile,readFile,rm,stat,link,symlink,rename} from 'node:fs/promises';
+import {mkdir,mkdtemp,writeFile,readFile,rm,stat,link,symlink,rename,readdir} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
 import {createProjectFileNative} from '../server/project-files-native.mjs';
 
@@ -20,6 +20,10 @@ async function fixture(t){
   const common=relative=>({root:root.canonicalPath,rootIdentity:root.identity,path:relative,protectedRoots:[]});
   const mutation=relative=>{const operationId=randomUUID();return{...common(relative),operationId,editDirectory:path.join(dataDirectory,'project-files','edits',operationId)};};
   return{directory,project,dataDirectory,native,run,root,common,mutation};
+}
+
+async function seedDirectory(directory,count){
+  let next=0;await Promise.all(Array.from({length:32},async()=>{for(;;){const index=next++;if(index>=count)return;await writeFile(path.join(directory,`document-${String(index).padStart(5,'0')}.txt`),'SYNTHETIC_FILE_BODY_NOT_ENUMERATION_CONTEXT');}}));
 }
 
 test('the fixed picker compiles a visible owned chooser with a message loop, without a path argument or GUI test',WINDOWS,async t=>{
@@ -102,4 +106,102 @@ test('private prepare/commit barrier holds verified handles and cancellation can
     send({action:'cancel',target:'held-edit'});const cancelled=await next();assert.equal(cancelled.error.code,'request_cancelled');assert.notEqual(cancelled.error.outcomeUnknown,true);assert.equal(await readFile(target,'utf8'),'Before commit');
     const queued={...f.mutation('barrier.txt'),expectedHash:hash('Before commit'),content:'Must not dispatch'};const controller=new AbortController(),pending=f.native.run('write',queued,{signal:controller.signal});controller.abort();await assert.rejects(pending,{name:'AbortError'});assert.equal(await readFile(target,'utf8'),'Before commit');
   }finally{child.stdin.end();await exit;if(diagnostics)t.diagnostic(diagnostics);}
+});
+
+test('private directory pages traverse beyond 1000 names exactly once without exposing protected aliases or file bodies',WINDOWS,async t=>{
+  const f=await fixture(t);await seedDirectory(f.project,1205);await mkdir(path.join(f.project,'nested'));await writeFile(path.join(f.project,'Unicode 😀 café.txt'),'ANOTHER_SYNTHETIC_BODY');
+  await writeFile(path.join(f.project,'.env'),'SYNTHETIC_PRIVATE_SECRET');await writeFile(path.join(f.project,'credentials.json'),'SYNTHETIC_PRIVATE_SECRET');
+  const outside=path.join(f.directory,'outside');await mkdir(outside);await writeFile(path.join(outside,'canary.txt'),'OUTSIDE_SYNTHETIC_CANARY');await link(path.join(outside,'canary.txt'),path.join(f.project,'linked.txt'));
+  let junction=false;try{await symlink(outside,path.join(f.project,'junction'),'junction');junction=true;}catch(error){if(!['EPERM','EACCES'].includes(error.code))throw error;t.diagnostic('Host denied the synthetic junction; hardlink and protected-name checks remain actual.');}
+  const legacy=await f.run('list',f.common(''));assert.equal(legacy.scanLimit,1000);assert.equal(legacy.scanned,1000);assert.equal(legacy.truncated,true);
+  const entries=[],tokens=[],identities=new Set();let cursor,scanned=0,protectedCount=0;
+  do{
+    const result=await f.run('scanDirectory',{...f.common(''),...(cursor?{cursor}:{})});assert.equal(result.scanLimit,200);assert.ok(result.scanned>=0&&result.scanned<=200);assert.equal(result.scanned,result.entries.length+result.skipped.protected+result.skipped.unavailable);assert.equal(result.skipped.unavailable,0);
+    entries.push(...result.entries);scanned+=result.scanned;protectedCount+=result.skipped.protected;identities.add(result.directoryIdentity);assert.equal(result.hasMore,typeof result.nextCursor==='string');
+    if(result.nextCursor){assert.match(result.nextCursor,/^[a-f0-9-]{36}$/);assert.ok(!tokens.includes(result.nextCursor));tokens.push(result.nextCursor);}cursor=result.nextCursor;
+  }while(cursor);
+  assert.equal(entries.length,1207);assert.equal(new Set(entries.map(entry=>entry.path)).size,1207);assert.equal(scanned,1210+(junction?1:0));assert.equal(protectedCount,3+(junction?1:0));assert.equal(identities.size,1);
+  assert.ok(entries.some(entry=>entry.path==='Unicode 😀 café.txt'));assert.equal(entries.find(entry=>entry.name==='nested').kind,'directory');assert.ok(!JSON.stringify(entries).includes('SYNTHETIC_FILE_BODY'));assert.ok(!JSON.stringify(entries).includes(f.project));assert.ok(!entries.some(entry=>['.env','credentials.json','linked.txt','junction'].includes(entry.name)));
+  await assert.rejects(f.run('scanDirectory',{...f.common(''),cursor:tokens[0]}),{code:'project_scan_expired'});await rename(f.project,f.project+'-complete');await rename(f.project+'-complete',f.project);
+});
+
+test('native cursors bind their exact root and directory, consume once, and close without a live grant or path read',WINDOWS,async t=>{
+  const f=await fixture(t);await seedDirectory(f.project,401);await mkdir(path.join(f.project,'nested'));
+  const first=await f.run('scanDirectory',f.common(''));assert.equal(first.hasMore,true);
+  const next=await f.run('scanDirectory',{...f.common(''),cursor:first.nextCursor});assert.equal(next.hasMore,true);await assert.rejects(f.run('scanDirectory',{...f.common(''),cursor:first.nextCursor}),{code:'project_scan_expired'});
+  await assert.rejects(f.run('scanDirectory',{...f.common('nested'),cursor:next.nextCursor}),{code:'project_scan_conflict'});await assert.rejects(f.run('scanDirectory',{...f.common(''),cursor:next.nextCursor}),{code:'project_scan_expired'});
+  const wrongRoot=await f.run('scanDirectory',f.common(''));await assert.rejects(f.run('scanDirectory',{...f.common(''),rootIdentity:'different-original-root',cursor:wrongRoot.nextCursor}),{code:'project_scan_conflict'});
+  const held=await f.run('scanDirectory',f.common(''));assert.deepEqual(await f.run('closeScan',{cursor:held.nextCursor}),{closed:true});await rename(f.project,f.project+'-revoked');assert.deepEqual(await f.run('closeScan',{cursor:held.nextCursor}),{closed:true});
+  await assert.rejects(f.run('scanDirectory',{...f.common(''),cursor:held.nextCursor}),{code:'project_scan_expired'});await assert.rejects(f.run('closeScan',{cursor:randomUUID(),root:f.project}),{code:'invalid_project_input'});await rename(f.project+'-revoked',f.project);
+});
+
+test('directory moves, membership and same-name identity changes fail continuations without mixing snapshots',WINDOWS,async t=>{
+  const f=await fixture(t);await seedDirectory(f.project,205);await mkdir(path.join(f.project,'sub'));await seedDirectory(path.join(f.project,'sub'),205);
+  const moved=await f.run('scanDirectory',f.common('sub'));await rename(path.join(f.project,'sub'),path.join(f.project,'sub-held'));await assert.rejects(f.run('scanDirectory',{...f.common('sub'),cursor:moved.nextCursor}),{code:'project_directory_changed'});await rename(path.join(f.project,'sub-held'),path.join(f.project,'sub'));
+  const rootMoved=await f.run('scanDirectory',f.common(''));await rename(f.project,f.project+'-moved');await assert.rejects(f.run('scanDirectory',{...f.common(''),cursor:rootMoved.nextCursor}),{code:'project_directory_changed'});await rename(f.project+'-moved',f.project);
+  const first=await f.run('scanDirectory',f.common('sub'));await writeFile(path.join(f.project,'sub','added.txt'),'NEW_SYNTHETIC_MEMBER');await assert.rejects(f.run('scanDirectory',{...f.common('sub'),cursor:first.nextCursor}),{code:'project_directory_changed'});await rename(path.join(f.project,'sub'),path.join(f.project,'sub-after'));await rename(path.join(f.project,'sub-after'),path.join(f.project,'sub'));
+  const second=await f.run('scanDirectory',f.common(''));const replaced=path.join(f.project,'document-00204.txt');await rename(replaced,path.join(f.directory,'old-identity.txt'));await writeFile(replaced,'SYNTHETIC_FILE_BODY_NOT_ENUMERATION_CONTEXT');
+  await assert.rejects(f.run('scanDirectory',{...f.common(''),cursor:second.nextCursor}),{code:'project_directory_changed'});await rename(f.project,f.project+'-released');await rename(f.project+'-released',f.project);
+});
+
+test('cancelling actual native enumeration and continuation releases cursors without creating edits or touching file bytes',WINDOWS,async t=>{
+  const f=await fixture(t);await seedDirectory(f.project,5000);
+  const controller=new AbortController(),pending=f.run('scanDirectory',f.common(''),{signal:controller.signal});const timer=setTimeout(()=>controller.abort(),15);
+  try{await assert.rejects(pending,error=>error.code==='request_cancelled');}finally{clearTimeout(timer);}
+  await rename(f.project,f.project+'-cancelled');await rename(f.project+'-cancelled',f.project);
+  const first=await f.run('scanDirectory',f.common(''));const stop=new AbortController(),continuation=f.run('scanDirectory',{...f.common(''),cursor:first.nextCursor},{signal:stop.signal});const secondTimer=setTimeout(()=>stop.abort(),15);
+  try{await assert.rejects(continuation,error=>error.code==='request_cancelled');}finally{clearTimeout(secondTimer);}
+  await rename(f.project,f.project+'-stopped');await rename(f.project+'-stopped',f.project);assert.deepEqual(await f.run('closeScan',{cursor:first.nextCursor}),{closed:true});
+  assert.equal(await readFile(path.join(f.project,'document-00000.txt'),'utf8'),'SYNTHETIC_FILE_BODY_NOT_ENUMERATION_CONTEXT');assert.deepEqual(await readdir(path.join(f.dataDirectory,'project-files')),['native-tmp']);
+});
+
+test('native cursor admission is bounded and helper closure releases every retained root handle',WINDOWS,async t=>{
+  const f=await fixture(t);await seedDirectory(f.project,201);const cursors=[];
+  for(let index=0;index<8;index++)cursors.push((await f.run('scanDirectory',f.common(''))).nextCursor);
+  await assert.rejects(f.run('scanDirectory',f.common('')),{code:'project_scan_busy'});
+  await f.run('closeScan',{cursor:cursors.pop()});cursors.push((await f.run('scanDirectory',f.common(''))).nextCursor);await f.native.close();await rename(f.project,f.project+'-closed');await rename(f.project+'-closed',f.project);
+});
+
+test('directory snapshot metadata refuses oversized admission instead of truncating or retaining handles',WINDOWS,async t=>{
+  const f=await fixture(t);await seedDirectory(f.project,8000);await assert.rejects(f.run('scanDirectory',f.common('')),{code:'project_scan_limit'});await rename(f.project,f.project+'-budget');await rename(f.project+'-budget',f.project);
+});
+
+test('idle native expiry disposes retained root and parent scopes through the real cleanup timer',WINDOWS,async t=>{
+  const f=await fixture(t);await mkdir(path.join(f.project,'sub'));await seedDirectory(path.join(f.project,'sub'),205);
+  const helper=path.join(f.directory,'expire-native-scan.ps1');
+  await writeFile(helper,`$ErrorActionPreference='Stop'
+$script=[IO.File]::ReadAllText($env:FIXTURE_BROKER)
+$start=$script.IndexOf("@'")+2
+$end=$script.IndexOf(([string][char]10)+"'@",$start)
+Add-Type -TypeDefinition $script.Substring($start,$end-$start) -ReferencedAssemblies 'System.Web.Extensions.dll'
+$init=@{id='init';action='init';fields=@{sourceRoot=$env:FIXTURE_SOURCE;dataDirectory=$env:FIXTURE_DATA}} | ConvertTo-Json -Compress
+$ready=[CompanionProjectFiles]::Dispatch($init) | ConvertFrom-Json
+if(!$ready.value.ready){throw 'Synthetic broker initialization failed.'}
+$frame=@{id='scan';action='scanDirectory';fields=($env:FIXTURE_FIELDS | ConvertFrom-Json)} | ConvertTo-Json -Compress
+$result=[CompanionProjectFiles]::Dispatch($frame) | ConvertFrom-Json
+if(!$result.value.hasMore){throw 'Synthetic scan did not retain its next page.'}
+$flags=[Reflection.BindingFlags]'NonPublic,Static'
+$scans=[CompanionProjectFiles].GetField('Scans',$flags).GetValue($null)
+$scan=$scans[$result.value.nextCursor]
+$type=$scan.GetType()
+$root=$type.GetField('RootScope').GetValue($scan)
+$parent=$type.GetField('DirectoryScope').GetValue($scan)
+foreach($scope in @($root,$parent)){foreach($handle in $scope.GetType().GetField('Handles').GetValue($scope)){if($handle.IsClosed){throw 'A retained scan handle closed early.'}}}
+[Console]::WriteLine('RETAINED')
+if([Console]::ReadLine() -ne 'expire'){throw 'Missing synthetic expiry step.'}
+# Move only this synthetic cursor's expiry into the past; the production timer and
+# original dispose path run unchanged, without waiting ten real minutes.
+$type.GetField('ExpiresAt').SetValue($scan,[DateTime]::UtcNow.AddSeconds(-1))
+$deadline=[DateTime]::UtcNow.AddSeconds(5)
+while(!$type.GetField('Disposed').GetValue($scan) -and [DateTime]::UtcNow -lt $deadline){[Threading.Thread]::Sleep(25)}
+if(!$type.GetField('Disposed').GetValue($scan) -or $scans.Count -ne 0){throw 'Native idle expiry did not retire its scan.'}
+foreach($scope in @($root,$parent)){foreach($handle in $scope.GetType().GetField('Handles').GetValue($scope)){if(!$handle.IsClosed){throw 'Native idle expiry retained an ancestor handle.'}}}
+[Console]::WriteLine('EXPIRED_DISPOSED')
+`);
+  const child=spawn(path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',helper],{shell:false,windowsHide:true,env:{SystemRoot:process.env.SystemRoot,FIXTURE_BROKER:path.join(APP,'scripts','project-files-bridge.ps1'),FIXTURE_SOURCE:APP,FIXTURE_DATA:f.dataDirectory,FIXTURE_FIELDS:JSON.stringify(f.common('sub'))},stdio:['pipe','pipe','pipe']});
+  const lines=[],waiters=[];let buffer='',diagnostic='';child.stdout.on('data',chunk=>{buffer+=chunk;for(;;){const index=buffer.indexOf('\n');if(index<0)break;const line=buffer.slice(0,index).trim();buffer=buffer.slice(index+1);if(waiters.length)waiters.shift()(line);else lines.push(line);}});child.stderr.on('data',chunk=>{diagnostic+=chunk;});
+  const exit=new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',resolve);});
+  const next=()=>Promise.race([lines.length?Promise.resolve(lines.shift()):new Promise(resolve=>waiters.push(resolve)),exit.then(code=>{throw new Error('Synthetic expiry helper exited before proof: '+code+' '+diagnostic);})]);
+  try{assert.equal(await next(),'RETAINED');child.stdin.end('expire\n');assert.equal(await next(),'EXPIRED_DISPOSED');assert.equal(await exit,0,diagnostic);}
+  finally{if(child.exitCode===null){child.stdin.end();await exit;}}
 });

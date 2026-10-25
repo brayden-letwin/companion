@@ -139,6 +139,12 @@ test('history retains complete bounded pairs and summarized historical receipts 
   assert.equal(result.length,2);assert.equal(result[0].role,'user');assert.equal(result[1].role,'assistant');assert.match(result[1].content,/Historical action receipts/);assert.match(result[1].content,new RegExp(taskId));assert.match(result[1].content,new RegExp(contextId));assert.ok(!result[1].content.includes('HISTORICAL SOURCE MUST BE OMITTED'));assert.ok(!result[1].content.includes('X'.repeat(1000)));
 });
 
+test('history projection preserves all observed search-file hashes from an already compacted stored result',()=>{
+  const projectId=randomUUID(),searchId=randomUUID(),files=Array.from({length:20},(_,index)=>({path:'observed-'+index+'.txt',hash:index.toString(16).padStart(64,'0'),line:index+1})),search={projectId,grantEpoch:1,searchId,path:'',sourceTrust:'untrusted_project_search',sourceOmitted:true,snapshot:false,complete:false,scanHasMore:true,returned:20,stopReason:null,scanned:{directories:2,entries:40,files:20,bytes:12000},skipped:{protected:1,unavailable:0,binary:0,oversized:0},files};
+  const actions=[{id:'search',tool:'run_capability',status:'completed',result:{projectFileSearch:search}},{id:'large',tool:'other_tool',status:'completed',result:{text:'PRIVATE_RAW_HISTORY'.repeat(2000)}}],history=conversationHistory({turns:[{id:'old',message:'Earlier bounded search',status:'completed',reply:{text:'Observed search results.',actions}}]},'new');
+  const text=history[1].content;assert.ok(text.includes(searchId));assert.ok(text.includes('"complete":false'));assert.ok(text.includes('"scanHasMore":true'));for(const file of files){assert.ok(text.includes(file.path));assert.ok(text.includes(file.hash));}assert.ok(!text.includes('PRIVATE_RAW_HISTORY'));assert.equal(search.files.length,20);
+});
+
 test('independent conversations can progress concurrently and callback failures do not erase committed work',async t=>{
   const entered=deferred(),release=deferred();let count=0;
   const f=await fixture(t,{complete:async()=>{if(++count===2)entered.resolve();await release.promise;return{text:'Concurrent synthetic answer.',toolCalls:[]};}});
