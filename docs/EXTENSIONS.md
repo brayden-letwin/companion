@@ -2,6 +2,8 @@
 
 The feature builder edits JavaScript, HTML and CSS in an isolated copy of the source tree. It uses the selected model through `complete({providerId,messages,system,schema,signal,onEvent})`. The response is JSON containing a short `summary`, `files: [{path,content}]` with complete file contents, and a `tests` array of short descriptions (`[]` when none). All three fields are required by the strict model schema. Test descriptions are informational and never become commands. New tests can be supplied as actual source files.
 
+For functionality that voice/chat, workflows, panels, and MCP must all call, implement a real executable capability using [CAPABILITIES.md](CAPABILITIES.md). The panel is an optional interface to that same action. Registering `mount()` alone does not make its behavior callable by the assistant.
+
 ## Runtime panel contract
 
 The frontend host loads `src/features/manifest.json`:
@@ -14,6 +16,7 @@ The frontend host loads `src/features/manifest.json`:
       "id": "focus-timer",
       "title": "Focus timer",
       "description": "A small timer for a focused work session.",
+      "aliases": ["focus clock"],
       "module": "./features/focus-timer.mjs"
     }
   ]
@@ -22,16 +25,28 @@ The frontend host loads `src/features/manifest.json`:
 
 IDs start with a lowercase letter and contain at most 60 lowercase letters, digits or hyphens. Module paths have exactly the form `./features/<id>.mjs`, relative to the host in `src/`. Keep prior entries when adding a feature.
 
+Put title, description, optional `aliases`, and optional `capabilityId` on the manifest entry. Module-exported metadata is not a registration. Aliases contain at most twelve nonempty strings of at most 120 characters and support local commands such as “open focus clock”. A capability's optional `featureId` matches the panel's `id`; the panel's `capabilityId` matches the capability ID. Opening a panel does not run its action. Unknown, duplicate, and failed installations show an unavailable or selection state. Keep the initial white voice canvas and bottom function strip; panels belong in More and their supplied container.
+
 A module exports a named `mount` function. Create DOM state within mount rather than during import, and return cleanup for timers, listeners, observers and other resources:
 
 ```js
 export function mount({ container, api }) {
   const button = document.createElement('button');
   button.textContent = 'Start a focus session';
-  const start = () => { button.textContent = 'Focus session started'; };
+  let disposed = false;
+  const start = async () => {
+    button.disabled = true;
+    try {
+      const receipt = await api.runTool('start_focus', { minutes: 25, label: 'Focused work' });
+      if (!disposed) button.textContent = receipt.result.focus ? 'Focus session started' : 'No focus session returned';
+    } catch (error) {
+      if (!disposed) button.textContent = error.message;
+    } finally { if (!disposed) button.disabled = false; }
+  };
   button.addEventListener('click', start);
   container.append(button);
   return () => {
+    disposed = true;
     button.removeEventListener('click', start);
     container.replaceChildren();
   };
@@ -40,13 +55,15 @@ export function mount({ container, api }) {
 
 `container` belongs to that feature. The host supplies `api.getWorkspace()` (a detached snapshot), `api.workspaceOperation(type, fields)`, `api.runTool(name, arguments)` and `api.notify(message)`. Operations and tools still pass through the server's validation and action rules. Do not assume Node, unrestricted computer control, credentials, filesystem access or a model connection. Do not issue hidden sends or claim to have performed an action that failed. Features share the app's browser origin and are application code, not independent security sandboxes.
 
+`api.runTool()` returns the actual HTTP envelope `{tool,result,requestId,workspace}`. Builtins expose their result beneath `receipt.result`; a custom capability's computed value is `receipt.result.value`, with actual nested effects in `receipt.result.hostActions`. A failure can retain `error.hostActions` and `error.capability`; preserve and show meaningful partial effects rather than implying that failure undid them. For a registered custom action, call `api.runTool('cap_example', args)` instead of reproducing its behavior in the browser.
+
 The builder validates registrations and imports the modules to check their named export. Feature modules should therefore remain importable without a browser DOM. Put browser setup inside `mount`. Feature-specific Node tests may live at `src/features/<id>.test.mjs`; these supplement the original regression baseline.
 
 ## Build, preview, activate, undo
 
 1. Snapshot only recognized UTF-8 application source. Environment files, private data, logs, Git, dependencies and generated binaries are excluded. For larger repositories the model first selects relevant paths from a source inventory. It then receives complete selected files in lossless ordered line chunks, plus required extension/agent/manifest context. Messages stay under 90 KB each and the source context stays under 420 KB; omitted files remain listed. Replacing an existing file the model was not supplied is rejected. The full snapshot remains available for regression checks and source revision comparison.
 2. Generate complete source files into a private candidate. The live app is unchanged. Store file hashes and a full replacement unified diff.
-3. Check changed JavaScript syntax. Run the existing selected pure regression tests from original trusted copies; a patch cannot replace them with easier tests. Check feature registrations and any new feature tests. Checks use a fixed Node executable/arguments, restricted read/write directories, no child/worker/addon permissions, a whitelisted environment, a time limit and bounded output. A trusted preload outside the candidate initializes inherited stdio and then blocks/fixes ordinary networking globals and native networking exports before candidate imports: fetch, WebSocket, EventSource, HTTP(S), HTTP/2, TCP/TLS, UDP and DNS. Loopback services are blocked too. Network-dependent tests must mock transports. Additional trusted checks may be supplied by the host.
+3. Check changed JavaScript syntax. Run the existing selected pure regression tests from original trusted copies; a patch cannot replace them with easier tests. Check feature registrations and any new feature tests. A capability manifest also triggers actual guarded execution of its concrete acceptance cases, compared by the trusted host with fixture-only tool effects. Checks use a fixed Node executable/arguments, restricted read/write directories, no child/worker/addon permissions, a whitelisted environment, a time limit and bounded output. A trusted preload outside the candidate initializes inherited stdio and then blocks/fixes ordinary networking globals and native networking exports before candidate imports: fetch, WebSocket, EventSource, HTTP(S), HTTP/2, TCP/TLS, UDP and DNS. Loopback services are blocked too. Network-dependent tests must mock transports. Additional trusted checks may be supplied by the host.
 4. A passing routine frontend patch can activate automatically. Protected server/Electron/launcher/test/package/security edits and file deletion produce `review_required`; the concrete diff is available before an explicit Apply action.
 5. Activation compares the complete source revision again. If anything changed, the candidate becomes `conflict`. It never overwrites a later edit. Writers use a shared source-root filesystem lock, same-directory atomic replacements and a persisted backup journal. The lock includes a PID and nonce, is released only by its owner, and is reclaimed only after the operating system confirms that PID is absent. An unknown/permission-denied/live owner is never guessed stale; another writer waits briefly or receives a conflict response.
 6. Registered panels can refresh in the running workspace; reload for other frontend changes. Applying or rolling back reviewed worker-side server files schedules a managed worker restart after the HTTP response. Rollback rechecks activated file hashes, verifies a reverse candidate and restores retained files. Later edits to those files cause a conflict instead of being overwritten.
@@ -89,6 +106,8 @@ await builder.close();
 
 `request` and `submitPatch` return a persisted queued job immediately. Poll a job or the host's event endpoint for progress. `list` returns bounded summaries; `get` returns the selected job's source diffs, verification checks, protected-review state and retained events. Source content is opt-in; the default source manifest contains paths, SHA-256 hashes, byte counts and protected flags. `baseHashes` must include every patched path, with its current hash or `null` for a new file. Submission follows exactly the same verification, review, promotion and rollback lifecycle as model generation.
 
+An applied job's `providedFeatures` records which panels that build added or changed. It is historical metadata, not proof that a later build has retained or successfully mounted them. The interface verifies current panel readiness before offering Open. Existing older job records may use `installedFeatures`; treat that field with the same caution. Source activation, panel readiness, catalog availability, and successful execution are separate observations.
+
 The host must authenticate local browser/API requests and enforce exact Origin and CSRF checks on writes. The builder's `localOwner` identifies one local workspace across app restarts; it is not a cloud identity or a multi-tenant account. Keep builder storage private and outside ordinary source, never expose it as static assets, and do not log credentials or complete prompts containing personal information. Git publishing is deliberately separate.
 
 ## Local REST and MCP access
@@ -109,4 +128,4 @@ The source-editing routes are under `/api/assistant` on the running Companion or
 
 Direct API clients first obtain the local guest session from `GET /api/assistant/session`, retain its cookie and CSRF token, and send that exact origin and token with JSON writes. Do not bypass protected review by silently issuing Apply. Preserve a complete concrete candidate for the user's decision.
 
-The MCP facade calls this same running HTTP backend; it does not open a second source writer. Its feature tools are `companion_build_feature`, `companion_list_builds`, `companion_get_build` (`{id}`), `companion_apply_build` (`{id}`), `companion_rollback_build` (`{id}`), `companion_cancel_build` (`{id}`), `companion_source` (`{includeContent}`) and `companion_submit_patch` (the patch shape above). Related productivity tools are `companion_workspace`, `companion_run_tool`, `companion_chat` and `companion_connections`.
+The MCP facade calls this same running HTTP backend; it does not open a second source writer. Its feature tools are `companion_build_feature`, `companion_list_builds`, `companion_get_build` (`{id}`), `companion_apply_build` (`{id}`), `companion_rollback_build` (`{id}`), `companion_cancel_build` (`{id}`), `companion_source` (`{includeContent}`) and `companion_submit_patch` (the patch shape above). Related productivity tools include `companion_workspace`, `companion_list_tools`, `companion_run_tool`, `companion_chat`, saved-conversation tools, and `companion_connections`. `companion_list_tools` reads the same dynamic catalog used by workflows and panels. Voice/chat use the fixed `list_capabilities`/`run_capability` gateways to call custom actions without overflowing the provider's 32-tool limit; see [CAPABILITIES.md](CAPABILITIES.md).
