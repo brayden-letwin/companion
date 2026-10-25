@@ -33,6 +33,15 @@ async function fixture(t, handler = async () => response({ revision: 0, tasks: [
   return { server, input, messages, calls, request, notify, initialize, waitFor, outputText: () => outputText, errorText: () => errorText };
 }
 
+test('MCP retained candidate inspection uses a bounded optional attempt on the same read-only build tool',async t=>{
+ const id=randomUUID(),sent=[],f=await fixture(t,async(url,request)=>{sent.push({url,method:request.method});return response({buildId:id,number:1,status:'failed',files:[{path:'src/example.mjs',diff:'Retained diff'}],verification:{passed:false}});});await f.initialize();
+ const list=await f.request('tools/list'),definition=list.result.tools.find(item=>item.name==='companion_get_build');assert.equal(list.result.tools.length,23);assert.equal(definition.annotations.readOnlyHint,true);assert.equal(definition.inputSchema.properties.attempt.maximum,2);
+ for(const attempt of [0,3,'1',1.5,null])assert.equal((await f.request('tools/call',tool('companion_get_build',{id,attempt}))).error.code,-32602);
+ assert.equal(f.calls.length,0);
+ const result=await f.request('tools/call',tool('companion_get_build',{id,attempt:1}));assert.equal(result.result.structuredContent.number,1);assert.deepEqual(sent,[{url:ORIGIN+'/api/assistant/features/'+id+'/attempts/1',method:'GET'}]);
+ await f.request('tools/call',tool('companion_get_build',{id}));assert.deepEqual(sent.at(-1),{url:ORIGIN+'/api/assistant/features/'+id,method:'GET'});
+});
+
 test('MCP work handoff and paged inspection retain stable identities without rerunning status checks',async t=>{
   const sent=[],id=randomUUID(),providerId='synthetic-provider',f=await fixture(t,async(url,request)=>{sent.push({url,method:request.method,body:request.body?JSON.parse(request.body):undefined});return response(url.includes('/work?')?{jobs:[{id,status:'running'}],total:1,hasMore:false,nextOffset:null}:{job:{id,conversationId:id,status:url.endsWith('/cancel')?'cancelled':'running'}});});await f.initialize();
   const body={id,prompt:'Draft a synthetic outline in the background.',providerId};assert.equal((await f.request('tools/call',tool('companion_start_work',body))).result.isError,false);assert.deepEqual(sent.at(-1),{url:ORIGIN+'/api/assistant/work',method:'POST',body});

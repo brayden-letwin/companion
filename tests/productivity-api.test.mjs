@@ -37,6 +37,7 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
     async request(input, owner) { builderCalls.push({ type: 'request', input, owner }); const job = { id: randomUUID(), status: 'queued', summary: 'Synthetic feature', prompt: input.prompt, files: [], events: [] }; jobs.push(job); return job; },
     async list(owner) { builderCalls.push({ type: 'list', owner }); return jobs; },
     async get(id, owner) { builderCalls.push({ type: 'get', id, owner }); return jobs.find(job => job.id === id); },
+    async getAttempt(id,number,owner){builderCalls.push({type:'getAttempt',id,number,owner});if(!jobs.some(job=>job.id===id))throw Object.assign(new Error('No retained build.'),{statusCode:404,code:'feature_not_found'});return{buildId:id,number,status:'failed',summary:'Retained synthetic candidate.',files:[{path:'src/example.mjs',diff:'ACTUAL_RETAINED_DIFF'}],verification:{passed:false,checks:[{name:'Syntax',passed:false,output:'ACTUAL_RETAINED_FAILURE'}]}};},
     async source(owner, options) { builderCalls.push({ type: 'source', owner, options }); return { revision: 'synthetic-source-hash', files: [{ path: 'src/example.mjs', hash: 'synthetic-file-hash', ...(options.includeContent ? { content: 'export const example = true;' } : {}) }] }; },
     async sourceFile(owner,options){builderCalls.push({type:'sourceFile',owner,options});const content=options.path==='docs/notes & examples + 研究 # 100%.md'?'A😀B\r\nExact source text.':options.path==='src/example.mjs'?'export const example = true;\n':null;if(content===null)throw Object.assign(new Error('Source not found.'),{statusCode:404,code:'source_not_found'});return formatSourceFile({path:options.path,content,hash:createHash('sha256').update(content).digest('hex'),bytes:Buffer.byteLength(content)},options);},
     async submitPatch(input, owner) { builderCalls.push({ type: 'patch', input, owner }); return this.request({ prompt: 'External patch' }, owner); },
@@ -63,6 +64,20 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
   }
   return { app, store, router, tools, calls, jobs, builderCalls, origin, request, session, restart, runtimeCount: () => runtimeCount };
 }
+
+test('retained build attempts require a local session and only read the exact original candidate',async t=>{
+  const f=await fixture(t),id=randomUUID(),route='/api/assistant/features/'+id+'/attempts/1';
+  assert.equal((await f.request('GET',route)).status,401);assert.equal(f.runtimeCount(),0);
+  const user=await f.session();f.jobs.push({id,status:'review_required',files:[]});const before=f.store.snapshot();
+  const result=await f.request('GET',route,undefined,user);assert.equal(result.status,200);assert.equal(result.value.buildId,id);assert.equal(result.value.number,1);assert.equal(result.value.verification.passed,false);assert.equal(result.value.files[0].diff,'ACTUAL_RETAINED_DIFF');
+  assert.deepEqual(f.builderCalls.at(-1),{type:'getAttempt',id,number:1,owner:'local-workspace'});
+  const readCount=f.builderCalls.length;
+  for(const suffix of ['/0','/3','/01','/1?attempt=2','/1?owner=foreign'])assert.equal((await f.request('GET','/api/assistant/features/'+id+'/attempts'+suffix,undefined,user)).status,400);
+  assert.equal(f.builderCalls.length,readCount);assert.equal((await f.request('POST',route,{},user)).status,405);
+  assert.equal((await f.request('GET','/api/assistant/features/'+randomUUID()+'/attempts/2',undefined,user)).status,404);
+  assert.equal(f.builderCalls.some(call=>['request','apply','rollback','cancel'].includes(call.type)),false);assert.deepEqual(f.store.snapshot(),before);
+  const module=await fetch(f.origin+'/src/build-attempts.mjs');assert.equal(module.status,200);assert.match(module.headers.get('content-type'),/javascript/);
+});
 
 async function capabilityFixture(t, {workspace=false,code}={}) {
   const root=await mkdtemp(path.join(tmpdir(),'companion-api-capability-')),directory=path.join(root,'server','capabilities');await mkdir(directory,{recursive:true});
