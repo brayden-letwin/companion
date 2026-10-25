@@ -10,7 +10,11 @@ Companion's current direction is a minimal general productivity assistant in the
 - [x] Native compact/expanded views, named window controls, tray and actual global-shortcut availability, plus own-app relaunch.
 - [x] Scoped Windows app search/open, window list/focus/read, frozen input proposals, explicit human review, and real receipts.
 - [x] Exact local human voice/typed approval bound to the current preview; model output cannot approve actions.
-- [x] Minimal neutral black workspace with white outlines, clear labels, and persistent tasks, notes, workflows, activity, and visible focus state.
+- [x] Persistent tasks, notes, workflows, activity, and visible focus state, with functional views retained behind a minimal main experience.
+- [x] Almost blank white voice canvas, small bottom tool strip, and hidden Chat fallback.
+- [x] Opt-in local speech detection, quiet discard, remembered granted-permission restore, and one capture owner across same-profile app windows.
+- [x] Retained conversations shared across Companion windows and MCP clients, revision guards, partial action checkpoints, explicit interruption, and bounded earlier-message pages.
+- [x] Reviewable explicitly taught preferences with archiving/reteaching; preferences shape context and never grant action permission.
 - [x] Direct task/note editing, completion/reopening, note archiving, and search.
 - [x] Real allowlisted tools read and change the saved workspace; responses carry actual receipts.
 - [x] Explicit reusable workflows execute supported actions in order and report completed steps or failure.
@@ -39,6 +43,8 @@ The app can edit its own application source. It does not instantly acquire arbit
 - [ ] Validate OpenAI API and a custom compatible endpoint with real account access.
 - [ ] Test the MCP facade from real external Codex and Claude clients; verify their action receipts and source-change lifecycle.
 - [x] User reported basic voice success; this does not independently verify native relaunch or spoken approval.
+- [x] Real MCP-to-app saved conversation continuity through GPT, reload, and managed restart; real GPT preference save plus Memory archive/restore.
+- [ ] Check the new automatic speech-detection mode with human speech; old manual-flow success does not establish it.
 - [x] Live native corner bounds/toggle and GPT installed-app search/open-Calculator chain checked on QA.
 - [x] Verify real GPT-prepared Notepad text input through frozen preview, human button approval, and actual editor contents.
 - [ ] Validate exact human voice approval on a live target.
@@ -58,7 +64,7 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 - [ ] Expose newly registered tool capabilities consistently to chat, workflows, extensions, and external AI clients.
 - [ ] Add acceptance checks for generated interactions, not just syntax and module loading.
 - [ ] Make missing-capability requests produce useful, scoped plans, with progress that reflects actual work.
-- [ ] Add project organization, better task scheduling, and durable conversation/context where real use needs them.
+- [ ] Add project organization and better task scheduling; extend the retained conversation/context foundation where real use needs it.
 - [ ] Improve workflow editing and failure recovery while keeping each action's outcome visible.
 - [ ] Add export, backup, restore, and migration for productivity data and build history.
 - [ ] Keep the main interface simple as new tools are added; test whether people can find and use them by voice.

@@ -2,24 +2,29 @@ COMPANION — START HERE
 
 1. Double-click Start Companion.cmd in this folder.
    It starts Companion and prefers the native corner when installed.
-   Its Show workspace control opens Today; otherwise the browser opens.
+   Its Show workspace control opens the white voice canvas.
    No reading-group account is needed.
 
-2. Type what you want to get done.
+2. Choose Enable voice once to grant microphone access.
+   Speak, then pause. Companion detects speech while it is listening.
+   The small bottom strip opens tools; Chat reveals typing and conversation.
    Try: Add a task to plan my week.
         Save a note: the next meeting needs an agenda.
         Start 25 minutes of focus time.
    You can also edit Tasks and Notes directly.
    Computer can search/open apps and read a window you choose.
 
-3. Use the AI selector at the top.
+3. Open Settings to choose an AI connection.
    This development PC has a working Codex / ChatGPT sign-in.
    Settings can connect GPT API, Claude API, a compatible API, or local Ollama.
    Enter API keys only in the app's password field, never in chat.
 
 VOICE
-Tap the mic to start; tap again to finish. Cancel stops the current request.
-Hands-free is optional and turns off when you switch tabs.
+Enable voice starts an opt-in speech session with a visible listening state.
+Quiet periods stay local. Voice pauses while Companion works or speaks.
+Turn voice off forgets the opt-in. Hiding the app stops capture; a visible app
+can resume a remembered session only when microphone permission is granted.
+Chat keeps manual recording and typing available. Stop cancels current work.
 Voice needs the local transcription service. Typing still works without it.
 The user reported basic voice success; spoken desktop approval still needs testing.
 Ctrl+Alt+Space toggles the corner when available. Ctrl+Alt+Escape is global Stop.
@@ -48,7 +53,9 @@ needs rebuilding to include repository changes.
 
 NEXT TIME
 Double-click the same launcher. Your tasks, notes, workflows, and build history
-are saved on this computer, outside the source repository.
+are saved on this computer, outside the source repository. Saved conversations
+and taught preferences also survive restart. Chat opens earlier conversations.
+Only sent turns are saved; keep unsent drafts before closing a window.
 The full workspace address is http://127.0.0.1:4174/assistant.html.
 Use scripts/start-companion.ps1 -Browser for the browser-only launch path.
 npm run desktop:legacy preserves the old math reader.
@@ -58,6 +65,13 @@ Codex uses its existing CLI sign-in; API providers need your own key and access.
 Claude and other API-key accounts have not been live-tested on this PC yet.
 Settings → Connect AI tools shows MCP configuration to copy into another client;
 it does not change that client’s settings automatically.
+
+LEARNING WITH YOU
+Say “remember that I prefer short replies and concrete examples.”
+Settings and memory shows what was retained. Forget archives a preference;
+Show forgotten preferences and Remember again restore it.
+Learning a preference does not change code. Ask for a missing capability to
+start the real feature builder, with checks, visible progress, and rollback.
 
 EARLIER READING TOOLS
 Reading room and Group room remain secondary links. Their existing discussion
