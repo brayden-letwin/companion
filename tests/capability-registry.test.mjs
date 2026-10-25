@@ -42,7 +42,7 @@ test('strict recursive schemas enforce nested types, enums, bounds and reject un
 
 test('catalog stays public and provider definitions stay bounded while the actual guarded executor serves direct and gateway calls',async t=>{
   const f=await fixture(t),capabilities=await loadCapabilities(f),store=await createProductivityStore({dataDirectory:path.join(f.root,'private')});f.track(()=>store.close());
-  const tools=createProductivityTools({store,root:f.root,capabilities});assert.equal(tools.definitions.length,22);assert.equal(tools.definitions.some(item=>item.name==='cap_word_count'),false);
+  const tools=createProductivityTools({store,root:f.root,capabilities});assert.equal(tools.definitions.length,24);assert.equal(tools.definitions.some(item=>item.name==='cap_word_count'),false);
   const publicData=JSON.stringify(tools.catalog());assert.ok(!publicData.includes('modulePath'));assert.ok(!publicData.includes('"acceptance":'));assert.ok(!publicData.includes(f.root));
   const context={requestId:'count-original',callId:'one'};const first=await tools.execute('cap_word_count',{text:'one two three'},context);assert.equal(first.value.words,3);assert.deepEqual(first.hostActions,[]);
   const gateway=await tools.execute('run_capability',{name:'cap_word_count',arguments:{text:'one two three'}},context);assert.equal(gateway.value.words,3);assert.equal(gateway.replayed,true);
@@ -69,4 +69,15 @@ test('capability wrappers retain only actual broker receipts, never child-suppli
   for(let index=0;index<2;index++)await assert.rejects(tools.execute('cap_word_count',{text:'one'},context),error=>error.code==='synthetic_failure'&&error.hostActions.length===1&&error.hostActions[0].tool==='create_task'&&error.hostActions[0].result.task.id===store.snapshot().tasks[0].id);
   assert.equal(runs,1);assert.equal(store.snapshot().tasks.length,1);
   const unavailable=createProductivityTools({store,capabilityStatus:{ready:false,unavailableReason:'Synthetic registry failure'}});assert.equal((await unavailable.execute('list_capabilities')).unavailableReason,'Synthetic registry failure');
+});
+
+test('an actual guarded capability reads task sections and complete summaries through the new approved broker tools',async t=>{
+  const fixtureTaskId=randomUUID(),parameters={type:'object',properties:{taskId:{type:'string',minLength:36,maxLength:36}},required:['taskId'],additionalProperties:false};
+  const record=entry({title:'Actual task overview',effectPolicy:'workspace',tool:{name:'cap_word_count',description:'Read actual task counts and a requested detail section.',parameters},acceptance:[{name:'Uses approved task reads',arguments:{taskId:fixtureTaskId},expected:{totalTasks:2,openTasks:1,detailChars:15,hasFullEnd:true,hasMore:false,prototypeTotal:2},tools:[{name:'summarize_tasks',arguments:{},result:{totalTasks:2,openTasks:1,revision:7,projects:[{project:'__proto__',totalTasks:2}]}},{name:'read_task',arguments:{taskId:fixtureTaskId,offset:4000,limit:4000,expectedRevision:7},result:{task:{details:'FULL_DETAIL_END'},hasMore:false}}]}]});
+  const code='export async function execute(args,ctx){const summary=await ctx.runTool("summarize_tasks",{});const detail=await ctx.runTool("read_task",{taskId:args.taskId,offset:4000,limit:4000,expectedRevision:summary.revision});return {totalTasks:summary.totalTasks,openTasks:summary.openTasks,detailChars:detail.task.details.length,hasFullEnd:detail.task.details.endsWith("FULL_DETAIL_END"),hasMore:detail.hasMore,prototypeTotal:summary.projects.find(project=>project.project==="__proto__")?.totalTasks||0};}';
+  const f=await fixture(t,record,code),capabilities=await loadCapabilities(f),store=await createProductivityStore({dataDirectory:path.join(f.root,'private')});f.track(()=>store.close());let first;
+  for(let index=0;index<105;index++){const operationId=randomUUID();store.apply({operationId,expectedRevision:store.snapshot().revision,type:'addTask',title:'Actual task '+index,details:index===0?'D'.repeat(5000)+'FULL_DETAIL_END':'Small detail',project:index%2===0?'__proto__':'constructor'});if(index===0)first=operationId;}
+  const tools=createProductivityTools({store,root:f.root,capabilities}),before=store.snapshot(),result=await tools.execute('run_capability',{name:'cap_word_count',arguments:{taskId:first}},{requestId:'task-overview',callId:'one'});
+  assert.deepEqual(result.value,{totalTasks:105,openTasks:105,detailChars:1015,hasFullEnd:true,hasMore:false,prototypeTotal:53});assert.deepEqual(result.hostActions.map(action=>action.tool),['summarize_tasks','read_task']);assert.ok(result.hostActions.every(action=>action.status==='completed'));assert.deepEqual(store.snapshot(),before);
+  const replay=await tools.execute('cap_word_count',{taskId:first},{requestId:'task-overview',callId:'one'});assert.equal(replay.replayed,true);assert.deepEqual(replay.value,result.value);
 });

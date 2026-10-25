@@ -31,6 +31,7 @@ class Element {
   focus() {}
   scrollIntoView() {}
   remove() { this.removed = true; }
+  querySelectorAll(selector) { const matches = []; const visit = node => { for (const child of node.children) { if (selector.startsWith('.') && child.className?.split(/\s+/).includes(selector.slice(1))) matches.push(child); visit(child); } }; visit(this); return matches; }
   get childNodes() { return this.children; }
   get lastElementChild() { return this.children.at(-1); }
   get scrollHeight() { return 600; }
@@ -43,14 +44,14 @@ function createLocks() {
   return { request: async (name, options, callback) => { if (held.has(name)) return callback(null); held.add(name); try { return await callback({ name }); } finally { held.delete(name); } } };
 }
 
-async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], workspaceWorkflows = [], storedWorkflowRuns = [], catalog = [] } = {}) {
+async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], workspaceWorkflows = [], workspaceTasks = [], storedWorkflowRuns = [], catalog = [] } = {}) {
   const nodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(match => [match[1], new Element()]));
   nodes.get('provider-type').value = 'openai';
   const records = new Map(saved.map(item => [item.id, structuredClone(item)]));
   const storage = new Map(selected ? [['companion.workspace.ui.v1.conversationId', JSON.stringify(selected)]] : []);
   if (storedWorkflowRuns.length) storage.set('companion.workspace.ui.v1.pendingWorkflowRuns', JSON.stringify(storedWorkflowRuns));
   const requests = [], intervals = [], timers = new Set();
-  const workspace = { revision: 0, tasks: [], notes: [], workflows: structuredClone(workspaceWorkflows), preferences: structuredClone(workspacePreferences), focus: null, activity: [] };
+  const workspace = { revision: 0, tasks: structuredClone(workspaceTasks), notes: [], workflows: structuredClone(workspaceWorkflows), preferences: structuredClone(workspacePreferences), focus: null, activity: [] };
   let custom = intercept, permission = null, stoppedTracks = 0;
   const provider = { id: 'codex', type: 'codex', label: 'GPT', model: '', ready: true };
   const dialogs = [...html.matchAll(/<dialog\b[^>]*\bid="([^"]+)"/g)].map(match => nodes.get(match[1]));
@@ -99,7 +100,7 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
   }
   const window = { MediaRecorder: Recorder, AudioContext, addEventListener() {} };
   const context = vm.createContext({ createVoiceSession, window, document, navigator: { locks, permissions: { query: async () => ({ state: 'granted' }) }, mediaDevices: { getUserMedia: () => { permission = deferred(); return permission.promise; } } }, MediaRecorder: Recorder, fetch: fetchMock, Headers, AbortController, Blob, URL, URLSearchParams, DOMException, crypto: webcrypto, structuredClone, performance, console, localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) }, location: { search: '', reload() {}, assign() {} }, Event: class {}, setTimeout: (callback, milliseconds) => { const timer = setTimeout(callback, milliseconds); timer.unref(); timers.add(timer); return timer; }, clearTimeout, setInterval: callback => { intervals.push(callback); return intervals.length; }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} });
-  vm.runInContext(source + '\nglobalThis.ui={ready:()=>checkingService,selectConversation,refreshConversations,refreshConversation,loadEarlierConversation,runCommand,cancelTurn,startRecording,setVoiceVisible,renderSavedConversation,rememberDesktopAction,captureConversationContext,setChatOpen,showDialog,openDesktopReview,addMessage,processVoiceSegment,refreshToolCatalog,applyToolCatalog,applyExtensionManifest,openFeatureByName,openWorkflow,renderWorkflowSteps,validateWorkflowSteps,runWorkflow,renderActionReceipts,appendInstalledFeatureReady,refreshJobs,setExtensionLoader:loader=>loadExtensionModule=loader,get:()=>({id:conversationId,detail:conversationDetail,localChatTurn,turnBusy,recording,voiceState:voiceSessionState,chatOpen,currentView,ownsVoice:voiceOwnsCapture,initial:conversationInitialized,listPending:!!conversationListPending,detailPending:!!conversationDetailRequest,desktop:desktopActions,workflowDraft,toolCatalog,extensions:[...extensions.values()],workspace})};', context);
+  vm.runInContext(source + '\nglobalThis.ui={ready:()=>checkingService,selectConversation,refreshConversations,refreshConversation,loadEarlierConversation,runCommand,cancelTurn,startRecording,setVoiceVisible,renderSavedConversation,rememberDesktopAction,captureConversationContext,setChatOpen,showDialog,openDesktopReview,addMessage,processVoiceSegment,refreshToolCatalog,applyToolCatalog,applyExtensionManifest,openFeatureByName,openWorkflow,renderWorkflowSteps,validateWorkflowSteps,runWorkflow,renderActionReceipts,appendInstalledFeatureReady,refreshJobs,refreshWorkspace,setExtensionLoader:loader=>loadExtensionModule=loader,get:()=>({id:conversationId,detail:conversationDetail,localChatTurn,turnBusy,recording,voiceState:voiceSessionState,chatOpen,currentView,ownsVoice:voiceOwnsCapture,initial:conversationInitialized,listPending:!!conversationListPending,detailPending:!!conversationDetailRequest,desktop:desktopActions,workflowDraft,toolCatalog,extensions:[...extensions.values()],workspace})};', context);
   await context.ui.ready();
   if (waitForConversations) await until(() => !context.ui.get().listPending && !context.ui.get().detailPending, 'initial conversation load');
   return { ui: context.ui, nodes, records, storage, requests, document, intervals, setIntercept: value => { custom = value; }, get waitingForMicrophone() { return !!permission; }, grantMicrophone: () => { const pending = permission; permission = null; pending.resolve({ getTracks: () => [{ stop: () => stoppedTracks++ }] }); }, get stoppedTracks() { return stoppedTracks; }, close: () => { context.ui.cancelTurn(false); for (const timer of timers) clearTimeout(timer); } };
@@ -514,5 +515,94 @@ test('long build requests and summaries stay out of headings while original crit
     await app.ui.refreshJobs(); await until(() => /Boundary cases verified/.test(app.nodes.get('job-detail').textContent));
     const updatedHeading = descendants(app.nodes.get('job-detail')).find(node => node.tagName === 'h2'); assert.ok(updatedHeading.textContent.length <= 84); assert.notEqual(updatedHeading.textContent, job.summary);
     assert.match(app.nodes.get('job-detail').textContent, /Activate feature/); assert.equal(descendants(app.nodes.get('job-detail')).find(node => node.className?.includes('job-original-request')).children[1].textContent, prompt);
+  } finally { app.close(); }
+});
+
+const taskId = number => '00000000-0000-4000-8000-' + number.toString(16).padStart(12, '0');
+const taskFixture = (number, overrides = {}) => ({ id: taskId(number), title: 'Task ' + number, details: '', project: '', status: 'todo', priority: 'normal', dueAt: null, createdAt: new Date(Date.UTC(2026, 0, 1, 0, number)).toISOString(), ...overrides });
+const visibleTaskIds = app => app.nodes.get('task-list').children.filter(node => node.className?.includes('task-row')).map(node => node.dataset.taskId);
+
+test('task search covers all saved title, details and project text beyond the first hundred displayed matches', async () => {
+  const old = taskFixture(1, { title: 'Old research task', details: 'Legacy integration marker', project: 'Archive research', createdAt: '2020-01-01T00:00:00Z' });
+  const tasks = [old, ...Array.from({ length: 124 }, (_, index) => taskFixture(index + 2, { priority: 'high' }))];
+  const app = await createUI({ workspaceTasks: tasks });
+  try {
+    assert.equal(visibleTaskIds(app).length, 50); assert.equal(app.nodes.get('tasks-results-count').textContent, 'Showing 50 of 125 matching tasks.');
+    app.nodes.get('tasks-sort').value = 'priority'; await app.nodes.get('tasks-sort').dispatch('change');
+    assert.equal(visibleTaskIds(app).includes(old.id), false);
+    for (const query of ['old research', 'legacy marker', 'archive research']) { app.nodes.get('tasks-search').value = query; await app.nodes.get('tasks-search').dispatch('input'); assert.deepEqual(visibleTaskIds(app), [old.id]); assert.equal(app.nodes.get('tasks-results-count').textContent, 'Showing 1 of 1 matching task.'); }
+    app.nodes.get('tasks-search').value = ''; await app.nodes.get('tasks-search').dispatch('input');
+    await app.nodes.get('tasks-show-more').dispatch('click'); assert.equal(visibleTaskIds(app).length, 100); assert.equal(app.nodes.get('tasks-results-count').textContent, 'Showing 100 of 125 matching tasks.');
+    assert.equal(app.nodes.get('tasks-show-more').textContent, 'Show 25 more'); await app.nodes.get('tasks-show-more').dispatch('click'); assert.equal(visibleTaskIds(app).length, 125); assert.equal(app.nodes.get('tasks-show-more').hidden, true);
+    app.nodes.get('tasks-sort').value = 'created'; await app.nodes.get('tasks-sort').dispatch('change'); assert.equal(visibleTaskIds(app).length, 50);
+  } finally { app.close(); }
+});
+
+test('project filters distinguish literal Unassigned and reserved-looking names from tasks with no project', async () => {
+  const tasks = [taskFixture(1), taskFixture(2, { project: null }), taskFixture(3, { project: 'Unassigned' }), taskFixture(4, { project: 'No project' }), taskFixture(5, { project: 'All projects' }), taskFixture(6, { project: '__proto__' })];
+  const app = await createUI({ workspaceTasks: tasks });
+  try {
+    const project = app.nodes.get('tasks-project');
+    project.value = 'none'; await project.dispatch('change'); assert.deepEqual(visibleTaskIds(app), [tasks[0].id, tasks[1].id]);
+    for (const name of ['Unassigned', 'No project', 'All projects', '__proto__']) { project.value = 'project:' + name; await project.dispatch('change'); assert.deepEqual(visibleTaskIds(app), [tasks.find(task => task.project === name).id]); }
+    assert.ok(project.children.some(option => option.value === 'none' && option.textContent === 'No project'));
+    assert.ok(project.children.some(option => option.value === 'project:No project' && option.textContent === 'No project (project)'));
+  } finally { app.close(); }
+});
+
+test('task sorts use creation order, high priority and due dates with undated tasks last', async () => {
+  const tasks = [taskFixture(5, { priority: 'high', dueAt: '2026-05-01T12:00:00Z' }), taskFixture(1), taskFixture(6, { createdAt: '2025-12-31T00:00:00Z' }), taskFixture(3, { priority: 'high', dueAt: '2026-05-01T12:00:00Z' }), taskFixture(2, { dueAt: '2026-05-10T12:00:00Z' }), taskFixture(4, { dueAt: 'invalid' })];
+  const app = await createUI({ workspaceTasks: tasks });
+  try {
+    assert.deepEqual(visibleTaskIds(app), [6, 1, 2, 3, 4, 5].map(taskId));
+    app.nodes.get('tasks-sort').value = 'priority'; await app.nodes.get('tasks-sort').dispatch('change'); assert.deepEqual(visibleTaskIds(app), [3, 5, 6, 1, 2, 4].map(taskId));
+    app.nodes.get('tasks-sort').value = 'due'; await app.nodes.get('tasks-sort').dispatch('change'); assert.deepEqual(visibleTaskIds(app), [3, 5, 2, 6, 1, 4].map(taskId));
+  } finally { app.close(); }
+});
+
+test('task filters and page size survive workspace updates and retain a project that no longer has tasks', async () => {
+  const tasks = Array.from({ length: 130 }, (_, index) => taskFixture(index + 1, { title: 'Shared task ' + index, project: 'Retained project', priority: 'high' }));
+  const app = await createUI({ workspaceTasks: tasks });
+  try {
+    app.nodes.get('tasks-project').value = 'project:Retained project'; await app.nodes.get('tasks-project').dispatch('change');
+    app.nodes.get('tasks-sort').value = 'priority'; await app.nodes.get('tasks-sort').dispatch('change'); app.nodes.get('tasks-search').value = 'shared'; await app.nodes.get('tasks-search').dispatch('input'); await app.nodes.get('tasks-show-more').dispatch('click');
+    app.nodes.get('new-task').value = 'An unsent task draft'; await app.nodes.get('task-list').children[0].children.at(-1).dispatch('click'); app.nodes.get('edit-text').value = 'An unsent edit draft';
+    app.setIntercept((url, options, { workspace }) => { if (!url.endsWith('/workspace')) return null; workspace.revision++; workspace.tasks = [taskFixture(500, { project: 'Other project' })]; return response(workspace); });
+    await app.ui.refreshWorkspace(); assert.equal(app.nodes.get('tasks-project').value, 'project:Retained project'); assert.equal(app.nodes.get('tasks-search').value, 'shared'); assert.equal(app.nodes.get('tasks-sort').value, 'priority'); assert.equal(app.nodes.get('tasks-results-count').textContent, 'Showing 0 of 0 matching tasks.');
+    assert.ok(app.nodes.get('tasks-project').children.some(option => option.value === 'project:Retained project' && /no tasks/.test(option.textContent)));
+    assert.equal(app.nodes.get('new-task').value, 'An unsent task draft'); assert.equal(app.nodes.get('edit-text').value, 'An unsent edit draft');
+    await app.nodes.get('edit-form').dispatch('submit', { preventDefault() {} }); assert.match(app.nodes.get('edit-error').textContent, /workspace changed/);
+    app.setIntercept((url, options, { workspace }) => { if (!url.endsWith('/workspace')) return null; workspace.revision++; workspace.tasks = tasks.slice(0, 120); return response(workspace); });
+    await app.ui.refreshWorkspace(); assert.equal(visibleTaskIds(app).length, 100); assert.equal(app.nodes.get('tasks-results-count').textContent, 'Showing 100 of 120 matching tasks.');
+  } finally { app.close(); }
+});
+
+test('filtered task completion and reopening still send actual workspace operations and update matching counts', async () => {
+  const task = taskFixture(1, { title: 'Focused task', project: 'Focus' }), app = await createUI({ workspaceTasks: [task] });
+  try {
+    const operations = [];
+    app.setIntercept((url, options, { workspace }) => { if (!url.endsWith('/workspace/operations')) return null; const body = JSON.parse(options.body); operations.push(body); workspace.tasks[0].status = body.type === 'completeTask' ? 'done' : body.status; workspace.revision++; return response({ workspace, replayed: false }); });
+    app.nodes.get('tasks-project').value = 'project:Focus'; await app.nodes.get('tasks-project').dispatch('change'); app.nodes.get('tasks-search').value = 'focused'; await app.nodes.get('tasks-search').dispatch('input');
+    await app.nodes.get('task-list').children[0].children[0].dispatch('click'); assert.equal(operations[0].type, 'completeTask'); assert.equal(operations[0].taskId, task.id); assert.equal(app.nodes.get('tasks-results-count').textContent, 'Showing 0 of 0 matching tasks.');
+    await app.nodes.get('toggle-completed').dispatch('click'); assert.deepEqual(visibleTaskIds(app), [task.id]); const reopen = app.nodes.get('task-list').children[0].children[0]; assert.match(reopen.attributes['aria-label'], /^Reopen task:/);
+    await reopen.dispatch('click'); assert.equal(operations[1].type, 'updateTask'); assert.equal(operations[1].status, 'todo'); assert.equal(app.nodes.get('tasks-project').value, 'project:Focus'); assert.equal(app.nodes.get('tasks-search').value, 'focused'); assert.equal(app.nodes.get('tasks-results-count').textContent, 'Showing 1 of 1 matching task.');
+  } finally { app.close(); }
+});
+
+test('long task details use a short preview and exact full-text disclosure that survives refresh and remains searchable and editable', async () => {
+  const full = '<script>literal text</script>\n' + 'Detailed requirements and spaces  '.repeat(160) + '\nTail-only marker: final-criteria-742.';
+  const task = taskFixture(1, { title: 'Long task', details: full }), app = await createUI({ workspaceTasks: [task, taskFixture(2)] });
+  try {
+    const row = app.nodes.get('task-list').children[0], preview = descendants(row).find(node => node.className === 'task-details'), disclosure = descendants(row).find(node => node.className === 'task-details-disclosure');
+    assert.ok(preview.textContent.length <= 240); assert.match(preview.textContent, /…$/); assert.doesNotMatch(preview.textContent, /final-criteria-742/);
+    assert.equal(disclosure.open, false); assert.equal(disclosure.children[0].textContent, 'Read all details'); assert.equal(disclosure.children[0].attributes['aria-label'], 'Read all details for task: Long task'); assert.equal(disclosure.children[1].textContent, full);
+    assert.equal(descendants(row).some(node => node.tagName === 'script'), false);
+    disclosure.open = true;
+    app.setIntercept((url, options, { workspace }) => { if (!url.endsWith('/workspace')) return null; workspace.revision++; return response(workspace); });
+    await app.ui.refreshWorkspace(); let current = descendants(app.nodes.get('task-list')).find(node => node.className === 'task-details-disclosure'); assert.equal(current.open, true); assert.equal(current.children[1].textContent, full);
+    current.open = false; await current.dispatch('toggle'); app.nodes.get('tasks-search').value = 'final-criteria-742'; await app.nodes.get('tasks-search').dispatch('input');
+    assert.deepEqual(visibleTaskIds(app), [task.id]); current = descendants(app.nodes.get('task-list')).find(node => node.className === 'task-details-disclosure'); assert.equal(current.open, false);
+    await app.nodes.get('task-list').children[0].children.at(-1).dispatch('click'); assert.equal(app.nodes.get('edit-text').value, full);
+    assert.equal(app.requests.filter(request => request.method === 'POST' && request.url.endsWith('/workspace/operations')).length, 0);
   } finally { app.close(); }
 });

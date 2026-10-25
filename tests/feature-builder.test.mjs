@@ -160,6 +160,16 @@ test('syntax and existing behavior failures leave live source unchanged', async 
   }
 });
 
+test('generated edits cannot remove the original task-query regression check before changing its behavior',async t=>{
+  const patch={summary:'A synthetic attempt to change task-query behavior and weaken its test.',files:[{path:'server/task-queries.mjs',content:'export const countsAreComplete = false;\n'},{path:'tests/task-queries.test.mjs',content:'import test from "node:test";test("weakened candidate test",()=>{});\n'}],tests:[]};
+  const f=await fixture(t,{complete:async()=>patch});
+  await writeFile(path.join(f.root,'server/task-queries.mjs'),'export const countsAreComplete = true;\n');
+  await writeFile(path.join(f.root,'tests/task-queries.test.mjs'),'import test from "node:test";import assert from "node:assert/strict";import{countsAreComplete}from"../server/task-queries.mjs";test("task counts remain complete",()=>assert.equal(countsAreComplete,true));\n');
+  const job=await finished(f.builder,(await f.builder.request({prompt:'Prepare the requested task behavior change for review.',providerId:'synthetic'},OWNER)).id);
+  assert.equal(job.status,'failed');assert.equal(job.verification.passed,false);const original=job.verification.checks.find(check=>check.name==='Existing trusted regression tests');assert.equal(original.passed,false);assert.match(original.output,/task counts remain complete/);
+  assert.match(await readFile(path.join(f.root,'server/task-queries.mjs'),'utf8'),/countsAreComplete = true/);assert.match(await readFile(path.join(f.root,'tests/task-queries.test.mjs'),'utf8'),/task counts remain complete/);
+});
+
 test('candidate tests cannot read private files or inherited credentials', async t => {
   const secret = 'SYNTHETIC_BUILDER_SECRET';
   const f = await fixture(t);

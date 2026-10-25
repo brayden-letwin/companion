@@ -86,6 +86,32 @@ test('one shared budget bounds nested workflow capability effects and terminal r
   const gateway=await tools.execute('run_workflow',{workflowId:gatewayFlow.id},{requestId:'gateway-budget',callId:'one',executionBudget:gatewayBudget});assert.equal(gateway.code,'execution_budget_exceeded');assert.equal(gatewayBudget.remaining,0);assert.equal(gateway.steps.length,1);assert.equal(f.store.snapshot().tasks.length,2);assert.equal(f.store.snapshot().notes.length,0);
 });
 
+test('task tools page more than one hundred actual records and compute complete filtered counts without mutating the workspace',async t=>{
+  const instant=Date.UTC(2026,9,24),f=await fixture(t,{now:()=>instant}),projects=['','__proto__','constructor','toString','Unassigned','research','Research'];
+  const details='A'.repeat(3999)+'😀'+('Complete task details.\n'.repeat(200))+'LAST_DETAIL';let selectedTask;
+  for(let index=0;index<125;index++){
+    const created=f.apply('addTask',{title:'Synthetic task '+index,details:index===0?details:'Preview detail. '.repeat(40),project:projects[index%projects.length],priority:index%4===0?'high':'normal',dueAt:new Date(instant+(index%3===0?-1:1)*86400000).toISOString()}).workspace.tasks.at(-1);
+    if(index===0)selectedTask=created;
+    if(index%5===0)f.apply('completeTask',{taskId:created.id});
+  }
+  const tools=createProductivityTools({store:f.store,now:()=>instant}),before=f.store.snapshot(),seen=[];let offset=0,pages=0;
+  for(;;){const page=await tools.execute('list_tasks',{offset,limit:100,expectedRevision:before.revision});pages++;assert.equal(page.total,125);assert.equal(page.returned,page.tasks.length);assert.ok(page.returned<=100);assert.ok(Buffer.byteLength(JSON.stringify(page))<=48*1024);for(const task of page.tasks){assert.ok(task.details.length<=400);assert.equal(task.detailsTruncated,true);assert.ok(task.detailsLength>task.details.length);seen.push(task.id);}if(!page.hasMore){assert.equal(page.nextOffset,null);break;}assert.ok(page.nextOffset>offset);offset=page.nextOffset;}
+  assert.ok(pages>1);assert.equal(seen.length,125);assert.equal(new Set(seen).size,125);
+  const summary=await tools.execute('summarize_tasks',{});assert.equal(summary.totalTasks,125);assert.equal(summary.openTasks,100);assert.equal(summary.completedTasks,25);assert.equal(summary.highPriorityOpenTasks,25);assert.equal(summary.overdueOpenTasks,33);assert.equal(summary.projectCount,7);
+  let projectOffset=0;const projectNames=[];for(;;){const page=await tools.execute('summarize_tasks',{offset:projectOffset,limit:2,expectedRevision:before.revision});assert.equal(page.totalTasks,125);assert.equal(page.projectCount,7);assert.ok(page.returned<=2);projectNames.push(...page.projects.map(group=>group.project));if(!page.hasMore)break;assert.ok(page.nextOffset>projectOffset);projectOffset=page.nextOffset;}assert.equal(new Set(projectNames).size,7);
+  for(const name of ['__proto__','constructor','toString','Unassigned'])assert.equal(summary.projects.find(group=>group.project===name).totalTasks,18,name);
+  assert.equal((await tools.execute('list_tasks',{unassigned:true})).total,18);assert.equal((await tools.execute('summarize_tasks',{unassigned:false})).totalTasks,107);assert.equal((await tools.execute('list_tasks',{project:'RESEARCH'})).total,35);
+  const urgent=await tools.execute('summarize_tasks',{status:'todo',priority:'high',dueBefore:new Date(instant).toISOString()});assert.equal(urgent.totalTasks,8);assert.equal(urgent.openTasks,8);assert.equal(urgent.highPriorityOpenTasks,8);assert.equal(urgent.overdueOpenTasks,8);
+  const listed=await tools.execute('list_tasks',{status:'todo',priority:'high',dueBefore:new Date(instant).toISOString()});assert.equal(listed.total,8);assert.equal(listed.tasks.length,8);
+  let detailOffset=0,recovered='';for(;;){const page=await tools.execute('read_task',{taskId:selectedTask.id,offset:detailOffset,limit:4000,expectedRevision:before.revision});assert.equal(page.detailsLength,details.length);recovered+=page.task.details;if(!page.hasMore)break;assert.ok(page.nextOffset>detailOffset);detailOffset=page.nextOffset;}
+  assert.equal(recovered,details);assert.deepEqual(f.store.snapshot(),before);
+  const workflow=f.apply('saveWorkflow',{name:'Review actual task counts',steps:[{tool:'list_tasks',arguments:{limit:1}},{tool:'read_task',arguments:{taskId:selectedTask.id,offset:4001,limit:100}},{tool:'summarize_tasks',arguments:{status:'todo'}}]}).workspace.workflows[0];
+  const run=await tools.runWorkflow(workflow.id,{requestId:'task-read-workflow'});assert.equal(run.status,'completed');assert.equal(run.steps[0].result.total,125);assert.equal(run.steps[2].result.totalTasks,100);assert.equal(f.store.snapshot().tasks.length,125);
+  for(const name of ['read_task','summarize_tasks']){const meta=tools.catalog().find(item=>item.name===name);assert.equal(meta.workflowAllowed,true);assert.equal(meta.effectPolicy,'pure');}
+  for(const [name,args]of [['list_tasks',{}],['read_task',{taskId:selectedTask.id}],['summarize_tasks',{}]])await assert.rejects(tools.execute(name,{...args,expectedRevision:before.revision}),error=>error.code==='revision_conflict'&&error.revision===f.store.snapshot().revision);
+  await assert.rejects(tools.execute('list_tasks',{project:'research',unassigned:false}),{code:'invalid_tool'});await assert.rejects(tools.execute('summarize_tasks',{dueBefore:'not-a-date'}),{code:'invalid_tool'});
+});
+
 test('workspace compare-and-swap, exact replay and cross-operation ID conflicts survive SQLite restart', async t => {
   const f = await fixture(t); const operation = { operationId: randomUUID(), expectedRevision: 0, type: 'addTask', title: 'Review a synthetic draft' };
   const first = f.store.apply(operation); assert.equal(first.workspace.tasks[0].id, operation.operationId); assert.equal(first.workspace.revision, 1);

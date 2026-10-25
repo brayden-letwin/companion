@@ -358,6 +358,33 @@ test('chat can inspect a failed build before requesting a correction with the or
   assert.equal(f.builderCalls.filter(call=>call.type==='apply').length,0);assert.equal(f.builderCalls.filter(call=>call.type==='get')[0].owner,'local-workspace');
 });
 
+test('chat uses complete task counts and reads an older task beyond its list preview without losing instructions',async t=>{
+  const details='Preserve every instruction. '.repeat(200)+'FINAL_ACTION: review the original draft.';let taskId,revision,firstDetails='';
+  const f=await fixture(t,{complete:async(input,round)=>{
+    if(round===1)return{text:'',toolCalls:[{id:'true-counts',name:'summarize_tasks',arguments:{status:'todo'}},{id:'task-page',name:'list_tasks',arguments:{status:'todo',limit:10}}]};
+    if(round===2){
+      const count=JSON.parse(input.messages.find(message=>message.role==='tool'&&message.toolCallId==='true-counts').content),page=JSON.parse(input.messages.at(-1).content);
+      assert.equal(count.totalTasks,129);assert.equal(count.openTasks,129);assert.equal(count.highPriorityOpenTasks,1);assert.equal(count.overdueOpenTasks,1);
+      assert.equal(page.total,129);assert.equal(page.tasks.length,10);assert.equal(page.hasMore,true);assert.equal(page.tasks[0].id,taskId);assert.equal(page.tasks[0].detailsTruncated,true);
+      revision=page.revision;return{text:'',toolCalls:[{id:'full-old-instructions',name:'read_task',arguments:{taskId,offset:0,limit:4000,expectedRevision:revision}}]};
+    }
+    if(round===3){const read=JSON.parse(input.messages.at(-1).content);assert.equal(read.hasMore,true);firstDetails=read.task.details;return{text:'',toolCalls:[{id:'remaining-instructions',name:'read_task',arguments:{taskId,offset:read.nextOffset,limit:4000,expectedRevision:revision}}]};}
+    const tail=JSON.parse(input.messages.at(-1).content);assert.equal(tail.hasMore,false);assert.equal(firstDetails+tail.task.details,details);return{text:'There are 129 open tasks. The older task ends with: FINAL_ACTION: review the original draft.',toolCalls:[]};
+  }});
+  for(let index=0;index<130;index++){const id=randomUUID();if(index===0)taskId=id;f.store.apply({type:'addTask',operationId:id,expectedRevision:f.store.snapshot().revision,title:index===0?'Old important task':'Synthetic task '+index,details:index===0?details:'',priority:index===0?'high':'normal',project:index===0?'Focus':'Other',...(index===0?{dueAt:'2000-01-01T00:00:00.000Z'}:{})});if(index===129)f.store.apply({type:'completeTask',operationId:randomUUID(),expectedRevision:f.store.snapshot().revision,taskId:id});}
+  const before=f.store.snapshot().revision,user=await f.session(),reply=await f.request('POST','/api/assistant/chat',{id:'full-task-read',message:'Count all my open tasks and read the complete instructions for my old important task.'},user);
+  assert.equal(reply.status,200);assert.match(reply.value.text,/129 open tasks/);assert.match(reply.value.text,/FINAL_ACTION/);assert.deepEqual(reply.value.actions.map(action=>action.tool),['summarize_tasks','list_tasks','read_task','read_task']);assert.equal(f.store.snapshot().revision,before);
+});
+
+test('task pages cover all matches over HTTP and reject a changed workspace before returning another page',async t=>{
+  const f=await fixture(t);for(let index=0;index<113;index++)f.store.apply({type:'addTask',operationId:randomUUID(),expectedRevision:f.store.snapshot().revision,title:'Paged synthetic task '+index,priority:index%7===0?'high':'normal',project:index%2?'Alpha':'Beta'});
+  const user=await f.session(),ids=[],pinnedRevision=f.store.snapshot().revision;let offset=0;
+  for(;;){const response=await f.request('POST','/api/assistant/tools/run',{tool:'list_tasks',arguments:{status:'todo',offset,limit:17,expectedRevision:pinnedRevision},operationId:randomUUID()},user);assert.equal(response.status,200);const page=response.value.result;assert.equal(page.total,113);assert.ok(Buffer.byteLength(JSON.stringify(page))<=48*1024);ids.push(...page.tasks.map(task=>task.id));if(!page.hasMore)break;assert.ok(page.nextOffset>offset);offset=page.nextOffset;}
+  assert.equal(ids.length,113);assert.equal(new Set(ids).size,113);assert.deepEqual(new Set(ids),new Set(f.store.snapshot().tasks.map(task=>task.id)));
+  f.store.apply({type:'updateTask',operationId:randomUUID(),expectedRevision:pinnedRevision,taskId:ids[0],title:'Changed after the pinned read'});
+  for(const [tool,args]of[['list_tasks',{offset:17,limit:17}],['summarize_tasks',{}],['read_task',{taskId:ids[0]}]]){const stale=await f.request('POST','/api/assistant/tools/run',{tool,arguments:{...args,expectedRevision:pinnedRevision},operationId:randomUUID()},user);assert.equal(stale.status,409);}
+});
+
 test('desktop proposals stop the model turn before more actions and only the protected action route can approve', async t => {
   const id = randomUUID(), desktopCalls = [], pending = { id, status: 'pending', summary: 'Type a synthetic draft in the selected test editor.', preview: { action: 'setText', text: 'Synthetic draft' }, requiresApproval: true };
   const definition = { name: 'desktop_propose_action', parameters: { type: 'object', properties: { snapshotId: { type: 'string' } }, required: ['snapshotId'], additionalProperties: false } };
