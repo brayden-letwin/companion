@@ -31,6 +31,7 @@ const ASSETS = new Map([
   ['/src/voice-session.mjs', ['src/voice-session.mjs', 'text/javascript; charset=utf-8']],
   ['/src/project-files.mjs', ['src/project-files.mjs', 'text/javascript; charset=utf-8']],
   ['/src/build-continuation.mjs', ['src/build-continuation.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/build-attempts.mjs', ['src/build-attempts.mjs', 'text/javascript; charset=utf-8']],
   ['/src/assistant.css', ['src/assistant.css', 'text/css; charset=utf-8']],
   ['/src/core/assistant.mjs', ['src/core/assistant.mjs', 'text/javascript; charset=utf-8']],
   ['/src/core/discussion.mjs', ['src/core/discussion.mjs', 'text/javascript; charset=utf-8']],

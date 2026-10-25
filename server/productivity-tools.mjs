@@ -11,7 +11,9 @@ function operationId(requestId, callId) { const h = createHash('sha256').update(
 function executionBudget(context){if(!context.executionBudget)context.executionBudget={remaining:48};const budget=context.executionBudget;if(!budget||!Number.isInteger(budget.remaining)||budget.remaining<0||budget.remaining>48)throw fail('Use a bounded shared execution budget.');return budget;}
 function validateArguments(name,value,registry) { const definition=registry.get(name); if(!definition)throw fail('That tool is not registered. Ask Companion to build the missing feature.'); return validateToolArguments(definition,value); }
 
-function inspectFeatureBuild(job, requestedId, requestOffset = 0) {
+function inspectFeatureBuild(job, requestedId, requestOffset = 0, selectedAttempt) {
+  const currentStatus=job?.status;
+  if(selectedAttempt)job={...job,summary:selectedAttempt.summary,files:selectedAttempt.files,verification:selectedAttempt.verification,reviewRequired:selectedAttempt.reviewRequired,status:selectedAttempt.status==='failed'?'failed':'ready',error:selectedAttempt.error};
   const truncation = {};
   function boundedText(value, limit, field, preserveTail = false, redactPaths = true) {
     if (typeof value !== 'string') return '';
@@ -95,6 +97,10 @@ function inspectFeatureBuild(job, requestedId, requestOffset = 0) {
     if (all.length > checks.length) truncation.checks = true;
   }
   if (typeof job?.error === 'string') featureBuild.error = boundedText(job.error, 2000, 'error');
+  if([1,2].includes(job?.generationAttempt))featureBuild.generationAttempt=job.generationAttempt;
+  if([1,2].includes(job?.generationAttemptLimit))featureBuild.generationAttemptLimit=job.generationAttemptLimit;
+  if(Array.isArray(job?.attempts))featureBuild.attempts=job.attempts.slice(0,2).filter(item=>[1,2].includes(item?.number)&&['failed','passed'].includes(item.status)).map(item=>({number:item.number,status:item.status,fileCount:Number.isSafeInteger(item.fileCount)?item.fileCount:0,summary:boundedText(item.summary,300,'attemptSummary'),verification:{passed:item.verification?.passed===true,failedChecks:(Array.isArray(item.verification?.failedChecks)?item.verification.failedChecks:[]).slice(0,24).map(name=>boundedText(name,100,'attemptCheckNames'))}}));
+  if(selectedAttempt){featureBuild.inspectedAttempt={number:selectedAttempt.number,status:selectedAttempt.status,currentBuildStatus:knownStatuses.has(currentStatus)?currentStatus:'unknown',message:'The changes and checks below are retained candidate evidence. This read cannot correct or activate it. Read the latest build before activation.'};featureBuild.activation={sourceWasApplied:null,requiresActivation:false,currentSourceVerified:false,runtimeVerified:false,message:'Historical candidate evidence only; it is not a separate activatable build and does not establish current source or runtime.'};}
   const report = { featureBuild };
   // Structural caps normally keep this below 32 KiB. Enforce the wire bound
   // independently so escaped Unicode, future fields, or malformed history cannot bypass it.
@@ -106,6 +112,29 @@ function inspectFeatureBuild(job, requestedId, requestOffset = 0) {
     else { featureBuild.summary = ''; featureBuild.plan = ''; delete featureBuild.error; break; }
   }
   return report;
+}
+
+/** Model-only metadata. Full requests and checks stay in paged inspection. */
+function featureBuildList(jobs,{offset=0,limit=20}={}){
+  if(!Array.isArray(jobs)||jobs.length>100||jobs.some(job=>!job||typeof job.id!=='string'||!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(job.id))||new Set(jobs.map(job=>job.id.toLowerCase())).size!==jobs.length)throw Object.assign(fail('The feature-build history could not be read.','invalid_build_history'),{statusCode:502});
+  if(!Number.isSafeInteger(offset)||offset<0||offset>jobs.length||!Number.isSafeInteger(limit)||limit<1||limit>20)throw fail('Use a returned feature-build offset and a limit from 1 to 20.','invalid_build_page');
+  const known=new Set(['queued','generating','validating','ready','review_required','applying','applied','failed','cancelled','conflict','rolled_back','interrupted','recovery_required']);
+  const preview=(value,max)=>{if(typeof value!=='string')return'';let end=Math.min(max,value.length);if(end>0&&end<value.length&&value.charCodeAt(end-1)>=0xd800&&value.charCodeAt(end-1)<=0xdbff&&value.charCodeAt(end)>=0xdc00&&value.charCodeAt(end)<=0xdfff)end--;return value.slice(0,end);};
+  const summary=job=>{
+    const item={id:job.id,status:known.has(job.status)?job.status:'unknown',prompt:preview(job.prompt,160),summary:preview(job.summary,240),previewOnly:true,promptIsPreview:true,summaryIsPreview:true,reviewRequired:job.reviewRequired===true,autoApply:job.autoApply===true,fileCount:Number.isSafeInteger(job.fileCount)&&job.fileCount>=0?job.fileCount:0,verification:typeof job.verification?.passed==='boolean'?{passed:job.verification.passed}:null,progress:preview(job.progress,120)};
+    for(const key of['createdAt','updatedAt'])if(typeof job[key]==='string'&&job[key].length<=40&&Number.isFinite(Date.parse(job[key])))item[key]=job[key];
+    if(typeof job.providerId==='string'&&job.providerId.length<=100)item.providerId=job.providerId;
+    if(typeof job.error==='string'&&job.error)item.error=preview(job.error,160);
+    if([1,2].includes(job.generationAttempt))item.generationAttempt=job.generationAttempt;
+    if([1,2].includes(job.generationAttemptLimit))item.generationAttemptLimit=job.generationAttemptLimit;
+    if(Array.isArray(job.attempts))item.attempts=job.attempts.slice(0,2).filter(attempt=>[1,2].includes(attempt?.number)&&['failed','passed'].includes(attempt.status)).map(attempt=>({number:attempt.number,status:attempt.status,verificationPassed:attempt.verification?.passed===true,totalChecks:Number.isSafeInteger(attempt.verification?.totalChecks)&&attempt.verification.totalChecks>=0?attempt.verification.totalChecks:0,failedCheckCount:Array.isArray(attempt.verification?.failedChecks)?attempt.verification.failedChecks.length:0}));
+    return item;
+  };
+  const result={jobs:[],metadataOnly:true,requestDetailsTool:'inspect_feature_build',total:jobs.length,returned:0,offset,limit,hasMore:false,nextOffset:null};
+  const cursors=()=>{result.returned=result.jobs.length;const next=offset+result.returned;result.hasMore=next<jobs.length;result.nextOffset=result.hasMore?next:null;};
+  for(const job of jobs.slice(offset,offset+limit)){result.jobs.push(summary(job));cursors();if(Buffer.byteLength(JSON.stringify(result))>48*1024){result.jobs.pop();cursors();break;}}
+  if(offset<jobs.length&&!result.jobs.length)throw Object.assign(fail('One feature-build summary exceeds its response budget.','build_output_limit'),{statusCode:413});
+  return result;
 }
 
 export function createProductivityTools({ store, builder, desktop, root, work, projectFiles, continuations, capabilities = [], capabilityStatus = {ready:true}, executeCapability = defaultExecuteCapability, owner = 'local-workspace', now = Date.now } = {}) {
@@ -231,11 +260,17 @@ export function createProductivityTools({ store, builder, desktop, root, work, p
           store.finishChat?.(receiptId, digest, result); return result;
         } catch (error) { store.finishChat?.(receiptId, digest, { message: 'The feature build could not be started. Check build history before retrying.', code: error.code || 'build_failed', statusCode: error.statusCode || 500 }, true); throw error; }
       }
-      case 'list_feature_builds': return { jobs: builder ? await builder.list(owner) : [] };
+      case 'list_feature_builds': return featureBuildList(builder ? await builder.list(owner) : [],args);
       case 'inspect_feature_build': {
         if (!builder || typeof builder.get !== 'function') throw fail('The feature builder is not available.', 'builder_unavailable');
         if (!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(args.jobId)) throw fail('Choose an actual feature build UUID.');
-        const report=inspectFeatureBuild(await builder.get(args.jobId, owner), args.jobId, args.requestOffset ?? 0);
+        const job=await builder.get(args.jobId, owner);let attempt;
+        if(args.attempt!==undefined){
+          if(typeof builder.getAttempt!=='function')throw Object.assign(fail('Build attempt history is unavailable in this runtime.','build_attempts_unavailable'),{statusCode:503});
+          attempt=await builder.getAttempt(args.jobId,args.attempt,owner);
+          if(attempt?.buildId!==args.jobId||attempt.number!==args.attempt||!['failed','passed'].includes(attempt.status))throw Object.assign(fail('The retained build attempt could not be matched.','invalid_build_attempt'),{statusCode:502});
+        }
+        const report=inspectFeatureBuild(job, args.jobId, args.requestOffset ?? 0,attempt);
         if(continuations){const linked=await continuations.getByBuild(args.jobId);if(linked?.continuation)report.featureBuild.continuation={...continuationReference(linked.continuation),reason:linked.continuation.reason,ready:linked.continuation.readiness?.ready===true};}
         return report;
       }

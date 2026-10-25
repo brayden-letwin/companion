@@ -51,6 +51,7 @@ async function readJson(req, limit = 2 * 1024 * 1024) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw fail(400, 'invalid_json', 'Provide a JSON object.'); return body;
 }
 const routeMatches = route => ['/chat','/work','/continuations','/context','/projects','/projects/choose','/conversations','/providers','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
+  || /^\/api\/assistant\/features\/[a-f\d-]+\/attempts\/[0-9]+$/i.test(route)
   || /^\/api\/assistant\/continuations\/[a-f\d-]+(?:\/(?:continue|cancel))?$/i.test(route)
   || /^\/api\/assistant\/projects\/[a-f\d-]+(?:\/(?:files|file|history|edit|revoke|edits\/[a-f\d-]+))?$/i.test(route)
   || /^\/api\/assistant\/(?:work\/[a-f\d-]+(?:\/cancel)?|context\/[a-f\d-]+\/clear|conversations\/[a-f\d-]+|features\/[a-f\d-]+(?:\/(?:apply|rollback|cancel))?|workspace\/workflows\/[a-f\d-]+\/run|desktop\/actions\/[a-f\d-]+\/(?:approve|cancel))$/i.test(route);
@@ -154,7 +155,7 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
       if (createRuntime) return createRuntime();
       const router = await createModelRouter({ dataDirectory });
       const store = await createProductivityStore({ dataDirectory });
-      const builder = await createFeatureBuilder({ root, dataDirectory: path.join(dataDirectory, 'feature-builds'), complete: options => router.complete(options) });
+      const builder = await createFeatureBuilder({ root, dataDirectory: path.join(dataDirectory, 'feature-builds'), complete: options => router.complete(options), getProvider: async id => (await router.getStatus()).providers.find(provider => provider.id === id) });
       const desktop = await createDesktopService({ root, dataDirectory: path.join(dataDirectory, 'desktop') });
       let projectFiles;
       try{projectFiles=await createProjectFileService({root,dataDirectory});}
@@ -215,6 +216,7 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         if (++window.count > 240) throw fail(429, 'rate_limited', 'Too many workspace requests. Try again in a minute.');
         session.windows?.set('productivity', window);
         const services = await runtime();
+        if(req.method!=='GET'&&/^\/api\/assistant\/features\/[a-f\d-]+\/attempts\/[0-9]+$/i.test(route))throw fail(405,'method_not_allowed','Use GET to inspect retained build attempts.');
         if (req.method === 'GET') {
           if(route===BASE+'/continuations'){
             if(!services.continuations)throw fail(503,'continuation_unavailable','Linked original requests are unavailable.');
@@ -252,6 +254,12 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
           if (route === BASE + '/features') { json(res, 200, { jobs: await services.builder.list(OWNER) }); return true; }
           if (route === BASE + '/features/source') { json(res, 200, await services.builder.source(OWNER, { includeContent: new URL(req.url, 'http://localhost').searchParams.get('content') === '1' })); return true; }
           if(route===BASE+'/features/source/file'){const options=sourceFileQuery(req);if(typeof services.builder.sourceFile!=='function')throw fail(503,'source_read_unavailable','Targeted source reads are unavailable in this runtime.');json(res,200,await services.builder.sourceFile(OWNER,options));return true;}
+          const attempt = /^\/api\/assistant\/features\/([a-f\d-]+)\/attempts\/([0-9]+)$/i.exec(route);
+          if(attempt){
+            if(!UUID.test(attempt[1])||!/^[12]$/.test(attempt[2])||new URL(req.url,'http://localhost').search)throw fail(400,'invalid_build_attempt','Choose a recorded build attempt, 1 or 2, without extra query fields.');
+            if(typeof services.builder.getAttempt!=='function')throw fail(503,'build_attempts_unavailable','Build attempt history is unavailable in this runtime.');
+            json(res,200,await services.builder.getAttempt(attempt[1],Number(attempt[2]),OWNER));return true;
+          }
           if (route === BASE + '/integrations') { json(res, 200, { mcp: { command: process.execPath, args: [path.join(root, 'server', 'mcp-server.mjs')], env: { COMPANION_URL: `http://127.0.0.1:${req.socket.localPort}` } }, tools: services.tools.catalog?.() || services.tools.definitions.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })), capabilityStatus: services.capabilityStatus || { ready: true } }); return true; }
           const match = /^\/api\/assistant\/features\/([a-f\d-]+)$/i.exec(route);
           if (match) { json(res, 200, await services.builder.get(match[1], OWNER)); return true; }
