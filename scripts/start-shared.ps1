@@ -9,7 +9,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $DataDirectory = [IO.Path]::GetFullPath($DataDirectory)
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$serverPath = Join-Path $sourceRoot 'server\room-server.mjs'
+$serverPath = Join-Path $sourceRoot 'server\companion-host.mjs'
 if (-not (Test-Path -LiteralPath $serverPath -PathType Leaf)) { throw "Shared-room source not found: $serverPath" }
 $origin = "http://127.0.0.1:$Port"
 $ready = $false
@@ -19,6 +19,27 @@ try {
     $ready = $true
 } catch {
     if ($_.Exception.Message -eq 'Another application is using the shared-room port.') { throw }
+}
+
+if (-not $ready) {
+    $hostLockPath = Join-Path $DataDirectory 'runtime-host.lock'
+    if (Test-Path -LiteralPath $hostLockPath -PathType Leaf) {
+        $hostMayBeRunning = $true
+        try {
+            $hostLock = Get-Content -LiteralPath $hostLockPath -Raw | ConvertFrom-Json
+            if (-not $hostLock.pid -or $hostLock.port -ne $Port -or $hostLock.sourceRoot -ne $sourceRoot) { throw 'The saved runtime identity does not match this launcher.' }
+            try { Get-Process -Id $hostLock.pid -ErrorAction Stop | Out-Null }
+            catch { if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { $hostMayBeRunning = $false } }
+        } catch { throw "Companion runtime metadata needs review: $hostLockPath. No second server was started." }
+        if ($hostMayBeRunning) {
+            Write-Output 'Companion is restarting. Waiting for your workspace...'
+            for ($attempt = 0; $attempt -lt 100; $attempt++) {
+                try { $health = Invoke-RestMethod -Uri "$origin/api/health" -TimeoutSec 1 -MaximumRedirection 0; $ready = $health.service -eq 'companion-shared'; if ($ready) { break } } catch { }
+                Start-Sleep -Milliseconds 250
+            }
+            if (-not $ready) { throw "Companion is already managed but is not responding. See $DataDirectory\server-error.log. No second server was started." }
+        }
+    }
 }
 
 if (-not $ready) {
@@ -42,7 +63,7 @@ if (-not $ready) {
     if (-not (Test-Path -LiteralPath $NodePath -PathType Leaf)) { throw "Node executable not found: $NodePath" }
     $nodeVersion = (& $NodePath -p 'process.versions.node').Trim()
     if ($LASTEXITCODE -ne 0 -or [version]$nodeVersion -lt [version]'24.15.0') { throw 'Install Node.js 24 LTS from https://nodejs.org, then double-click Start Companion.cmd again.' }
-    Write-Output 'Starting your reading room...'
+    Write-Output 'Starting Companion...'
     New-Item -ItemType Directory -Force -Path $DataDirectory | Out-Null
     $variables = @{ COMPANION_SHARED_DATA_DIR = $DataDirectory; COMPANION_SHARED_PORT = "$Port" }
     $previous = @{}
@@ -60,7 +81,7 @@ if (-not $ready) {
     }
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         $serverProcess.Refresh()
-        if ($serverProcess.HasExited) { throw "Shared room stopped during startup. See $DataDirectory\server-error.log" }
+        if ($serverProcess.HasExited) { throw "Companion stopped during startup. See $DataDirectory\server-error.log" }
         try {
             $health = Invoke-RestMethod -Uri "$origin/api/health" -TimeoutSec 1 -MaximumRedirection 0
             $ready = $health.service -eq 'companion-shared'
@@ -69,7 +90,7 @@ if (-not $ready) {
         Start-Sleep -Milliseconds 250
     }
 }
-if (-not $ready) { throw 'The shared room did not become ready.' }
+if (-not $ready) { throw 'Companion did not become ready.' }
 $entryPath = if ($View -eq 'assistant') { 'assistant.html' } else { 'room.html' }
 Write-Output "Companion is ready: $origin/$entryPath"
 if ($View -eq 'room') {
