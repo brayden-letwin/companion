@@ -18,6 +18,7 @@ import {continuationReference} from './continuation-context.mjs';
 import {createProviderCheckService} from './provider-checks.mjs';
 import {createDeadlineContext,resolveLocalDeadline} from '../src/core/productivity-deadlines.mjs';
 import {taskDeadlineView,formatDeadlineInstant} from './task-deadline-view.mjs';
+import {createWorkspaceBackups} from './workspace-backups.mjs';
 
 const OWNER = 'local-workspace';
 const BASE = '/api/assistant';
@@ -62,7 +63,10 @@ function deadlineQuery(req,allowed){
  }
  return result;
 }
-const routeMatches = route => ['/chat','/work','/continuations','/context','/projects','/projects/choose','/conversations','/providers','/provider-checks','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/deadline-context','/deadline-resolve','/task-deadlines','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
+const backupRouteMatches=route=>route===BASE+'/backups'||route===BASE+'/backup-recovery/preview'||route===BASE+'/backup-recovery/import'
+  || /^\/api\/assistant\/backups\/[a-f\d-]+\/(?:download|delete)$/i.test(route)
+  || /^\/api\/assistant\/backup-recovery\/(?:previews|imports)\/[a-f\d-]+$/i.test(route);
+const routeMatches = route => backupRouteMatches(route)||['/chat','/work','/continuations','/context','/projects','/projects/choose','/conversations','/providers','/provider-checks','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/deadline-context','/deadline-resolve','/task-deadlines','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
   || /^\/api\/assistant\/provider-checks\/[a-f\d-]+(?:\/cancel)?$/i.test(route)
   || /^\/api\/assistant\/features\/[a-f\d-]+\/attempts\/[0-9]+$/i.test(route)
   || /^\/api\/assistant\/continuations\/[a-f\d-]+(?:\/(?:continue|cancel))?$/i.test(route)
@@ -72,6 +76,13 @@ const routeMatches = route => ['/chat','/work','/continuations','/context','/pro
 /** Lazy initialization keeps the legacy reader and protocol tests independent. */
 export function createProductivityApi({ root, dataDirectory, createRuntime } = {}) {
   let runtimePromise = null, closed = false;
+  let backupsPromise=null,previewUploads=0,backupRequests=0;
+  const backupResponses=new Set();
+  async function backups(services){
+    if(closed)throw fail(503,'shutting_down','Companion is shutting down.');
+    if(!backupsPromise)backupsPromise=Promise.resolve().then(()=>createWorkspaceBackups({store:services.store,dataDirectory})).catch(error=>{backupsPromise=null;throw error;});
+    return backupsPromise;
+  }
   const active = new Map(), contextPins = new Map(), contextRequests = new Map(), projectRequests=new Map();
   const projectKey=project=>project.projectId+':'+project.grantEpoch;
   function trackProject(project,controller){if(!project)return()=>{};const key=projectKey(project),readers=projectRequests.get(key)||new Set();readers.add(controller);projectRequests.set(key,readers);return()=>{readers.delete(controller);if(!readers.size)projectRequests.delete(key);};}
@@ -239,18 +250,40 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
   return {
     async handle(req, res, route, session) {
       if (!routeMatches(route)) return false;
+      let finishBackup=null;
       try {
+        if(backupRouteMatches(route)){
+          if(backupRequests>=2)throw fail(429,'backups_busy','Two backup or recovery requests are active. Wait for one to finish.');
+          backupRequests++;backupResponses.add(res);let done=false,settled=res.writableFinished||res.destroyed,released=false;
+          const release=()=>{if(!released&&done&&settled){released=true;backupRequests--;backupResponses.delete(res);res.off('finish',responseSettled);res.off('close',responseSettled);}};
+          const responseSettled=()=>{settled=true;release();};
+          res.once('finish',responseSettled);res.once('close',responseSettled);
+          finishBackup=()=>{done=true;if(res.destroyed||res.writableFinished)settled=true;release();};
+        }
         const now = Date.now(), window = session.windows?.get('productivity') || { count: 0, until: now + 60000 };
         if (window.until <= now) { window.count = 0; window.until = now + 60000; }
         if (++window.count > 240) throw fail(429, 'rate_limited', 'Too many workspace requests. Try again in a minute.');
         session.windows?.set('productivity', window);
         const services = await runtime();
+        if(closed)throw fail(503,'shutting_down','Companion is shutting down.');
         if(['/deadline-context','/deadline-resolve','/task-deadlines'].some(suffix=>route===BASE+suffix)&&req.method!=='GET')throw fail(405,'method_not_allowed','Use GET to inspect deadline context and civil time.');
         if(route===BASE+'/provider-checks'||/^\/api\/assistant\/provider-checks\//i.test(route)){
           if(!services.providerChecks||services.providerChecks.unavailable)throw fail(503,'provider_checks_unavailable','Connection tests are unavailable in this runtime.');
         }
         if(req.method!=='GET'&&/^\/api\/assistant\/features\/[a-f\d-]+\/attempts\/[0-9]+$/i.test(route))throw fail(405,'method_not_allowed','Use GET to inspect retained build attempts.');
         if (req.method === 'GET') {
+          if(route===BASE+'/backups'){projectQuery(req,[]);json(res,200,await (await backups(services)).list());return true;}
+          const download=/^\/api\/assistant\/backups\/([a-f\d-]+)\/download$/i.exec(route);
+          if(download){
+            projectQuery(req,[]);if(!UUID.test(download[1]))throw fail(400,'invalid_backup_id','Choose an actual workspace backup UUID.');
+            const result=await (await backups(services)).download(download[1]);
+            if(res.destroyed||res.writableEnded)return true;
+            res.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Content-Disposition':`attachment; filename="${result.filename}"`,'Content-Length':result.bytes.length,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Cross-Origin-Resource-Policy':'same-origin'});res.end(result.bytes);return true;
+          }
+          const recoveryPreview=/^\/api\/assistant\/backup-recovery\/previews\/([a-f\d-]+)$/i.exec(route);
+          if(recoveryPreview){const query=projectQuery(req,['offset','limit']);if(!UUID.test(recoveryPreview[1]))throw fail(400,'invalid_preview_id','Choose an actual recovery preview UUID.');json(res,200,await (await backups(services)).getPreview(recoveryPreview[1],query));return true;}
+          const recoveryImport=/^\/api\/assistant\/backup-recovery\/imports\/([a-f\d-]+)$/i.exec(route);
+          if(recoveryImport){projectQuery(req,[]);if(!UUID.test(recoveryImport[1]))throw fail(400,'invalid_import_id','Choose the original recovery UUID.');json(res,200,await (await backups(services)).getImport(recoveryImport[1]));return true;}
           if(route===BASE+'/deadline-context'){deadlineQuery(req,[]);json(res,200,createDeadlineContext({asOf:now}));return true;}
           if(route===BASE+'/deadline-resolve'){
             const query=deadlineQuery(req,['timezone','localDateTime','dueAt']);
@@ -309,7 +342,22 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
           throw fail(405, 'method_not_allowed', 'Use POST for this action.');
         }
         if (req.method !== 'POST') throw fail(405, 'method_not_allowed', 'Use GET or POST.');
+        if(route===BASE+'/backup-recovery/preview'){
+          projectQuery(req,[]);
+          if(previewUploads)throw fail(429,'preview_busy','A workspace backup is already being previewed. Wait for it to finish.');
+          previewUploads++;
+          try{
+            const body=await readJson(req,96*1024*1024+1024);
+            if(closed)throw fail(503,'shutting_down','Companion is shutting down.');
+            fields(body,['archive']);json(res,201,await (await backups(services)).preview(body));return true;
+          }finally{previewUploads--;}
+        }
         const body = await readJson(req);
+        if(closed)throw fail(503,'shutting_down','Companion is shutting down.');
+        if(route===BASE+'/backups'){projectQuery(req,[]);fields(body,['id']);json(res,201,await (await backups(services)).create(body));return true;}
+        const deleteBackup=/^\/api\/assistant\/backups\/([a-f\d-]+)\/delete$/i.exec(route);
+        if(deleteBackup){projectQuery(req,[]);fields(body,[]);if(!UUID.test(deleteBackup[1]))throw fail(400,'invalid_backup_id','Choose an actual workspace backup UUID.');json(res,200,await (await backups(services)).delete(deleteBackup[1]));return true;}
+        if(route===BASE+'/backup-recovery/import'){projectQuery(req,[]);fields(body,['id','previewId','expectedRevision','selection']);json(res,200,await (await backups(services)).import(body));return true;}
         if(route===BASE+'/provider-checks'){
           fields(body,['id','providerId','revision']);if(typeof body.id!=='string'||!UUID.test(body.id)||typeof body.revision!=='string'||!UUID.test(body.revision)||typeof body.providerId!=='string'||!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.providerId))throw fail(400,'invalid_provider_check','Choose one configured provider, its current revision and a stable test UUID.');
           json(res,202,await guardedRequest(req,res,session,body.id,signal=>services.providerChecks.start(body,{signal})));return true;
@@ -408,12 +456,17 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
       } catch (error) {
         const status = error.statusCode || error.status || 500;
         json(res, Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500, { error: { code: error.code || 'productivity_error', message: error.statusCode || error.status ? error.message : 'Companion could not complete this action. Check its connection and try again.' }, ...(error.workspace ? { workspace: error.workspace } : {}), ...(error.actions ? { actions: error.actions } : {}),...(error.continuation?{continuation:error.continuation}:{}), ...(error.windowContext ? {windowContext:windowContextReference(error.windowContext)} : {}),...(error.projectFileEdit?{projectFileEdit:projectEditReference(error.projectFileEdit)}:{}),...(error.projectContext?{projectContext:projectReference(error.projectContext)}:{}), ...(Array.isArray(error.hostActions) ? { hostActions: error.hostActions } : {}), ...(error.capability ? { capability: error.capability } : {}), ...(error.conversation ? { conversation: conversationPage(error.conversation) } : {}), ...(error.conversationId ? { conversationId: error.conversationId } : {}) });
-      }
+      }finally{finishBackup?.();}
       return true;
     },
     cancel(scope, id) { active.get(`${scope}:${id}`)?.abort(); },
     async close() {
       closed = true; for (const controller of active.values()) controller.abort(); active.clear();contextPins.clear();contextRequests.clear();projectRequests.clear();
+      // Only these admitted backup responses belong to this transport lifetime.
+      // Destroying their sockets also ends stalled upload iterators; committed
+      // recovery work still settles through the service before its store closes.
+      for(const response of backupResponses)if(!response.destroyed&&!response.writableFinished)try{response.destroy();}catch{}
+      if(backupsPromise)await (await backupsPromise.catch(()=>null))?.close?.();
       if (runtimePromise) { const services = await runtimePromise.catch(() => null);const workClosing=services?.work?.close?.(),checksClosing=services?.providerChecks?.close?.();await services?.continuations?.close?.();await Promise.all([workClosing,checksClosing]);await services?.projectFiles?.close?.(); await services?.desktop?.close?.(); await services?.builder.close?.(); services?.store.close(); }
     },
   };

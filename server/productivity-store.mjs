@@ -9,6 +9,7 @@ import {continuationReference} from './continuation-context.mjs';
 import { installWorkStore } from './work-store.mjs';
 import { workflowDefinitionHash } from './workflow-queries.mjs';
 import { normalizeDeadline } from '../src/core/productivity-deadlines.mjs';
+import { validateWorkspaceRecoveryItem } from './workspace-backups.mjs';
 
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const fail = (code, message, statusCode = 400) => Object.assign(new Error(message), { code, statusCode });
@@ -39,6 +40,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
   // Keep the original two-column receipt table compatible with previous writers.
   db.exec('CREATE TABLE IF NOT EXISTS workflow_mutation_receipts(id TEXT PRIMARY KEY, result_json TEXT NOT NULL)');
   db.exec('CREATE TABLE IF NOT EXISTS task_mutation_receipts(id TEXT PRIMARY KEY, result_json TEXT NOT NULL)');
+  db.exec('CREATE TABLE IF NOT EXISTS workspace_import_receipts(id TEXT PRIMARY KEY, hash TEXT NOT NULL, receipt_json TEXT NOT NULL)');
   db.exec(`CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,title TEXT NOT NULL,auto_title INTEGER NOT NULL,revision INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,active_request_id TEXT,last_status TEXT);
     CREATE TABLE IF NOT EXISTS conversation_turns(sequence INTEGER PRIMARY KEY AUTOINCREMENT,conversation_id TEXT NOT NULL,request_id TEXT UNIQUE NOT NULL,digest TEXT NOT NULL,message TEXT NOT NULL,provider_id TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,outcome_json TEXT,base_bytes INTEGER NOT NULL,stored_bytes INTEGER NOT NULL,reserved_bytes INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS conversation_turns_order ON conversation_turns(conversation_id,sequence);
@@ -395,6 +397,38 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
       db.prepare('UPDATE conversations SET revision=revision+1,updated_at=?,active_request_id=NULL,last_status=? WHERE id=?').run(at, 'interrupted', saved.conversation_id);
     }
   });
+  function getWorkspaceImport(value){
+    checkOpen();id(value,'recovery ID');const saved=db.prepare('SELECT hash,receipt_json FROM workspace_import_receipts WHERE id=?').get(value);if(!saved)return null;
+    let receipt;try{receipt=JSON.parse(saved.receipt_json);}catch{throw fail('import_receipt_unavailable','The original content recovery receipt could not be read.',503);}
+    if(!receipt||receipt.id!==value||!UUID.test(receipt.previewId)||!/^[a-f\d]{64}$/.test(receipt.archiveHash)||!Number.isSafeInteger(receipt.appliedRevision)||!Array.isArray(receipt.imported)||receipt.imported.length>100)throw fail('import_receipt_unavailable','The original content recovery receipt could not be matched.',503);
+    return{requestDigest:saved.hash,receipt};
+  }
+  function importWorkspaceContent(value){
+    checkOpen();if(!value||typeof value!=='object')throw fail('invalid_import','Provide one content recovery request.');id(value.id,'recovery ID');if(typeof value.requestDigest!=='string'||!/^[a-f\d]{64}$/.test(value.requestDigest))throw fail('invalid_import','Use the captured recovery selection.');
+    return transaction(()=>{
+      const prior=getWorkspaceImport(value.id);if(prior){if(prior.requestDigest!==value.requestDigest)throw fail('import_conflict','That recovery ID belongs to a different selection.',409);return{receipt:prior.receipt,workspace:snapshot(),replayed:true};}
+      if(db.prepare('SELECT id FROM workspace_receipts WHERE id=?').get(value.id))throw fail('import_conflict','That operation ID was already used for another change.',409);
+      id(value.previewId,'preview ID');if(typeof value.archiveHash!=='string'||!/^[a-f\d]{64}$/.test(value.archiveHash)||!Number.isSafeInteger(value.expectedRevision)||value.expectedRevision<0||!Array.isArray(value.items)||!value.items.length||value.items.length>100)throw fail('invalid_import','Use the original preview, current revision and at most 100 items.');
+      const state=snapshot();if(state.revision!==value.expectedRevision)throw Object.assign(fail('revision_conflict','The workspace changed. Review the current counts before recovering copies.',409),{workspace:state});
+      const at=iso(now()),seen=new Set(),allIds=new Set([...state.tasks,...state.notes,...state.workflows,...state.preferences].map(item=>item.id.toLowerCase())),imported=[],counts={tasks:0,notes:0,workflows:0};
+      for(const selected of value.items){
+        if(!selected||!['task','note','workflow'].includes(selected.kind)||typeof selected.sourceId!=='string'||!UUID.test(selected.sourceId)||selected.sourceId!==selected.value?.id)throw fail('invalid_import','A selected item does not match its original source identity.');
+        const key=selected.kind+':'+selected.sourceId.toLowerCase();if(seen.has(key))throw fail('invalid_import','Recover each selected source item once.');seen.add(key);
+        const source=validateWorkspaceRecoveryItem(selected.kind,selected.value,workflowCatalog),hex=createHash('sha256').update('workspace-content-recovery:'+value.id+':'+key).digest('hex').slice(0,32),fresh=`${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+        if(allIds.has(fresh))throw fail('import_conflict','A fresh recovered identity already exists. Retain the original recovery evidence.',409);allIds.add(fresh);
+        const item={...source,id:fresh,createdAt:at,updatedAt:at},field={task:'tasks',note:'notes',workflow:'workflows'}[selected.kind];if(selected.kind==='workflow')item.enabled=false;
+        state[field].push(item);counts[field]++;imported.push({kind:selected.kind,sourceId:selected.sourceId,id:fresh,title:selected.kind==='workflow'?source.name:source.title});
+      }
+      if(state.tasks.length>2000||state.notes.length>1000||state.workflows.length>100)throw fail('workspace_limit','The selected copies exceed the workspace item limits. Choose fewer items.',429);
+      state.revision++;state.activity.push({id:randomUUID(),type:'recoverContent',summary:`Recovered ${imported.length} content ${imported.length===1?'copy':'copies'}; routines remain disabled`,at});state.activity=state.activity.slice(-250);
+      const encoded=JSON.stringify(state);if(Buffer.byteLength(encoded)>8*1024*1024)throw fail('workspace_limit','The selected copies exceed the workspace storage limit.',429);
+      const receipt={id:value.id,previewId:value.previewId,archiveHash:value.archiveHash,appliedRevision:state.revision,createdAt:at,imported,counts},receiptJson=JSON.stringify(receipt),retained=db.prepare('SELECT count(*) AS count,COALESCE(sum(length(CAST(receipt_json AS BLOB))),0) AS bytes FROM workspace_import_receipts').get();
+      if(retained.count>=200||retained.bytes+Buffer.byteLength(receiptJson)>32*1024*1024||Buffer.byteLength(receiptJson)>512*1024)throw fail('import_receipt_limit','Retained recovery history reached its limit. Existing receipts remain unchanged.',429);
+      if(db.prepare('SELECT count(*) AS count FROM workspace_receipts').get().count>=50000)throw fail('workspace_limit','The workspace reached its operation receipt limit.');
+      db.prepare('UPDATE workspace SET state=? WHERE id=1').run(encoded);db.prepare('INSERT INTO workspace_receipts VALUES(?,?)').run(value.id,value.requestDigest);db.prepare('INSERT INTO workspace_import_receipts VALUES(?,?,?)').run(value.id,value.requestDigest,receiptJson);
+      return{receipt,workspace:state,replayed:false};
+    });
+  }
   const work=installWorkStore({db,now,conversationLimit:limits.conversations,checkOpen});
-  return { snapshot, apply, configureWorkflowTools, executionReceipt, beginExecution, checkpointExecution, finishExecution, chatReceipt, beginChat, finishChat, listConversations, createConversation, getConversation, beginConversationTurn, recordConversationActions, finishConversationTurn, ...work, close() { if (!closed) { closed = true; db.close(); } } };
+  return { snapshot, apply, configureWorkflowTools, workspaceImportCatalog:()=>structuredClone(workflowCatalog), getWorkspaceImport, importWorkspaceContent, executionReceipt, beginExecution, checkpointExecution, finishExecution, chatReceipt, beginChat, finishChat, listConversations, createConversation, getConversation, beginConversationTurn, recordConversationActions, finishConversationTurn, ...work, close() { if (!closed) { closed = true; db.close(); } } };
 }
