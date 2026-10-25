@@ -42,17 +42,30 @@ Check the exact window/control and input. Use its button, or say/type exactly
 Its Speak this command button records the command. Old or expired previews
 cannot receive it. The model cannot approve its own desktop input.
 
-MISSING A TOOL?
-Open Build a feature and describe what you need.
-The app creates actual source changes, runs checks, and shows the diff.
-Ordinary verified features may activate automatically. Protected changes need
-review and Activate feature. Build history also offers rollback.
-A queued or failed build is not an installed feature.
-Reviewed server-worker updates restart and reconnect under the normal launcher.
-Changing the host program itself needs its owning host stopped and relaunched;
-a browser refresh cannot apply host code. Settings can restart a managed worker.
-Restart desktop app loads source-runtime Electron edits; a copied desktop package
-needs rebuilding to include repository changes.
+MISSING A TOOL? FINISH THE ORIGINAL REQUEST
+1. Ask for the result in Chat or by voice. If a missing tool needs building,
+   open the linked build. Your request is kept apart from Build instructions.
+2. Read the actual changes and checks. Protected changes need review and
+   Activate feature; ordinary verified changes may activate automatically.
+   Wait for any required service restart and readiness check.
+3. When Continue original request appears, choose it. Or, with that build open,
+   say exactly "continue original request". Nothing resumes automatically.
+4. Open work shows the separate job's real result and action receipts.
+   Earlier completed actions are reused, rather than saved again.
+
+The continuation keeps the original AI connection, project access and selected
+window. A changed or unavailable source blocks it; it never substitutes your
+current selection. If a response is lost, use Check continuation. That only
+reads the original saved ID. Stop retains actions already completed.
+
+A queued build, an activated panel or an accepted handoff is not a finished task.
+The direct Build a feature form edits source; it has no linked original task.
+Build history also offers rollback. See docs/BUILD_FOLLOW_THROUGH.md.
+Reviewed server changes restart the host and worker under the normal launcher.
+Settings > Restart Companion service performs the same managed restart.
+Launcher-control changes require Stop Companion.cmd, then Start Companion.cmd;
+a browser refresh cannot apply them. Restart desktop app loads source-runtime
+Electron edits; a copied desktop package needs rebuilding to include them.
 
 NEXT TIME
 Double-click the same launcher. Your tasks, notes, workflows, and build history

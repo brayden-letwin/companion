@@ -37,6 +37,8 @@ Each workflow run retains its original definition and real partial results. An e
 
 **Tools → Files** connects a folder you choose to chat, voice, Work and connected AI tools. Read and save requested UTF-8 text/code files, inspect actual edit history, and Undo recent edits. Each request keeps its original folder; removing access stops dependent future operations. Companion’s own source and private data stay on the Build/review path. See [Project files](docs/PROJECT_FILES.md) for access, recovery and size limits.
 
+When a chat or voice task needs a missing tool, its linked build keeps **Your request** separate from **Build instructions**. Review and activate the change, wait for the callable tool and runtime to be ready, then choose **Continue original request**. You can also say that exact phrase while the intended build is open. The separate Work job keeps the original request, AI connection, project access and window selection; earlier completed actions are reused. It never resumes automatically or substitutes your current source. [Build follow-through](docs/BUILD_FOLLOW_THROUGH.md) explains the steps, Stop and read-only recovery checks.
+
 | View | What works now |
 | --- | --- |
 | **Chat** | Saved conversations, actual action receipts, and a typing/manual-microphone fallback. |
@@ -108,6 +110,9 @@ Windows API keys are encrypted with **DPAPI for the current Windows user**, boun
 3. It runs fixed syntax, regression, registration, and applicable feature checks. The interface shows actual events, source diffs, and check output.
 4. Passing routine frontend changes may activate automatically when that option is enabled. Protected controls, backend/launcher changes, and file deletions require review of the concrete diff and an **Activate feature** action.
 5. Activation checks that the source has not changed since the candidate was prepared. **Roll back changes** restores the retained version when the affected files have not subsequently changed.
+6. If the build came from a chat/voice task, wait for **Continue original request**, then choose it explicitly. **Open work** shows its actual result and partial receipts. A direct build-form request or external patch changes source without creating a linked task to finish.
+
+An installed browser panel alone does not make a function callable by the AI. Follow-through waits for the required tool, exact source and loaded runtime. If the original AI configuration, project grant or selected window is unavailable, the continuation stops with a reason. A lost acknowledgement offers **Check continuation**, which reads its saved ID without resending the task. A confirmed pre-admission Ready check permits a new deliberate Continue with that same ID.
 
 Ask “What failed in that build?” to inspect its actual checks through chat or voice. Companion can read a selected build's original request, changed paths, and bounded diagnostics. Ask it to fix the failure to start a focused correction; asking for status alone does not request another build. An applied entry records build history, while current source and runtime availability still need separate verification.
 
@@ -147,6 +152,8 @@ The command runs the outer launcher, service host and worker with Node’s built
 npm test
 npm run check
 ```
+
+The 0.16 update passed **623 Node tests** and **62 source syntax checks**. In a separate test app, real GPT built a missing Task fit tool, its reviewed activation loaded a fresh service, and **Continue original request** ran that tool and saved the exact result. Retrying and restarting preserved one completed Work job and single notes. The primary app now serves 0.16 with its full saved workspace unchanged. [QA.md](QA.md) records the actual checks and remaining physical-voice, native-shell and account checks.
 
 The 0.15 update passed 529 Node tests and 55 JavaScript syntax checks. Live browser, GPT and MCP checks saved and undid real synthetic text files while preserving BOM, emoji and CRLF. The source-builder regression baseline also passed without activation. [QA.md](QA.md) records exact recovery checks and the human picker, physical-voice and Electron checks still outstanding.
 

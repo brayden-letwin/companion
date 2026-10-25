@@ -17,6 +17,8 @@ Companion's current direction is a minimal general productivity assistant in the
 - [x] Independent Work jobs with separate saved intent, two concurrent turns, a bounded queue, frozen app-provider settings, actual outcomes, per-job Stop and GET-only handoff checks.
 - [x] Reviewable explicitly taught preferences with archiving/reteaching; preferences shape context and never grant action permission.
 - [x] Direct task/note editing, completion/reopening, note archiving, and search.
+- [x] Human-chosen local project folders shared with chat/voice/Work/MCP through exact bindings, paged UTF-8 reads, hash-checked writes, journals, recent Undo and GET-only uncertain-save checks.
+- [x] Linked build → original request: separate accepted intent/specification, current source/tool/runtime proof, one explicit follow-through Work identity, frozen context, prior-effect reuse and actual capability completion receipts.
 - [x] Full-list task search, exact project filters, priority/due sorting, progressive rendering, and expandable complete instructions.
 - [x] Real allowlisted tools read and change the saved workspace; responses carry actual receipts.
 - [x] Explicit reusable workflows execute supported actions in order and report completed steps or failure.
@@ -71,6 +73,7 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 - [x] Run concrete registered-capability acceptance cases in guarded children with fixture-only host effects.
 - [ ] Add acceptance checks for generated interactions, not just syntax and module loading.
 - [ ] Make missing-capability requests produce useful, scoped plans, with progress that reflects actual work.
+- [x] Work with explicitly chosen project files; broader binary formats and multi-file search remain separate work.
 - [ ] Add project organization and better task scheduling; extend the retained conversation/context foundation where real use needs it.
 - [x] Paginated task reads, explicit completeness metadata, complete detail sections, and actual full-set/project counts for larger workspaces.
 - [ ] Improve workflow editing and failure recovery while keeping each action's outcome visible.
