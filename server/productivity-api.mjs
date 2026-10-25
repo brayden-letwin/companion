@@ -106,6 +106,23 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
     if (status.managed) res.once('finish', () => requestRuntimeRestart(jobId ? { jobId } : {}));
     return { ...status, restartRequested: status.managed, requiresManualRestart: !status.managed };
   }
+  async function guardedRequest(req, res, session, id, run) {
+    const key = `${session.scope}:direct:${id}`;
+    if (active.has(key)) throw fail(409, 'request_active', 'This direct action is already running. Inspect its result before retrying.');
+    if (active.size >= 3) throw fail(429, 'assistant_busy', 'Companion is working on three requests. Stop one or try again shortly.');
+    const controller = new AbortController(), disconnected = () => { if (!res.writableEnded) controller.abort(); };
+    active.set(key,controller);res.once('close',disconnected);req.once('aborted',disconnected);
+    if (req.aborted || res.destroyed) controller.abort();
+    const timeout = setTimeout(()=>controller.abort(),240000);timeout.unref?.();
+    try {
+      if (controller.signal.aborted) throw Object.assign(fail(499,'request_cancelled','Stopped before this action could begin.'),{name:'AbortError'});
+      return await run(controller.signal);
+    } finally { clearTimeout(timeout);res.off('close',disconnected);req.off('aborted',disconnected);if(active.get(key)===controller)active.delete(key); }
+  }
+  function directOperationId(body) {
+    if (body.operationId !== undefined && (typeof body.operationId !== 'string' || !UUID.test(body.operationId))) throw fail(400,'invalid_id','Use a stable UUID for an explicit action retry.');
+    return body.operationId || randomUUID();
+  }
   async function chat(req, res, body, session, services) {
     fields(body, ['id','message','providerId','history','conversationId','expectedRevision']);
     const id = text(body.id, 80, 'Request ID'); if (!/^[a-zA-Z\d_-]+$/.test(id)) throw fail(400, 'invalid_id', 'Use a valid request ID.');
@@ -272,12 +289,12 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
         if (route === BASE + '/providers/select') { fields(body, ['id']); await services.router.select(body.id); json(res, 200, await providerStatus(services.router)); return true; }
         if (route === BASE + '/providers/remove') { fields(body, ['id']); await services.router.remove(body.id); json(res, 200, await providerStatus(services.router)); return true; }
         if (route === BASE + '/tools/run') {
-          fields(body, ['tool','arguments','operationId']); const requestId = body.operationId || randomUUID();
-          const result = await services.tools.execute(body.tool, body.arguments || {}, { requestId: `${OWNER}:${requestId}`, callId: 'direct' });
+          fields(body, ['tool','arguments','operationId']); const requestId = directOperationId(body);
+          const result = await guardedRequest(req,res,session,requestId,signal=>services.tools.execute(body.tool, body.arguments || {}, { requestId: `${OWNER}:${requestId}`, callId: 'direct', signal }));
           json(res, 200, { tool: body.tool, result, requestId, workspace: services.store.snapshot() }); return true;
         }
         const workflow = /^\/api\/assistant\/workspace\/workflows\/([a-f\d-]+)\/run$/i.exec(route);
-        if (workflow) { fields(body, ['operationId']); json(res, 200, await services.tools.runWorkflow(workflow[1], { requestId: `${OWNER}:${body.operationId || randomUUID()}` })); return true; }
+        if (workflow) { fields(body, ['operationId']); const requestId=directOperationId(body); json(res, 200, await guardedRequest(req,res,session,requestId,signal=>services.tools.runWorkflow(workflow[1], { requestId: `${OWNER}:${requestId}`, signal }))); return true; }
         if (route === BASE + '/features') {
           fields(body, ['prompt','providerId','autoApply']); const status = await services.router.getStatus();
           json(res, 202, await services.builder.request({ ...body, providerId: body.providerId || status.defaultProviderId }, OWNER)); return true;

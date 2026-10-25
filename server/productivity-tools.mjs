@@ -83,7 +83,7 @@ export function createProductivityTools({ store, builder, desktop, root, capabil
       case 'get_preferences': return { preferences: state.preferences.filter(preference => args.includeArchived || !preference.archived), revision: state.revision };
       case 'remember_preference': { const result = mutate('rememberPreference', args); return { preference: result.workspace.preferences.find(preference => preference.key === args.key.trim()), replayed: result.replayed }; }
       case 'forget_preference': { const result = mutate('forgetPreference', args); return { preference: result.workspace.preferences.find(preference => preference.id === args.preferenceId), replayed: result.replayed }; }
-      case 'run_workflow': return runWorkflow(args.workflowId, { requestId, callId, providerId, signal });
+      case 'run_workflow': return runWorkflow(args.workflowId, context);
       case 'build_feature': {
         if (!builder) throw fail('The feature builder is not available.', 'builder_unavailable');
         const receiptId = `tool:${operationId(requestId || 'local', callId || JSON.stringify([name, args]))}`;
@@ -133,7 +133,7 @@ export function createProductivityTools({ store, builder, desktop, root, capabil
     executionBudget(context);
     if(context.signal?.aborted)throw Object.assign(new Error('Workflow stopped.'),{name:'AbortError'});
     const receiptId=`workflow:${operationId(context.requestId||randomUUID(),context.callId||'workflow')}`,digest=capabilityHash({workflowId});
-    const replay=saved=>saved.state==='in_progress'||saved.state==='interrupted'?{id:workflowId,status:'interrupted',steps:saved.checkpoint?.steps||[],error:'This workflow was already started. Inspect its completed actions before making a fresh request.',code:'workflow_interrupted',workspace:store.snapshot()}:{...saved.result,workspace:store.snapshot(),replayed:true};
+    const replay=saved=>saved.state==='in_progress'?{id:workflowId,status:'running',steps:saved.checkpoint?.steps||[],message:'This workflow is still running. Check its saved result rather than starting it again.',code:'workflow_running',workspace:store.snapshot()}:saved.state==='interrupted'?{id:workflowId,status:'interrupted',steps:saved.checkpoint?.steps||[],error:'This workflow was already started. Inspect its completed actions before making a fresh request.',code:'workflow_interrupted',workspace:store.snapshot()}:{...saved.result,workspace:store.snapshot(),replayed:true};
     const prior=store.executionReceipt(receiptId,digest);if(prior)return replay(prior);
     const workflow = store.snapshot().workflows.find(item => item.id === workflowId);
     if (!workflow || !workflow.enabled) throw fail('Choose an enabled saved workflow.', 'workflow_unavailable');
