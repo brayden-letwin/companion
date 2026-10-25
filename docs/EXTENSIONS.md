@@ -55,6 +55,8 @@ Multi-file replacement is journaled, not one filesystem transaction. After an in
 
 This workflow provides revision checks, rollback and constrained verification. The network preload supplements Node 24's filesystem/process permissions; it is not an OS sandbox for hostile programs. Existing selected regression checks and module loading do not prove every new UI interaction is correct; inspect the concrete preview and add behavior tests appropriate to the feature.
 
+The retained regression baseline also includes the original productivity store, saved-conversation UI, and voice-session tests when present. These run from trusted copies against the candidate source, so changing a candidate test cannot weaken them. Microphone-controller source (`src/voice-session.mjs`) is protected and requires concrete review. The main app now starts as a white voice canvas; registered panels remain under the bottom strip's More menu. Preserve that minimal default and keep browser setup inside `mount`.
+
 ## Worker restart and host relaunch
 
 The launcher runs `server/companion-host.mjs` as an owning parent with one server worker on the fixed loopback port. The parent manages only its own worker, checks its identity/health, and preserves the private data directory across restarts. A worker restart is not a full host relaunch.

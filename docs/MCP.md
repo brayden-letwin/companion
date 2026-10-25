@@ -21,8 +21,11 @@ This is a protocol process, so it does not display an interactive prompt. Its st
 | Tool | Purpose |
 | --- | --- |
 | `companion_workspace` | Read tasks, notes, workflows, focus state, and activity. |
+| `companion_list_tools` | Discover current registered tool descriptions and JSON input schemas, including memory and desktop tools. |
 | `companion_run_tool` | Run a registered workspace or desktop tool with `tool`, `arguments`, and optional retry `operationId`. Desktop input produces an exact pending review; this wrapper cannot approve it. |
-| `companion_chat` | Send `{id, message, providerId?}` to Companion's selected assistant. |
+| `companion_chat` | Send `{id, message, providerId?}`; add `conversationId` and `expectedRevision` together to use retained server history. |
+| `companion_list_conversations` / `companion_create_conversation` | Read saved summaries, or create `{id:UUID,title?}` with an optional title of at most 80 characters. |
+| `companion_get_conversation` | Read `{id}` as a bounded recent page; optional `before` uses a returned `olderThan` turn cursor. |
 | `companion_build_feature` | Queue `{prompt, providerId?, autoApply?}` as a real coding job. |
 | `companion_list_builds` / `companion_get_build` | Read actual build status, diffs, and checks. The latter takes `{id}`. |
 | `companion_apply_build` | Explicitly activate a verified build using `{id}`. |
@@ -62,6 +65,8 @@ A queued job is not an installed feature. Read its concrete changes and verifica
 ## Retry, cancellation, and connection boundaries
 
 For workspace mutations, retain the same `operationId` on an explicit retry. For `companion_chat`, retain the same `id` and input; completed and partial/interrupted request receipts prevent rerunning actions. Feature generation and external-patch submissions create jobs without an idempotency key: after an uncertain response, inspect build history before starting another.
+
+Saved conversations require their current revision when starting a turn. Read the conversation first; a conflict returns current conversation evidence and never silently resends the draft. `hasMore`, `olderThan`, and `totalTurns` distinguish a recent page from complete retained history. Use the cursor to load earlier messages. Running turns from an interrupted server become explicitly interrupted; completed actions and build/review references remain recorded. History is context, not fresh authorization. The facade exposes 18 wrapper tools; the registered workspace/desktop registry is separate and discoverable with `companion_list_tools`.
 
 An MCP cancellation notification aborts the pending HTTP request and suppresses its late MCP response, following the [cancellation specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation). Actions already finished and builds already queued may remain. Use the build's explicit cancel or rollback tool when appropriate. Closing stdin aborts pending bridge requests and ends the process.
 
