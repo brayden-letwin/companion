@@ -25,7 +25,7 @@ try {
     $rawRequest = [Console]::In.ReadToEnd()
     if ([Text.Encoding]::UTF8.GetByteCount($rawRequest) -gt 64000) { Stop-Desktop 'invalid_input' 'The desktop request is too large.' }
     $request = $rawRequest | ConvertFrom-Json
-    if ($request.action -notin @('health','listApps','listWindows','openApp','focusWindow','openUrl','readWindow','performAction')) { Stop-Desktop 'invalid_input' 'That desktop action is not supported.' }
+    if ($request.action -notin @('health','listApps','listWindows','openApp','focusWindow','openUrl','readWindow','readContext','performAction')) { Stop-Desktop 'invalid_input' 'That desktop action is not supported.' }
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
     Add-Type -AssemblyName System.Windows.Forms
@@ -165,6 +165,76 @@ namespace CompanionDesktop {
         return $false
     }
 
+    # Context is a separate read-only path. Existing input snapshots keep their exact-title checks.
+    function Assert-ContextWindow($expected) {
+        if ($null -eq $expected -or [string]$expected.handle -notmatch '^\d{1,20}$') { Stop-Desktop 'invalid_input' 'Choose a known desktop window.' }
+        $actual = [CompanionDesktop.Native]::Read([long]$expected.handle)
+        if ($null -eq $actual -or $actual.pid -ne $expected.pid -or $actual.startTime -cne [string]$expected.startTime -or $actual.className -cne [string]$expected.className -or $actual.appName -cne [string]$expected.appName) { Stop-Desktop 'stale_window' 'The selected context window changed or closed.' }
+        if ((Test-Terminal ($actual.appName + ' ' + $actual.title)) -or (Test-Sensitive ($actual.appName + ' ' + $actual.title))) { Stop-Desktop 'protected_target' 'Terminal and credential windows cannot be used as question context.' }
+        return $actual
+    }
+    function Context-RuntimeId($rootElement) {
+        try { return [string]($rootElement.GetRuntimeId() -join '.') } catch { return '' }
+    }
+    function Context-LimitText([string]$value, [int]$limit) {
+        if ($null -eq $value) { return '' }
+        $end = [Math]::Min($limit, $value.Length)
+        if ($end -gt 0 -and $end -lt $value.Length -and [char]::IsHighSurrogate($value[$end - 1]) -and [char]::IsLowSurrogate($value[$end])) { $end -= 1 }
+        return $value.Substring(0, $end)
+    }
+    function Context-Tree($rootElement) {
+        $stack = New-Object 'System.Collections.Generic.Stack[System.Windows.Automation.AutomationElement]'
+        $stack.Push($rootElement); $visited = 0; $nodes = New-Object System.Collections.Generic.List[object]
+        $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+        while ($stack.Count -gt 0 -and $visited -lt 3000) {
+            $candidate = $stack.Pop(); $visited += 1
+            # Validate privacy before ValuePattern or TextPattern reads, even for offscreen controls.
+            if (Test-ProtectedElement $candidate) { Stop-Desktop 'protected_target' 'This window contains credential or protected controls and cannot be context.' }
+            try {
+                if (-not $candidate.Current.IsOffscreen) { [void]$nodes.Add($candidate) }
+                $childElement = $walker.GetLastChild($candidate)
+                while ($null -ne $childElement -and $stack.Count -lt 6000) { $stack.Push($childElement); $childElement = $walker.GetPreviousSibling($childElement) }
+            } catch { Stop-Desktop 'stale_window' 'The context accessibility tree changed during its privacy check.' }
+        }
+        return [pscustomobject]@{ nodes=@($nodes.ToArray()); truncated=($stack.Count -gt 0) }
+    }
+    function Context-Body($tree) {
+        # Bulk document text is used only after a complete protected-control scan.
+        if (-not $tree.truncated) {
+            foreach ($candidate in $tree.nodes) {
+                if (Test-ProtectedElement $candidate) { Stop-Desktop 'protected_target' 'The selected source became protected.' }
+                if ($candidate.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document) { continue }
+                $pattern = Get-Pattern $candidate ([System.Windows.Automation.TextPattern]::Pattern)
+                if ($null -ne $pattern) {
+                    $value = [string]$pattern.DocumentRange.GetText(12001)
+                    if ($value) { return [ordered]@{ text=(Context-LimitText $value 12000); truncated=($value.Length -gt 12000) } }
+                }
+            }
+        }
+        $builder = New-Object Text.StringBuilder; $clipped = [bool]$tree.truncated
+        $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+        foreach ($candidate in $tree.nodes) {
+            if (Test-ProtectedElement $candidate) { Stop-Desktop 'protected_target' 'The selected source became protected.' }
+            $current = $candidate.Current; $value = ''
+            # Leaf edits cannot include unseen descendant credential fields. Prefer bounded TextPattern.
+            if ($current.ControlType -eq [System.Windows.Automation.ControlType]::Edit -and $null -eq $walker.GetFirstChild($candidate)) {
+                $pattern = Get-Pattern $candidate ([System.Windows.Automation.TextPattern]::Pattern)
+                if ($null -ne $pattern) { $value = [string]$pattern.DocumentRange.GetText(12001) }
+                else { $pattern = Get-Pattern $candidate ([System.Windows.Automation.ValuePattern]::Pattern); if ($null -ne $pattern) { $value = [string]$pattern.Current.Value } }
+            }
+            # Some read-only MSAA/WinForms documents expose their text as a leaf Pane name.
+            $nameTextType = $current.ControlType -in @([System.Windows.Automation.ControlType]::Text, [System.Windows.Automation.ControlType]::Pane, [System.Windows.Automation.ControlType]::Document, [System.Windows.Automation.ControlType]::Edit)
+            if (-not $value -and $nameTextType -and $null -eq $walker.GetFirstChild($candidate)) { $value = [string]$current.Name }
+            if (-not $value) { continue }
+            $remaining = 12000 - $builder.Length
+            if ($remaining -le 1) { $clipped = $true; break }
+            if ($builder.Length) { [void]$builder.Append("`n"); $remaining -= 1 }
+            $piece = Context-LimitText $value $remaining; [void]$builder.Append($piece)
+            if ($piece.Length -lt $value.Length) { $clipped = $true; break }
+        }
+        return [ordered]@{ text=$builder.ToString(); truncated=$clipped }
+    }
+
     $result = $null
     switch ($request.action) {
         'health' { $desktopRoot = [System.Windows.Automation.AutomationElement]::RootElement; $result = [ordered]@{ available=([Environment]::UserInteractive -and $null -ne $desktopRoot); bridge='windows-uia'; interactive=[Environment]::UserInteractive } }
@@ -232,6 +302,24 @@ namespace CompanionDesktop {
             }
             [void](Assert-Window $request.window)
             $result = [ordered]@{ elements=@($elements.ToArray()); protectedInput=(Test-CompanionWindow $rootElement $knownWindow ([int]$request.companionPort)); truncated=($stack.Count -gt 0) }
+        }
+        'readContext' {
+            $knownWindow = Assert-ContextWindow $request.window
+            $rootElement = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]([long]$knownWindow.handle))
+            $rootRuntimeId = Context-RuntimeId $rootElement
+            if ($request.rootRuntimeId -and $rootRuntimeId -cne [string]$request.rootRuntimeId) { Stop-Desktop 'stale_window' 'The selected context root changed.' }
+            if (Test-CompanionWindow $rootElement $knownWindow ([int]$request.companionPort)) { Stop-Desktop 'protected_target' 'Companion cannot be used as its own question context.' }
+            $tree = Context-Tree $rootElement
+            $body = [ordered]@{ text=''; truncated=[bool]$tree.truncated }
+            if ($request.includeText -eq $true) { $body = Context-Body $tree }
+            # Recheck the protected tree and exact current title before releasing any collected text.
+            $finalTree = Context-Tree $rootElement
+            if (-not $tree.truncated -and $finalTree.truncated) { Stop-Desktop 'protected_target' 'The context privacy scan changed and could not be completed.' }
+            if (Test-CompanionWindow $rootElement $knownWindow ([int]$request.companionPort)) { Stop-Desktop 'protected_target' 'The selected source became Companion controls.' }
+            [void](Assert-Window $knownWindow)
+            $finalRuntimeId = Context-RuntimeId $rootElement
+            if ($rootRuntimeId -and $rootRuntimeId -cne $finalRuntimeId) { Stop-Desktop 'stale_window' 'The selected context root changed during reading.' }
+            $result = [ordered]@{ window=$knownWindow; rootRuntimeId=$rootRuntimeId; protectedContext=$false; text=$body.text; truncated=([bool]$body.truncated -or [bool]$finalTree.truncated) }
         }
         'performAction' {
             $knownWindow = Assert-Window $request.window
