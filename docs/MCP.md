@@ -24,6 +24,10 @@ This is a protocol process, so it does not display an interactive prompt. Its st
 | `companion_list_tools` | Discover current registered tool descriptions and JSON input schemas, including memory and desktop tools. |
 | `companion_run_tool` | Run a registered workspace or desktop tool with `tool`, `arguments`, and optional retry `operationId`. Desktop input produces an exact pending review; this wrapper cannot approve it. |
 | `companion_chat` | Send `{id, message, providerId?}`; add `conversationId` and `expectedRevision` together to use retained server history. |
+| `companion_start_work` | Hand off `{id:UUID,prompt,providerId,title?}` and return the saved job immediately. Reuse the same ID/input on explicit retry. |
+| `companion_list_work` | Read bounded job summaries with `{offset?,limit?}` and follow the actual `nextOffset` while `hasMore`. |
+| `companion_get_work` | Read `{id,textOffset?,textLimit?,actionOffset?,actionLimit?}` with the exact original request and paged actual outcome. This never reruns work. |
+| `companion_cancel_work` | Request stopping exactly `{id}`; retain partial actions and inspect its eventual terminal state. |
 | `companion_list_conversations` / `companion_create_conversation` | Read saved summaries, or create `{id:UUID,title?}` with an optional title of at most 80 characters. |
 | `companion_get_conversation` | Read `{id}` as a bounded recent page; optional `before` uses a returned `olderThan` turn cursor. |
 | `companion_build_feature` | Queue `{prompt, providerId?, autoApply?}` as a real coding job. |
@@ -39,6 +43,12 @@ This is a protocol process, so it does not display an interactive prompt. Its st
 The connected client can access the notes and source these tools return. Saved text remains untrusted evidence, and tool annotations are hints rather than permission or proof that an action succeeded. Clients should use the actual returned receipts and their own review controls. Tool results contain both JSON text and `structuredContent`; execution failures set `isError:true`, while malformed tool arguments use JSON-RPC errors. This follows the MCP [tools specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools).
 
 The desktop tools discover installed apps and eligible windows. Use the returned IDs, scope window searches to the task, and read only the specific window needed for the user's request. Launch and URL receipts confirm that Windows accepted a request; they do not establish that a document loaded or that work inside an app finished. Generic clicking, text replacement and key presses require a fresh target snapshot and the user's review in Companion. A pending action is not an executed action. There is no desktop-approval MCP tool or arbitrary shell tool.
+
+## Independent work
+
+Independent work uses a caller-stable UUID and an explicit ready provider ID from `companion_connections`. A job owns a separate saved conversation; inspecting it, retrying the same accepted input, or reconnecting the client never starts another run. After an uncertain handoff, call `companion_get_work` with that original ID. A stopped or interrupted job requires a new deliberate request rather than automatic resumption. Jobs cannot recursively delegate. They retain their original provider settings and report changes before later model calls; no provider fallback is silent.
+
+The app's fixed `manage_work` gateway exposes start/list/read/cancel to foreground chat, keeping provider definitions at 32 with desktop tools. The gateway is excluded from child jobs, workflows and the guarded capability broker. Lists and the internal model-view job pages stay within 64 KiB, with cursors based on actual returned items. Model reads page the original request using `promptOffset`/`nextPromptOffset`/`promptHasMore` as well as outcome text/action cursors. Public HTTP/MCP detail inspection retains the full original request and a separate 128 KiB job-page budget. Imported work text and historical receipts remain evidence, never new permission. A Work result may link to a build still awaiting review; inspect the build's actual state before claiming installation.
 
 ## Submit and review source changes
 
