@@ -212,13 +212,40 @@ function microphoneContext(contents, details) {
   return record && record.window.isVisible() && details?.isMainFrame === true && trustedURL(details.requestingUrl, record.mode)
     && (details.securityOrigin === undefined || trustedOrigin(details.securityOrigin)) && !details.embeddingOrigin;
 }
+function backupDownloadFilename(item, contents, frame) {
+  try {
+    const record = recordFor(contents);
+    // Electron 45 supplies the initiating frame. Missing/detached frames stay
+    // blocked rather than treating the whole tab as proof of the initiator.
+    if (!record || !frame || frame !== contents.mainFrame || !trustedURL(frame.url, record.mode)
+      || !trustedOrigin(item.getInitiatorOrigin())) return null;
+    const value = item.getURL(), parsed = new URL(value);
+    const match = /^\/api\/assistant\/backups\/([a-fA-F\d]{8}-[a-fA-F\d]{4}-[a-fA-F\d]{4}-[a-fA-F\d]{4}-[a-fA-F\d]{12})\/download$/.exec(parsed.pathname);
+    if (!match || parsed.origin !== origin || parsed.username || parsed.password || parsed.search || parsed.hash
+      || value !== origin + parsed.pathname) return null;
+    const chain = item.getURLChain();
+    if (!Array.isArray(chain) || chain.length !== 1 || chain[0] !== value) return null;
+    const filename = `companion-workspace-${match[1].toLowerCase()}.json`;
+    if (item.getFilename() !== filename || item.getMimeType().split(';', 1)[0].trim().toLowerCase() !== 'application/json') return null;
+    return filename;
+  } catch { return null; }
+}
 function installPermissions() {
   session.defaultSession.setPermissionCheckHandler((contents, permission, requestingOrigin, details = {}) =>
     !!(permission === 'media' && trustedOrigin(requestingOrigin) && microphoneContext(contents, details) && details.mediaType === 'audio'));
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details = {}) => callback(!!(permission === 'media'
     && microphoneContext(contents, details) && Array.isArray(details.mediaTypes) && details.mediaTypes.length > 0 && details.mediaTypes.every(type => type === 'audio'))));
   session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => callback(null));
-  session.defaultSession.on('will-download', event => event.preventDefault());
+  session.defaultSession.on('will-download', (event, item, contents, frame) => {
+    const filename = backupDownloadFilename(item, contents, frame);
+    if (!filename) { event.preventDefault(); return; }
+    try {
+      // Keep Electron's native Save dialog. Only the fixed server filename is
+      // suggested; neither a renderer nor this bridge chooses a destination.
+      item.setSaveDialogOptions({ title: 'Save Companion workspace backup', defaultPath: filename,
+        buttonLabel: 'Save backup', filters: [{ name: 'Companion workspace backup', extensions: ['json'] }] });
+    } catch { event.preventDefault(); }
+  });
 }
 function installBridge() {
   function on(channel, callback) {
