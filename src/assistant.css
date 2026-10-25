@@ -62,3 +62,5 @@
   .provider-card>.provider-actions{grid-column:1/-1;grid-row:2;flex-direction:row;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:10px 16px;margin-left:0;min-width:0}
   .provider-actions>.provider-check-controls{max-width:100%;min-width:0}
 }
+
+.workflow-enabled-field{margin:16px 0 6px}.workflow-actions{flex-wrap:wrap}.workflow-failed-step,.workflow-run-warning{font-size:11px;line-height:1.8;color:#555;overflow-wrap:anywhere}.workflow-run-warning{margin-top:14px}.workflow-receipt-heading{font-size:11px;font-weight:500;color:#444;margin:14px 0 8px}
