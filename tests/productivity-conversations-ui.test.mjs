@@ -43,13 +43,14 @@ function createLocks() {
   return { request: async (name, options, callback) => { if (held.has(name)) return callback(null); held.add(name); try { return await callback({ name }); } finally { held.delete(name); } } };
 }
 
-async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], catalog = [] } = {}) {
+async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], workspaceWorkflows = [], storedWorkflowRuns = [], catalog = [] } = {}) {
   const nodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(match => [match[1], new Element()]));
   nodes.get('provider-type').value = 'openai';
   const records = new Map(saved.map(item => [item.id, structuredClone(item)]));
   const storage = new Map(selected ? [['companion.workspace.ui.v1.conversationId', JSON.stringify(selected)]] : []);
+  if (storedWorkflowRuns.length) storage.set('companion.workspace.ui.v1.pendingWorkflowRuns', JSON.stringify(storedWorkflowRuns));
   const requests = [], intervals = [], timers = new Set();
-  const workspace = { revision: 0, tasks: [], notes: [], workflows: [], preferences: structuredClone(workspacePreferences), focus: null, activity: [] };
+  const workspace = { revision: 0, tasks: [], notes: [], workflows: structuredClone(workspaceWorkflows), preferences: structuredClone(workspacePreferences), focus: null, activity: [] };
   let custom = intercept, permission = null, stoppedTracks = 0;
   const provider = { id: 'codex', type: 'codex', label: 'GPT', model: '', ready: true };
   const dialogs = [...html.matchAll(/<dialog\b[^>]*\bid="([^"]+)"/g)].map(match => nodes.get(match[1]));
@@ -451,5 +452,47 @@ test('saving edited workflows preserves existing capability pins and leaves new 
     app.setIntercept((url, options, { workspace }) => { if (!url.endsWith('/workspace/operations')) return null; saved = JSON.parse(options.body); workspace.revision++; workspace.workflows = [{ id: A, name: saved.name, steps: saved.steps }]; return response({ workspace, replayed: false }); });
     await app.nodes.get('workflow-form').dispatch('submit', { preventDefault() {} });
     assert.equal(saved.type, 'saveWorkflow'); assert.deepEqual(saved.steps[0].capability, pin); assert.equal(saved.steps[0].arguments.text, 'Existing value'); assert.equal(saved.steps[1].arguments.text, 'New value'); assert.equal('capability' in saved.steps[1], false);
+  } finally { app.close(); }
+});
+
+test('an uncertain workflow run offers Check last run with the same ID through live replay and terminal completion', async () => {
+  const meta = customAction({ parameters: { type: 'object', properties: {}, additionalProperties: false } });
+  const flow = { id: A, name: 'Receipt fixture', enabled: true, steps: [{ tool: meta.name, arguments: {}, capability: { id: meta.capabilityId, version: meta.version, hash: meta.hash } }] };
+  const app = await createUI({ catalog: [meta], workspaceWorkflows: [flow] });
+  try {
+    const bodies = []; let effects = 0;
+    app.setIntercept((url, options, { workspace }) => {
+      if (!url.endsWith('/workflows/' + A + '/run')) return null;
+      bodies.push(options.body); const operationId = JSON.parse(options.body).operationId;
+      if (bodies.length === 1) { effects++; workspace.tasks.push({ id: B, title: 'One actual effect', status: 'todo' }); throw new Error('Synthetic response lost after acceptance'); }
+      assert.equal(effects, 1);
+      if (bodies.length === 2) return response({ id: A, status: 'running', code: 'workflow_running', steps: [], workspace });
+      if (bodies.length === 4) { assert.notEqual(operationId, JSON.parse(bodies[0]).operationId); effects++; }
+      return response({ id: A, status: 'completed', steps: [], workspace });
+    });
+    await app.ui.runWorkflow(flow); assert.equal(bodies.length, 1); assert.match(app.nodes.get('workflow-list').textContent, /Check last run/);
+    const pending = JSON.parse(app.storage.get('companion.workspace.ui.v1.pendingWorkflowRuns'));
+    assert.deepEqual(pending, [{ workflowId: A, operationId: JSON.parse(bodies[0]).operationId }]);
+    app.ui.applyToolCatalog({ tools: [], capabilityStatus: { ready: false, message: 'Current tool changed' } });
+    await app.ui.runWorkflow({ ...flow, enabled: false, steps: [{ tool: 'cap_removed', arguments: {} }] });
+    assert.equal(bodies[1], bodies[0]); assert.match(app.nodes.get('workflow-list').textContent, /still running/); assert.doesNotMatch(app.nodes.get('workflow-list').textContent, /Workflow stopped:/);
+    await app.ui.runWorkflow(flow); assert.equal(bodies[2], bodies[0]); assert.match(app.nodes.get('workflow-list').textContent, /Workflow finished/);
+    assert.deepEqual(JSON.parse(app.storage.get('companion.workspace.ui.v1.pendingWorkflowRuns')), []);
+    await app.ui.runWorkflow(flow); assert.equal(bodies.length, 4); assert.equal(effects, 2);
+  } finally { app.close(); }
+});
+
+test('a reload retains only workflow request IDs and never sends the pending run until an explicit check', async () => {
+  const flow = { id: A, name: 'Saved pending workflow', enabled: false, steps: [{ tool: 'cap_removed', arguments: { text: 'Original values remain on server' } }] };
+  let posts = 0;
+  const app = await createUI({ workspaceWorkflows: [flow], storedWorkflowRuns: [{ workflowId: A, operationId: B }], intercept: (url, options, { workspace }) => {
+    if (!url.endsWith('/workflows/' + A + '/run')) return null;
+    posts++; assert.deepEqual(JSON.parse(options.body), { operationId: B }); return response({ id: A, status: 'cancelled', error: 'Stopped after its recorded steps.', steps: [], workspace });
+  } });
+  try {
+    assert.equal(posts, 0); const check = descendants(app.nodes.get('workflow-list')).find(node => node.tagName === 'button' && node.textContent === 'Check last run');
+    assert.ok(check); assert.equal(check.disabled, false); await check.dispatch('click'); await until(() => /Workflow stopped:/.test(app.nodes.get('workflow-list').textContent));
+    assert.equal(posts, 1); assert.deepEqual(JSON.parse(app.storage.get('companion.workspace.ui.v1.pendingWorkflowRuns')), []);
+    assert.ok([...app.storage.values()].every(value => !value.includes('Original values remain on server')));
   } finally { app.close(); }
 });

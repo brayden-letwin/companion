@@ -29,6 +29,17 @@ test('workflow terminal receipts pin the original definition across edits, disab
   const other=f.apply('saveWorkflow',{name:'Other sequence',steps:[{tool:'get_time',arguments:{}}]},restarted).workspace.workflows.at(-1);await assert.rejects(tools.runWorkflow(other.id,context),{code:'request_conflict'});
 });
 
+test('checking a live workflow returns running with its checkpoint and never starts a duplicate run',async t=>{
+  const f=await fixture(t);let release,entered,runs=0;const held=new Promise(resolve=>release=resolve),started=new Promise(resolve=>entered=resolve);
+  const tools=createProductivityTools({store:f.store,capabilities:[fakeCapability()],executeCapability:async()=>{runs++;entered();await held;return{value:{finished:true},hostActions:[]};}});
+  const flow=f.apply('saveWorkflow',{name:'Held live sequence',steps:[{tool:'create_task',arguments:{title:'Only one first effect'}},{tool:'cap_fixture',arguments:{text:'Wait'}}]}).workspace.workflows[0],context={requestId:'live-workflow'};
+  const running=tools.runWorkflow(flow.id,context);
+  try{
+    await started;const check=await tools.runWorkflow(flow.id,{requestId:context.requestId});assert.equal(check.status,'running');assert.equal(check.code,'workflow_running');assert.equal(check.error,undefined);assert.equal(check.steps.length,1);assert.equal(check.steps[0].result.task.id,f.store.snapshot().tasks[0].id);assert.equal(runs,1);assert.equal(f.store.snapshot().tasks.length,1);
+    release();const finished=await running;assert.equal(finished.status,'completed');const replay=await tools.runWorkflow(flow.id,{requestId:context.requestId});assert.equal(replay.status,'completed');assert.deepEqual(replay.steps,finished.steps);assert.equal(runs,1);
+  }finally{release();await running;}
+});
+
 test('central workflow schema validation preflights every step and custom version pins cannot silently change',async t=>{
   const f=await fixture(t),capability=fakeCapability();let runs=0;createProductivityTools({store:f.store,capabilities:[capability],executeCapability:async()=>{runs++;return{value:{},hostActions:[]};}});
   const before=f.store.snapshot();assert.throws(()=>f.apply('saveWorkflow',{name:'Invalid later step',steps:[{tool:'create_task',arguments:{title:'Must not be saved'}},{tool:'start_focus',arguments:{minutes:'twenty'}}]}),{code:'invalid_tool'});assert.deepEqual(f.store.snapshot(),before);
@@ -71,6 +82,8 @@ test('one shared budget bounds nested workflow capability effects and terminal r
   const flow=f.apply('saveWorkflow',{name:'Bounded nested work',steps:[{tool:'cap_fixture',arguments:{text:'one'}},{tool:'create_task',arguments:{title:'Must never run'}}]}).workspace.workflows[0],budget={remaining:2};
   const result=await tools.runWorkflow(flow.id,{requestId:'bounded-workflow',executionBudget:budget});assert.equal(result.status,'failed');assert.equal(result.code,'execution_budget_exceeded');assert.equal(budget.remaining,0);assert.equal(result.failedStep.hostActions[0].status,'completed');assert.equal(result.failedStep.hostActions[1].status,'failed');assert.equal(f.store.snapshot().tasks.length,1);assert.equal(f.store.snapshot().notes.length,0);
   const replay=await tools.runWorkflow(flow.id,{requestId:'bounded-workflow',executionBudget:{remaining:48}});assert.equal(replay.code,result.code);assert.deepEqual(replay.failedStep,result.failedStep);assert.equal(runs,1);assert.equal(f.store.snapshot().tasks.length,1);
+  const gatewayFlow=f.apply('saveWorkflow',{name:'Gateway shares its budget',steps:[{tool:'create_task',arguments:{title:'One gateway effect'}},{tool:'save_note',arguments:{text:'Must not reset budget'}}]}).workspace.workflows.at(-1),gatewayBudget={remaining:2};
+  const gateway=await tools.execute('run_workflow',{workflowId:gatewayFlow.id},{requestId:'gateway-budget',callId:'one',executionBudget:gatewayBudget});assert.equal(gateway.code,'execution_budget_exceeded');assert.equal(gatewayBudget.remaining,0);assert.equal(gateway.steps.length,1);assert.equal(f.store.snapshot().tasks.length,2);assert.equal(f.store.snapshot().notes.length,0);
 });
 
 test('workspace compare-and-swap, exact replay and cross-operation ID conflicts survive SQLite restart', async t => {

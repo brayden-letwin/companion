@@ -214,6 +214,27 @@ test('direct capability failure retains actual nested effects for panels and MCP
   assert.ok((await f.request('POST','/api/assistant/tools/run',body,user)).status>=400);assert.equal(f.store.snapshot().tasks.length,1);
 });
 
+test('global Stop reaches direct capability and workflow routes and preserves their actual partial effects', {timeout:10000},async t=>{
+  const custom=await capabilityFixture(t,{workspace:true,code:'export async function execute(args,ctx){await ctx.runTool("create_task",{title:"Direct task before Stop"});await new Promise(resolve=>setTimeout(resolve,5000));return {total:2};}'});
+  const f=await fixture(t,custom),user=await f.session();
+  const waitForTask=async count=>{const until=Date.now()+3000;while(f.store.snapshot().tasks.length<count&&Date.now()<until)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(f.store.snapshot().tasks.length,count);};
+  const body={tool:'cap_double_value',arguments:{value:1},operationId:randomUUID()},pending=f.request('POST','/api/assistant/tools/run',body,user);await waitForTask(1);
+  await f.request('POST','/api/assistant/stop',{},user);const stopped=await pending;assert.equal(stopped.status,499);assert.equal(stopped.value.hostActions[0].status,'completed');assert.equal((await f.request('POST','/api/assistant/tools/run',body,user)).status,499);assert.equal(f.store.snapshot().tasks.length,1);
+  const workflowId=randomUUID();f.store.apply({operationId:workflowId,expectedRevision:f.store.snapshot().revision,type:'saveWorkflow',name:'Direct Stop workflow',steps:[{tool:'cap_double_value',arguments:{value:2}},{tool:'save_note',arguments:{text:'Must not run after Stop'}}]});
+  const operation={operationId:randomUUID()},running=f.request('POST',`/api/assistant/workspace/workflows/${workflowId}/run`,operation,user);await waitForTask(2);await f.request('POST','/api/assistant/stop',{},user);const workflow=await running;
+  assert.equal(workflow.value.status,'cancelled');assert.equal(workflow.value.failedStep.hostActions[0].status,'completed');assert.equal(f.store.snapshot().notes.length,0);assert.equal((await f.request('POST',`/api/assistant/workspace/workflows/${workflowId}/run`,operation,user)).value.replayed,true);assert.equal(f.store.snapshot().tasks.length,2);
+  for(const operationId of [42,{},'not-a-uuid'])assert.equal((await f.request('POST','/api/assistant/tools/run',{...body,operationId},user)).status,400);
+});
+
+test('disconnecting a direct capability request aborts its child and records the first real effect without rerun', {timeout:10000},async t=>{
+  const custom=await capabilityFixture(t,{workspace:true,code:'export async function execute(args,ctx){await ctx.runTool("create_task",{title:"Direct task before disconnect"});await new Promise(resolve=>setTimeout(resolve,5000));return {total:2};}'});
+  const f=await fixture(t,custom),user=await f.session(),body={tool:'cap_double_value',arguments:{value:1},operationId:randomUUID()},encoded=JSON.stringify(body);
+  const request=http.request(f.origin+'/api/assistant/tools/run',{method:'POST',headers:{Origin:f.origin,Cookie:user.cookie,'X-CSRF-Token':user.csrfToken,'Content-Type':'application/json','Content-Length':Buffer.byteLength(encoded)}});request.on('error',()=>{});request.end(encoded);
+  const until=Date.now()+3000;while(f.store.snapshot().tasks.length===0&&Date.now()<until)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(f.store.snapshot().tasks.length,1);request.destroy();
+  let replay;const stoppedBy=Date.now()+2000;do{await new Promise(resolve=>setTimeout(resolve,20));replay=await f.request('POST','/api/assistant/tools/run',body,user);}while(replay.status===409&&Date.now()<stoppedBy);
+  assert.equal(replay.status,499);assert.equal(replay.value.hostActions[0].result.task.title,'Direct task before disconnect');assert.equal(f.store.snapshot().tasks.length,1);
+});
+
 test('cancelled capability chat checkpoints its actual nested task and exact retries cannot repeat it', {timeout:10000},async t=>{
   const custom=await capabilityFixture(t,{workspace:true,code:'export async function execute(args,ctx){await ctx.runTool("create_task",{title:"Task before capability cancellation"});await new Promise(resolve=>setTimeout(resolve,5000));return {total:2};}'});
   const f=await fixture(t,{...custom,complete:async()=>({text:'',toolCalls:[{id:'cancelled-capability',name:'run_capability',arguments:{name:'cap_double_value',arguments:{value:1}}}]})}),user=await f.session(),conversationId=randomUUID();await f.request('POST','/api/assistant/conversations',{id:conversationId},user);
