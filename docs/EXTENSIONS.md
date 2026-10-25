@@ -120,6 +120,8 @@ await builder.close();
 
 An applied job's `providedFeatures` records which panels that build added or changed. It is historical metadata, not proof that a later build has retained or successfully mounted them. The interface verifies current panel readiness before offering Open. Existing older job records may use `installedFeatures`; treat that field with the same caution. Source activation, panel readiness, catalog availability, and successful execution are separate observations.
 
+A chat/voice task can now retain a linked original request while its missing callable tool is built. After review/activation and current source/tool/runtime checks, the human chooses **Continue original request** to start one separate Work run. A mounted panel alone cannot satisfy this readiness check. The original request, provider and source bindings stay fixed; prior completed effects are reused and nothing resumes automatically. Direct build-form requests and external patches remain source changes without an attached task. See [Build follow-through](BUILD_FOLLOW_THROUGH.md) for the user flow and recovery contract.
+
 The host must authenticate local browser/API requests and enforce exact Origin and CSRF checks on writes. The builder's `localOwner` identifies one local workspace across app restarts; it is not a cloud identity or a multi-tenant account. Keep builder storage private and outside ordinary source, never expose it as static assets, and do not log credentials or complete prompts containing personal information. Git publishing is deliberately separate.
 
 ## Local REST and MCP access
