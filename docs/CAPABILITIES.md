@@ -95,7 +95,7 @@ The parent assigns nested IDs such as `host:1`, checkpoints an accepted call bef
 
 ## Use the same action from every surface
 
-The normal desktop runtime keeps 28 provider tool definitions: 21 workspace tools, including `list_capabilities` and `run_capability`, plus seven desktop tools. Custom capabilities live in the dynamic catalog rather than being appended to every model request. This avoids exceeding the provider router's 32-definition limit.
+The normal desktop runtime keeps 29 provider tool definitions: 22 workspace tools, including `list_capabilities`, `run_capability`, and read-only `inspect_feature_build`, plus seven desktop tools. Custom capabilities live in the dynamic catalog rather than being appended to every model request. This avoids exceeding the provider router's 32-definition limit.
 
 Chat and voice discover `list_capabilities`, then call:
 
