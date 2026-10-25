@@ -14,6 +14,7 @@ Companion's current direction is a minimal general productivity assistant in the
 - [x] Almost blank white voice canvas, small bottom tool strip, and hidden Chat fallback.
 - [x] Opt-in local speech detection, quiet discard, remembered granted-permission restore, and one capture owner across same-profile app windows.
 - [x] Retained conversations shared across Companion windows and MCP clients, revision guards, partial action checkpoints, explicit interruption, and bounded earlier-message pages.
+- [x] Independent Work jobs with separate saved intent, two concurrent turns, a bounded queue, frozen app-provider settings, actual outcomes, per-job Stop and GET-only handoff checks.
 - [x] Reviewable explicitly taught preferences with archiving/reteaching; preferences shape context and never grant action permission.
 - [x] Direct task/note editing, completion/reopening, note archiving, and search.
 - [x] Full-list task search, exact project filters, priority/due sorting, progressive rendering, and expandable complete instructions.
@@ -80,8 +81,9 @@ Provider protocol tests use mocks unless a dated QA entry says otherwise. A save
 - [x] A small native corner/tray for the general workspace, with registered-shortcut status and global Stop.
 - [ ] Validate shortcut conflicts, multi-monitor placement, scaling, and longer native sessions across target PCs.
 - [ ] A deliberate voice bridge into an existing Codex development conversation, if the user still wants that exact route.
-- [ ] Multiple independent work streams under voice direction, with clear status and retained intent across them.
+- [ ] Validate human voice coordination of the implemented independent Work streams; real GPT/MCP/browser handoffs and persisted outcomes are verified, while current automatic microphone behavior still needs a human check.
 - [x] Explicit selected-window accessibility reads with snapshot IDs, expiry, and no continuous screen monitoring.
+- [x] Human-selected window context bound to each question or background job, fresh on submit/start, with visible provenance and no silent fallback.
 - [ ] Add user-selected screen-region context and broader application coverage without inferring thought from pointer movement.
 - [x] Implement scoped Windows actions with target rechecks, input previews, protected-target blocks, and outcome receipts.
 - [ ] Validate broader applications and input patterns; generic scoped input is not unrestricted PC control.

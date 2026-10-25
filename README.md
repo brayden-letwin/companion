@@ -19,6 +19,7 @@ Try a concrete request:
 - “What are my open tasks?”
 - “Start 25 minutes of focus time.”
 - “Build a project board that groups my existing tasks by project.”
+- “Work on these two requests in the background while I keep talking.”
 
 Requests go to your selected AI. Completed actions appear as real tool receipts and saved workspace changes. Tasks and notes also have direct editing controls; saved workflows can run without a model interpreting the request.
 
@@ -40,6 +41,7 @@ Each workflow run retains its original definition and real partial results. An e
 | **Tasks** | Search the full list, filter projects, sort by priority or due date, read complete instructions, and load more results. Create, edit, complete, and reopen persistent tasks. |
 | **Notes** | Save, search, edit, and archive persistent notes. Keeping an AI reply is an explicit action. |
 | **Workflows** | Save a sequence of supported local actions and run it with actual step results. |
+| **Tools → Work** | Hand off independent requests, inspect actual results, stop one job, or open its saved conversation. |
 | **Computer** | Search/open installed apps, choose a window as question context, read a snapshot, and review prepared input. |
 | **Build a feature** | Request real source changes, follow their progress, inspect diffs and checks, activate, and roll back. |
 | **Settings** | Select or configure AI connections and optional offline read-aloud. |
@@ -49,6 +51,16 @@ Workflows currently use registered Companion actions such as creating tasks, sav
 Changes persist on the local server. If a concurrent edit changes the workspace, your draft remains available for an explicit retry. If a save response is lost, **Confirm last change** resends the original operation receipt rather than creating a duplicate.
 
 Ask “How many open, high-priority, and overdue tasks do I have?” for actual counts across all matching tasks. Task-list results are pages with explicit totals and continuation offsets; they no longer silently omit older records. Long instructions have a short list preview and complete detail reads. The Tasks view searches titles, full details, and projects, while showing 50 matches at a time. **No project** and a project literally named **Unassigned** remain separate choices.
+
+## Hand off work and keep talking
+
+Say “work on this in the background,” or open **Tools → Work**, describe the request, and choose **Hand off**. Companion saves it in a separate conversation and returns an acknowledgement while the job continues. Two jobs can run independently, with up to ten more queued. Changing conversations or hiding the window does not cancel accepted work while the local server runs. **Show work** opens their status, results and real action receipts; progress history stays collapsed until you open it.
+
+**Stop this work** targets the selected active job. The main **Stop** control and global Stop shortcut also cancel background jobs. Cancellation retains completed actions and can show **Stopping…** until the active turn settles. After a restart, unfinished jobs are marked interrupted and require a new explicit request; they are never silently repeated. If a handoff response is uncertain, **Check handoff** reads the original saved job ID instead of resubmitting it. Only that opaque pending ID is kept in browser storage.
+
+**Result ready** means the job's assistant turn has finished. A linked feature build or desktop preview has its own actual state; the label does not claim code is installed or input is approved. Open its conversation or build link to continue. Jobs use the chosen AI connection and detect changes to its app-configured model/endpoint before later calls. A Codex connection with an empty model field still uses the CLI's configured default. Independent jobs cannot create more work jobs themselves.
+
+When a selected window is attached, the job retains that original source binding and reads it when its turn starts. Clearing or replacing that source stops dependent active work; a queued job whose source was released fails before asking the AI, without switching windows. The general white canvas remains the default, with Work behind Tools.
 
 ## The native corner
 
@@ -133,7 +145,7 @@ npm test
 npm run check
 ```
 
-The 0.11 update passed 380 Node tests and 41 JavaScript syntax checks. Real Windows and GPT checks used a synthetic selected window: the next question picked up changed text and title through the same pin, and Clear stopped source reads. Browser checks verified accessible selection controls and saved provenance. Earlier complete-task and MCP checks remain recorded in [QA.md](QA.md), alongside exact coverage and hardware checks still outstanding.
+The 0.12 update passed 431 Node tests and 46 JavaScript syntax checks. Real GPT ran two note-saving jobs while a separate foreground chat remained usable. A real MCP client handed off another job, and browser checks exercised handoff, job Stop, saved conversation access and progress. Exact retries and a managed restart preserved results without duplicate effects. [QA.md](QA.md) separates these checks from mocks, earlier selected-window/task evidence, and hardware checks still outstanding.
 
 The 0.9.1 checkpoint passed 320 Node tests and 39 JavaScript syntax checks. Real GPT inspected a retained failed build, read its complete original request through paged inspection, and generated a Project board candidate that passed its nine builder checks plus four independent fixture checks. It remains awaiting protected-code activation in the isolated test app. Source planning now fits complete reference files within measured fixed context limits, with one bounded re-selection. Build headings stay concise while the full request remains expandable. See QA.md for live outcomes and remaining generated-feature checks.
 
