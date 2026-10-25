@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createSharedServer } from '../server/shared-server.mjs';
 
 const READY = { provider: 'local', model: 'synthetic-local-math', aiConfigured: true, reasoningReady: true, transcriptionReady: true, unavailableReason: null, transcriptionUnavailableReason: null };
+const APP_VERSION = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
 const question = id => ({ id, question: 'Why is this sequence Cauchy?', context: { paper: 'Synthetic test passage', page: 2, text: 'The tail is bounded by a geometric series.' }, familiarity: { 'Cauchy sequence': 'new' }, history: [{ role: 'user', text: 'Explain the bound.' }] });
 
 function fakeProvider({ deferred = false, ignoreCancel = false } = {}) {
@@ -65,7 +66,7 @@ test('personal assistant works without a reading-group account and reuses its ow
   assert.equal(reused.csrfToken, user.csrfToken); assert.equal(reused.response.headers.get('set-cookie'), null);
   assert.deepEqual((await f.request('GET', '/api/session', undefined, user)).value, { setupRequired: true, user: null });
   assert.equal((await f.request('GET', '/api/room', undefined, user)).status, 401);
-  assert.equal((await f.request('GET', '/api/health')).value.version, '0.5.0');
+  assert.equal((await f.request('GET', '/api/health')).value.version, APP_VERSION);
   assert.deepEqual((await f.request('GET', '/api/assistant/status', undefined, user)).value, READY);
   const answer = await f.request('POST', '/api/assistant/ask', question('first'), user);
   assert.deepEqual(answer.value, { id: 'first', text: 'Synthetic local explanation.' }); assert.equal(answer.status, 200);
