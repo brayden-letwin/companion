@@ -4,6 +4,16 @@
 
 During the 0.21 work, the user answered the explicit check: enable voice once on the white canvas, then say “What time is it?” without tapping the microphone again. They reported **“It answers aloud.”** This is a human report that basic automatic listening and read-aloud worked in that check. The exact running build/device, noisy-room behavior, hot interruption and wake-word behavior were not independently captured. Do not repeat that already answered basic check as though it remains unanswered.
 
+## Focused source editing and original test support (0.23.0)
+
+The full suite passed **901 Node tests**, with no failures or skips, in **45.083 seconds**; **74 source syntax checks** passed. The existing 131 interface test bodies and 1,071 assertions remain byte-identical after moving their shared scaffolding. Its four assertions and two later helper blocks were also preserved. The main interface shrank from 226,190 to **212,755 bytes**; the isolated editor is **15,908 bytes**, with a **32,423-byte** reusable fixture.
+
+A deterministic injected provider exercised the actual builder against a separate **187-file** copy of the full application source. Planning supplied the complete editor and fixture with required contracts in **143,525 content bytes** / **148,532 serialized bytes**. A deliberately unfinished editor label passed the original trusted suite but failed its actual new UI regression. One correction retained the exact original request, complete failed files and unchanged new test, passed verification and stopped at protected review without activation. Its complete context used **162,585 content bytes** / **167,897 serialized bytes**, below the unchanged 420,000 / 470,000 limits. This new proof is not a real GPT completion; an additional live GPT edit remains pending.
+
+A second external candidate changed the mutable helper and broke the actual editor. The original frozen helper still ran the complete existing interface tests against that broken source, detected the real wrong value, and blocked activation. Separate focused guarded tests cover the same relative-path boundary. Candidate helpers cannot replace the original baseline; future helper dependencies must also be explicitly frozen.
+
+Primary rollout followed an idle check, a consistent **51-page** SQLite backup and normal Stop/Start. Host **28476** / worker **36048** serve 0.23.0. Every original row across **twelve** existing productivity tables matches the backup; no synthetic data entered the main workspace. The served editor exactly matches source and remains protected. The actual browser opened its unchanged action form, then returned to the blank white canvas with Chat closed and microphone off. The native Save-dialog check remains separately unverified.
+
 ## Original routine-run history (0.22.0)
 
 The final suite passed **898 Node tests**, with no failures or skips, in **20.819 seconds**; **73 source syntax checks** passed. Earlier checkpoints remain retained separately. Coverage includes original definitions after rename/disable/deletion, exact GET-only operation lookup, six-column legacy writer compatibility, unknown legacy times, separate atomic timestamp metadata, bounded 100-row scans, Unicode JSON pages, child-only revision conflicts, 3 MiB combined-outcome tail access, interrupted nested receipts and stale UI/voice contexts.

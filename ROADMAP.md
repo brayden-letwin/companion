@@ -34,6 +34,7 @@ Companion's current direction is a minimal general productivity assistant in the
 - [x] Voice/chat can inspect selected build diagnostics and page through the complete stored request before requesting a focused correction.
 - [x] Source planning measures complete-file context costs and permits one re-selection within fixed byte/message limits before generation.
 - [x] Fixed regression checks, bounded source context, module/feature checks, and protected-change review.
+- [x] Isolated routine editor and reusable real-interface fixture for focused complete-source edits; original trusted helper copies preserve all existing assertion checks when a candidate changes its test scaffolding.
 - [x] One bounded correction after generated-candidate verification failure, with the same original request/provider/source baseline, preserved acceptance checks and immutable attempt reports. External patches and interrupted work never correct automatically.
 - [x] Automatic activation for passing ordinary changes when enabled; explicit activation for protected changes and deletions.
 - [x] Source-conflict protection, retained backups, rollback, and interrupted-promotion recovery states.
