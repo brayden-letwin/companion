@@ -2,6 +2,7 @@ import path from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import { randomUUID, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { builtinCatalog, validateWorkflowSteps } from './capability-registry.mjs';
 
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const fail = (code, message, statusCode = 400) => Object.assign(new Error(message), { code, statusCode });
@@ -16,15 +17,7 @@ function date(value) { if (value == null || value === '') return null; if (typeo
 function canonical(value) { if (Array.isArray(value)) return value.map(canonical); if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])); return value; }
 const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 const initial = () => ({ revision: 0, tasks: [], notes: [], workflows: [], preferences: [], focus: null, activity: [] });
-const STEP_TOOLS = new Set(['list_tasks','create_task','update_task','complete_task','list_notes','save_note','search_notes','start_focus','stop_focus','get_time']);
 const CONVERSATION_DEFAULTS = Object.freeze({ conversations: 200, turns: 400, outcomeBytes: 512 * 1024, totalBytes: 64 * 1024 * 1024 });
-function steps(value) {
-  if (!Array.isArray(value) || !value.length || value.length > 12) throw fail('invalid_workflow', 'A workflow needs between 1 and 12 steps.');
-  return value.map(step => {
-    if (!step || !STEP_TOOLS.has(step.tool) || !step.arguments || typeof step.arguments !== 'object' || Array.isArray(step.arguments) || JSON.stringify(step.arguments).length > 24000) throw fail('invalid_workflow', 'Choose supported local workflow steps.');
-    return { tool: step.tool, arguments: structuredClone(step.arguments) };
-  });
-}
 
 /** One persistent workspace for the current OS user. Reading-room accounts are separate. */
 export async function createProductivityStore({ dataDirectory, now = Date.now, conversationLimits = {} } = {}) {
@@ -38,9 +31,12 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
     CREATE TABLE IF NOT EXISTS conversation_turns(sequence INTEGER PRIMARY KEY AUTOINCREMENT,conversation_id TEXT NOT NULL,request_id TEXT UNIQUE NOT NULL,digest TEXT NOT NULL,message TEXT NOT NULL,provider_id TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,outcome_json TEXT,base_bytes INTEGER NOT NULL,stored_bytes INTEGER NOT NULL,reserved_bytes INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS conversation_turns_order ON conversation_turns(conversation_id,sequence);
     CREATE TABLE IF NOT EXISTS conversation_preferences(id INTEGER PRIMARY KEY CHECK(id=1),active_conversation_id TEXT);`);
+  db.exec('CREATE TABLE IF NOT EXISTS execution_receipts(id TEXT PRIMARY KEY,hash TEXT NOT NULL,state TEXT NOT NULL,definition_json TEXT NOT NULL,checkpoint_json TEXT,result_json TEXT);');
   db.prepare('INSERT OR IGNORE INTO workspace VALUES(1,?)').run(JSON.stringify(initial()));
   const snapshot = () => { const state = JSON.parse(db.prepare('SELECT state FROM workspace WHERE id=1').get().state); if (!Object.hasOwn(state, 'preferences')) state.preferences = []; if (!Array.isArray(state.preferences)) throw fail('workspace_invalid', 'Saved preferences could not be loaded safely.', 503); return state; };
   let closed = false;
+  let workflowCatalog=builtinCatalog();
+  function configureWorkflowTools(catalog){if(!Array.isArray(catalog)||catalog.length>100||new Set(catalog.map(item=>item.name)).size!==catalog.length)throw fail('invalid_catalog','Use a bounded unique workflow catalog.');workflowCatalog=structuredClone(catalog);}
   function apply(operation) {
     if (closed) throw fail('workspace_closed', 'The workspace is shutting down.', 503);
     if (!operation || typeof operation !== 'object' || Array.isArray(operation)) throw fail('invalid_input', 'Provide a workspace operation.');
@@ -99,7 +95,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
           if (operation.workflowId && !item) throw fail('not_found', 'That workflow was not found.', 404);
           if (!item && state.workflows.length >= 100) throw fail('workspace_limit', 'Keep at most 100 workflows.');
           if (operation.enabled !== undefined && typeof operation.enabled !== 'boolean') throw fail('invalid_input', 'Enabled must be true or false.');
-          const update = { name: text(operation.name, 200, 'Workflow name'), description: optionalText(operation.description, 2000, 'Workflow description'), steps: steps(operation.steps), enabled: operation.enabled ?? true, updatedAt: at };
+          const update = { name: text(operation.name, 200, 'Workflow name'), description: optionalText(operation.description, 2000, 'Workflow description'), steps: validateWorkflowSteps(operation.steps,workflowCatalog), enabled: operation.enabled ?? true, updatedAt: at };
           if (item) Object.assign(item, update); else { item = { id: operation.operationId, ...update, createdAt: at }; state.workflows.push(item); }
           summary = `Saved workflow: ${item.name}`; break;
         }
@@ -154,14 +150,34 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
 
   function checkOpen() { if (closed) throw fail('workspace_closed', 'The workspace is shutting down.', 503); }
   function transaction(callback) { checkOpen(); db.exec('BEGIN IMMEDIATE'); try { const value = callback(); db.exec('COMMIT'); return value; } catch (error) { db.exec('ROLLBACK'); throw error; } }
+  function executionIdentity(requestId,digest){if(typeof requestId!=='string'||!/^[A-Za-z0-9:_-]{1,200}$/.test(requestId)||typeof digest!=='string'||!/^[a-f\d]{64}$/.test(digest))throw fail('invalid_input','Use a bounded execution identity and SHA-256 digest.');}
+  function executionReceipt(requestId,digest){checkOpen();executionIdentity(requestId,digest);const saved=db.prepare('SELECT * FROM execution_receipts WHERE id=?').get(requestId);if(!saved)return null;if(saved.hash!==digest)throw fail('request_conflict','That execution ID was used for different input.',409);return{state:saved.state,definition:JSON.parse(saved.definition_json),checkpoint:saved.checkpoint_json?JSON.parse(saved.checkpoint_json):null,result:saved.result_json?JSON.parse(saved.result_json):null};}
+  function executionData(value){let result=dataCopy(value),encoded=JSON.stringify(result);if(Buffer.byteLength(encoded)>1024*1024){const trim=(item,depth=0,key='')=>{if(typeof item==='string')return item.length>600?item.slice(0,600)+'… [details truncated]':item;if(depth>14)return '[nested details omitted]';if(Array.isArray(item))return item.slice(0,['steps','hostActions'].includes(key)?12:8).map(part=>trim(part,depth+1));if(item&&typeof item==='object')return Object.fromEntries(Object.entries(item).map(([name,part])=>[name,trim(part,depth+1,name)]));return item;};result={...trim(result),detailsTruncated:true};encoded=JSON.stringify(result);}if(Buffer.byteLength(encoded)>1024*1024)throw fail('response_limit','This execution receipt exceeds its bound.');return encoded;}
+  function beginExecution({id:requestId,digest,definition}){return transaction(()=>{const saved=executionReceipt(requestId,digest);if(saved)return saved;if(db.prepare('SELECT count(*) AS count FROM execution_receipts').get().count>=20000)throw fail('workspace_limit','The workspace has reached its execution receipt limit.');db.prepare('INSERT INTO execution_receipts VALUES(?,?,?,?,NULL,NULL)').run(requestId,digest,'in_progress',executionData(definition));return null;});}
+  function checkpointExecution({id:requestId,digest,checkpoint}){return transaction(()=>{const saved=executionReceipt(requestId,digest);if(!saved||saved.state!=='in_progress')throw fail('execution_finished','This execution is no longer running.',409);db.prepare('UPDATE execution_receipts SET checkpoint_json=? WHERE id=? AND hash=?').run(executionData(checkpoint),requestId,digest);return executionReceipt(requestId,digest);});}
+  function finishExecution({id:requestId,digest,result,failed=false}){return transaction(()=>{const saved=executionReceipt(requestId,digest);if(!saved)throw fail('missing_request','This execution receipt was not found.',409);const encoded=executionData(result),state=failed?'failed':'completed';if(saved.state!=='in_progress'){if(saved.state!==state||hash(saved.result)!==hash(JSON.parse(encoded)))throw fail('request_conflict','This execution already has a different outcome.',409);return saved;}db.prepare('UPDATE execution_receipts SET state=?,result_json=? WHERE id=? AND hash=?').run(state,encoded,requestId,digest);return executionReceipt(requestId,digest);});}
   function conversationRow(conversationId) { id(conversationId, 'conversation ID'); const row = db.prepare('SELECT * FROM conversations WHERE id=?').get(conversationId); if (!row) throw fail('conversation_not_found', 'That conversation was not found.', 404); return row; }
   function requestIdentity(value) { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(value)) throw fail('invalid_id', 'Choose a valid conversation request ID.'); return value; }
   function requestDigest(value) { if (typeof value !== 'string' || !/^[a-f\d]{64}$/.test(value)) throw fail('invalid_input', 'Use the conversation request SHA-256 digest.'); return value; }
   function dataCopy(value) { try { return JSON.parse(JSON.stringify(value, (key, entry) => key === 'rawContinuation' ? undefined : entry)); } catch { throw fail('invalid_input', 'Conversation outcomes must contain bounded JSON data.'); } }
+  function minimalResult(source,depth=0){
+    if(!source||typeof source!=='object'||depth>5)return{};const result={};
+    for(const key of ['task','note','workflow','featureJob','desktopAction','desktopReceipt'])if(source[key]&&typeof source[key]==='object')result[key]={id:source[key].id,...(source[key].status?{status:source[key].status}:{}),...(typeof source[key].outcomeUnknown==='boolean'?{outcomeUnknown:source[key].outcomeUnknown}:{}),...(key==='desktopAction'?{requiresFreshPreview:true}:{})};
+    if(source.capability)result.capability={id:source.capability.id,name:source.capability.name,version:source.capability.version,hash:source.capability.hash};
+    if(Array.isArray(source.hostActions))result.hostActions=source.hostActions.slice(0,12).map(action=>({id:action.id,tool:action.tool,status:action.status,result:minimalResult(action.result,depth+1)}));
+    if(Array.isArray(source.steps))result.steps=source.steps.slice(0,12).map(step=>({tool:step.tool,...(step.status?{status:step.status}:{}),result:minimalResult(step.result,depth+1)}));
+    if(source.failedStep)result.failedStep={index:source.failedStep.index,tool:source.failedStep.tool,...minimalResult(source.failedStep,depth+1)};
+    for(const key of ['id','status','code'])if(typeof source[key]==='string')result[key]=source[key].slice(0,100);
+    if(typeof source.outcomeUnknown==='boolean')result.outcomeUnknown=source.outcomeUnknown;
+    if(source.error)result.error=typeof source.error==='string'?source.error.slice(0,120):'This action did not complete.';
+    return result;
+  }
   function compact(value, size = 1024, depth = 0, key = '') {
     if (typeof value === 'string') return value.length > size ? value.slice(0, size) + '… [details truncated]' : value;
-    if (depth > 5) return '[nested details omitted]';
-    if (Array.isArray(value)) return value.slice(0, key === 'steps' ? 12 : 8).map(item => compact(item, size, depth + 1));
+    if(key==='hostActions'&&Array.isArray(value))return minimalResult({hostActions:value}).hostActions;
+    if(key==='capability'&&value&&typeof value==='object')return minimalResult({capability:value}).capability;
+    if (depth > 5) return value&&typeof value==='object'?minimalResult(value):'[nested details omitted]';
+    if (Array.isArray(value)) return value.slice(0, ['steps','hostActions'].includes(key) ? 12 : 8).map(item => compact(item, size, depth + 1));
     if (key === 'desktopAction' && value && typeof value === 'object') return { id: value.id, status: value.status, summary: compact(value.summary, size), target: compact(value.target, size, depth + 1), preview: value.preview, requiresApproval: value.requiresApproval, outcomeUnknown: value.outcomeUnknown, error: compact(value.error, size), ...(value.requiresFreshPreview ? { requiresFreshPreview: true } : {}) };
     if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).slice(0, 30).map(([childKey, entry]) => [childKey, compact(entry, size, depth + 1, childKey)]));
     return value;
@@ -177,9 +193,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
       encoded = JSON.stringify(result); if (Buffer.byteLength(encoded) <= limits.outcomeBytes) return { value: result, encoded };
     }
     result.actions = originalActions.map(action => {
-      const source = action.result || {}, references = {};
-      for (const key of ['task','note','workflow','featureJob','desktopAction','desktopReceipt']) if (source[key] && typeof source[key] === 'object') references[key] = { id: source[key].id, title: compact(source[key].title, 80), summary: compact(source[key].summary, 80), status: source[key].status, ...(typeof source[key].outcomeUnknown === 'boolean' ? { outcomeUnknown: source[key].outcomeUnknown } : {}), ...(key === 'desktopAction' ? { requiresFreshPreview: true } : {}) };
-      if (Array.isArray(source.steps)) references.steps = source.steps.slice(0, 12).map(step => ({ tool: step.tool, status: step.status, result: compact(step.result, 80, 0), ...(step.error ? { error: compact(step.error, 80) } : {}) }));
+      const source = action.result || {}, references = minimalResult(source);
       return { id: action.id, tool: action.tool, status: action.status, result: { ...references, ...(source.error ? { error: compact(source.error, 120), code: source.code } : {}), summary: 'Detailed result omitted; use its stored entity or build/action ID for current data.' }, resultTruncated: true };
     });
     if (result.featureJob) result.featureJob = { id: result.featureJob.id, status: result.featureJob.status, summary: compact(result.featureJob.summary, 80) };
@@ -280,6 +294,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
   // A fresh worker never resumes an old model/action turn. Preserve its last
   // durable tool checkpoint and close the paired receipt in one transaction.
   transaction(() => {
+    db.exec("UPDATE execution_receipts SET state='interrupted' WHERE state='in_progress';");
     for (const saved of db.prepare("SELECT * FROM conversation_turns WHERE status='running'").all()) {
       const partial = saved.outcome_json ? JSON.parse(saved.outcome_json) : {}, outcome = boundedOutcome({ statusCode: 409, code: 'request_interrupted', message: 'Companion restarted during this request. Any recorded actions remain; inspect the workspace and build history before starting another request.', actions: partial.actions || [], featureJob: partial.featureJob || null, conversationId: saved.conversation_id, conversationRevision: conversationRow(saved.conversation_id).revision + 1 });
       const receipt = chatReceipt(saved.request_id, saved.digest); const at = iso(now());
@@ -289,5 +304,5 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
       db.prepare('UPDATE conversations SET revision=revision+1,updated_at=?,active_request_id=NULL,last_status=? WHERE id=?').run(at, 'interrupted', saved.conversation_id);
     }
   });
-  return { snapshot, apply, chatReceipt, beginChat, finishChat, listConversations, createConversation, getConversation, beginConversationTurn, recordConversationActions, finishConversationTurn, close() { if (!closed) { closed = true; db.close(); } } };
+  return { snapshot, apply, configureWorkflowTools, executionReceipt, beginExecution, checkpointExecution, finishExecution, chatReceipt, beginChat, finishChat, listConversations, createConversation, getConversation, beginConversationTurn, recordConversationActions, finishConversationTurn, close() { if (!closed) { closed = true; db.close(); } } };
 }
