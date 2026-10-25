@@ -40,8 +40,8 @@ async function fixture(t, { complete = async () => ({ text: 'A synthetic answer.
     async source(owner, options) { builderCalls.push({ type: 'source', owner, options }); return { revision: 'synthetic-source-hash', files: [{ path: 'src/example.mjs', hash: 'synthetic-file-hash', ...(options.includeContent ? { content: 'export const example = true;' } : {}) }] }; },
     async sourceFile(owner,options){builderCalls.push({type:'sourceFile',owner,options});const content=options.path==='docs/notes & examples + 研究 # 100%.md'?'A😀B\r\nExact source text.':options.path==='src/example.mjs'?'export const example = true;\n':null;if(content===null)throw Object.assign(new Error('Source not found.'),{statusCode:404,code:'source_not_found'});return formatSourceFile({path:options.path,content,hash:createHash('sha256').update(content).digest('hex'),bytes:Buffer.byteLength(content)},options);},
     async submitPatch(input, owner) { builderCalls.push({ type: 'patch', input, owner }); return this.request({ prompt: 'External patch' }, owner); },
-    async apply(id, owner) { builderCalls.push({ type: 'apply', id, owner }); return { id, status: 'applied' }; },
-    async rollback(id, owner) { builderCalls.push({ type: 'rollback', id, owner }); return { id, status: 'rolled_back' }; },
+    async apply(id, owner) { builderCalls.push({ type: 'apply', id, owner }); return { id, status: 'applied',files:jobs.find(job=>job.id===id)?.files||[] }; },
+    async rollback(id, owner) { builderCalls.push({ type: 'rollback', id, owner }); return { id, status: 'rolled_back',files:jobs.find(job=>job.id===id)?.files||[] }; },
     async cancel(id, owner) { builderCalls.push({ type: 'cancel', id, owner }); return { id, status: 'cancelled' }; },
     async stopPending(owner) { builderCalls.push({type:'stopPending',owner}); const builds=[]; for(const job of jobs) if(['queued','generating','validating'].includes(job.status)) builds.push(await this.cancel(job.id,owner)); return {stopped:true,builds}; },
     async close() {},
@@ -73,6 +73,18 @@ async function capabilityFixture(t, {workspace=false,code}={}) {
 }
 
 async function waitForWork(f,user,id,status){const until=Date.now()+4000;for(;;){const result=await f.request('GET','/api/assistant/work/'+id,undefined,user);assert.equal(result.status,200,JSON.stringify(result.value.error));if(result.value.job.status===status)return result.value.job;assert.ok(Date.now()<until,'Work remained '+result.value.job.status+' instead of '+status);await new Promise(resolve=>setTimeout(resolve,25));}}
+
+test('runtime scopes stay explicit and parent or launcher source changes never claim a worker-only reload',async t=>{
+  const f=await fixture(t),user=await f.session(),before=f.store.snapshot();
+  assert.equal((await f.request('POST','/api/assistant/runtime/restart',{scope:'host'})).status,401);
+  const unavailable=await f.request('POST','/api/assistant/runtime/restart',{scope:'host'},user);assert.equal(unavailable.status,409);assert.equal(unavailable.value.error.code,'manual_host_restart_required');
+  for(const body of [{scope:'launcher'},{scope:'shell'},{scope:null},{scope:'host',targetPid:123},{jobId:null},{jobId:'../../other'}])assert.equal((await f.request('POST','/api/assistant/runtime/restart',body,user)).status,400);
+  for(const [file,scope]of [['server/companion-host.mjs','host'],['server/feature-builder.mjs','host'],['server/runtime-supervisor.mjs','launcher'],['server/runtime-host-entry.mjs','launcher']]){
+    const id=randomUUID();f.jobs.push({id,status:'applied',files:[{path:file}]});
+    for(const action of ['apply','rollback']){const result=await f.request('POST',`/api/assistant/features/${id}/${action}`,{},user);assert.equal(result.status,200);assert.equal(result.value.runtime.restartScope,scope);assert.equal(result.value.runtime.restartRequested,false);assert.equal(result.value.runtime.requiresManualRestart,true);assert.equal(result.value.runtime.hostRestartAvailable,false);}
+  }
+  const id=randomUUID();f.jobs.push({id,status:'applied',files:[{path:'src/features/example.mjs'}]});assert.equal((await f.request('POST',`/api/assistant/features/${id}/apply`,{},user)).value.runtime,undefined);assert.deepEqual(f.store.snapshot(),before);
+});
 
 test('targeted source HTTP reads preserve encoded exact paths, hashes and Unicode pages without model or workspace effects',async t=>{
   const f=await fixture(t),route='/api/assistant/features/source/file',path='docs/notes & examples + 研究 # 100%.md';assert.equal((await f.request('GET',route+'?path='+encodeURIComponent(path))).status,401);assert.equal(f.runtimeCount(),0);const user=await f.session(),before=f.store.snapshot();

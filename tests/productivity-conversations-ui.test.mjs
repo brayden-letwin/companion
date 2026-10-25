@@ -44,7 +44,7 @@ function createLocks() {
   return { request: async (name, options, callback) => { if (held.has(name)) return callback(null); held.add(name); try { return await callback({ name }); } finally { held.delete(name); } } };
 }
 
-async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], workspaceWorkflows = [], workspaceTasks = [], storedWorkflowRuns = [], catalog = [], contextWindows = [], savedWork = [], storedWorkIds = [] } = {}) {
+async function createUI({ saved = [], selected = null, intercept = null, waitForConversations = true, locks = createLocks(), workspacePreferences = [], workspaceWorkflows = [], workspaceTasks = [], storedWorkflowRuns = [], catalog = [], contextWindows = [], savedWork = [], storedWorkIds = [], runtimeBaseline = null, runtimeClock = null } = {}) {
   const nodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(match => [match[1], new Element()]));
   nodes.get('provider-type').value = 'openai';
   const records = new Map(saved.map(item => [item.id, structuredClone(item)]));
@@ -86,7 +86,7 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
     if (route.startsWith('work/')) { const [pathname, query = ''] = route.split('?'), [, id, operation] = pathname.split('/'), job = workRecords.get(id); if (!job) return response({ error: { code: 'work_missing', message: 'Work missing' } }, 404); if (operation === 'cancel') { job.status = 'cancelled'; job.updatedAt = new Date().toISOString(); } const result = structuredClone(job); if (result.outcome) { const params = new URLSearchParams(query), textOffset = Number(params.get('textOffset') || 0), actionOffset = Number(params.get('actionOffset') || 0), text = result.outcome.text || '', actions = result.outcome.actions || []; result.outcome = { ...result.outcome, text: text.slice(textOffset, textOffset + 4000), textOffset, nextTextOffset: textOffset + 4000 < text.length ? textOffset + 4000 : null, textHasMore: textOffset + 4000 < text.length, totalTextCharacters: text.length, actions: actions.slice(actionOffset, actionOffset + 12), actionOffset, nextActionOffset: actionOffset + 12 < actions.length ? actionOffset + 12 : null, actionsHasMore: actionOffset + 12 < actions.length, totalActions: actions.length }; } return response({ job: result }); }
     if (route === 'features') return response({ jobs: [] });
     if (route === 'integrations') return response({ mcp: { command: 'C:/Node/node.exe', args: ['C:/Companion/server/mcp-server.mjs'] }, tools: catalog, capabilityStatus: { ready: true } });
-    if (route === 'runtime') return response({ managed: true, restarting: false, workerPid: 100 });
+    if (route === 'runtime') return response(runtimeBaseline || { managed: true, restarting: false, workerPid: 100 });
     if (route === 'desktop') return response({ available: true, capabilities: { installedApps: true, windows: true, read: true, open: true, reviewedInput: true }, pendingCount: 0 });
     if (route === 'desktop/actions') return response({ actions: [] });
     if (route === 'cancel') return response({ cancelled: true });
@@ -108,8 +108,9 @@ async function createUI({ saved = [], selected = null, intercept = null, waitFor
     throw new Error(`Unexpected request ${route}`);
   }
   const window = { MediaRecorder: Recorder, AudioContext, addEventListener() {} };
-  const context = vm.createContext({ createVoiceSession, window, document, navigator: { locks, permissions: { query: async () => ({ state: 'granted' }) }, mediaDevices: { getUserMedia: () => { permission = deferred(); return permission.promise; } } }, MediaRecorder: Recorder, fetch: fetchMock, Headers, AbortController, Blob, URL, URLSearchParams, DOMException, crypto: webcrypto, structuredClone, performance, console, localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) }, location: { search: '', reload() {}, assign() {} }, Event: class {}, setTimeout: (callback, milliseconds) => { const timer = setTimeout(callback, milliseconds); timer.unref(); timers.add(timer); return timer; }, clearTimeout, setInterval: callback => { intervals.push(callback); return intervals.length; }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} });
-  vm.runInContext(source + '\nglobalThis.ui={ready:()=>checkingService,selectConversation,refreshConversations,refreshConversation,loadEarlierConversation,runCommand,cancelTurn,startRecording,setVoiceVisible,renderSavedConversation,rememberDesktopAction,captureConversationContext,setChatOpen,showDialog,openDesktopReview,addMessage,processVoiceSegment,refreshToolCatalog,applyToolCatalog,applyExtensionManifest,openFeatureByName,openWorkflow,renderWorkflowSteps,validateWorkflowSteps,runWorkflow,renderActionReceipts,appendInstalledFeatureReady,refreshJobs,refreshWorkspace,selectWindowContext,clearWindowContext,captureWindowContext,renderWindowContext,applyRuntime,submitWork,refreshWork,refreshWorkDetail,selectWork,checkWorkHandoff,cancelWork,openWorkConversation,showView,loadWorkOutcome,applyProviders,setExtensionLoader:loader=>loadExtensionModule=loader,get:()=>({id:conversationId,detail:conversationDetail,localChatTurn,turnBusy,recording,voiceCaptureContext,activeRequest,selectedWindowContext,windowContextGeneration,voiceState:voiceSessionState,chatOpen,currentView,ownsVoice:voiceOwnsCapture,initial:conversationInitialized,listPending:!!conversationListPending,detailPending:!!conversationDetailRequest,desktop:desktopActions,workflowDraft,toolCatalog,extensions:[...extensions.values()],workspace,workJobs,selectedWorkId,workDetails:[...workDetails.values()],workSubmitting,pendingWorkIds:[...pendingWorkIds]})};', context);
+  const ClockDate = runtimeClock ? class extends Date { static now() { return runtimeClock.value; } } : Date;
+  const context = vm.createContext({ Date: ClockDate, createVoiceSession, window, document, navigator: { locks, permissions: { query: async () => ({ state: 'granted' }) }, mediaDevices: { getUserMedia: () => { permission = deferred(); return permission.promise; } } }, MediaRecorder: Recorder, fetch: fetchMock, Headers, AbortController, Blob, URL, URLSearchParams, DOMException, crypto: webcrypto, structuredClone, performance, console, localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) }, location: { search: '', reload() {}, assign() {} }, Event: class {}, setTimeout: (callback, milliseconds) => { const timer = setTimeout(callback, milliseconds); timer.unref(); timers.add(timer); return timer; }, clearTimeout, setInterval: callback => { intervals.push(callback); return intervals.length; }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} });
+  vm.runInContext(source + '\nglobalThis.ui={ready:()=>checkingService,selectConversation,refreshConversations,refreshConversation,loadEarlierConversation,runCommand,cancelTurn,startRecording,setVoiceVisible,renderSavedConversation,rememberDesktopAction,captureConversationContext,setChatOpen,showDialog,openDesktopReview,addMessage,processVoiceSegment,refreshToolCatalog,applyToolCatalog,applyExtensionManifest,openFeatureByName,openWorkflow,renderWorkflowSteps,validateWorkflowSteps,runWorkflow,renderActionReceipts,appendInstalledFeatureReady,refreshJobs,refreshWorkspace,selectWindowContext,clearWindowContext,captureWindowContext,renderWindowContext,applyRuntime,reconnectAfterRestart,restartCompanionService,runtimeRestartConfirmed,jobAction,submitWork,refreshWork,refreshWorkDetail,selectWork,checkWorkHandoff,cancelWork,openWorkConversation,showView,loadWorkOutcome,applyProviders,setExtensionLoader:loader=>loadExtensionModule=loader,get:()=>({id:conversationId,detail:conversationDetail,localChatTurn,turnBusy,recording,voiceCaptureContext,activeRequest,selectedWindowContext,windowContextGeneration,voiceState:voiceSessionState,chatOpen,currentView,ownsVoice:voiceOwnsCapture,initial:conversationInitialized,listPending:!!conversationListPending,detailPending:!!conversationDetailRequest,desktop:desktopActions,workflowDraft,toolCatalog,extensions:[...extensions.values()],workspace,workJobs,selectedWorkId,workDetails:[...workDetails.values()],workSubmitting,pendingWorkIds:[...pendingWorkIds],runtimeInfo,runtimeRetry,runtimeNotice,reconnecting:!!runtimeReconnectPromise})};', context);
   await context.ui.ready();
   if (waitForConversations) await until(() => !context.ui.get().listPending && !context.ui.get().detailPending, 'initial conversation load');
   return { ui: context.ui, nodes, records, workRecords, storage, requests, document, intervals, setIntercept: value => { custom = value; }, get waitingForMicrophone() { return !!permission; }, grantMicrophone: () => { const pending = permission; permission = null; pending.resolve({ getTracks: () => [{ stop: () => stoppedTracks++ }] }); }, get stoppedTracks() { return stoppedTracks; }, close: () => { context.ui.cancelTurn(false); for (const timer of timers) clearTimeout(timer); } };
@@ -897,5 +898,104 @@ test('a ready work result preserves its separately queued feature build and open
     await app.ui.refreshWork(); assert.match(app.nodes.get('work-detail').textContent, /Result ready/); assert.match(app.nodes.get('work-detail').textContent, /Feature build · Queued \(saved status\)/); assert.doesNotMatch(app.nodes.get('work-detail').textContent, /Feature activated|ready to use/);
     const open = descendants(app.nodes.get('work-detail')).find(node => node.textContent === 'View feature build ↗'); assert.ok(open); await open.dispatch('click'); assert.equal(app.ui.get().currentView, 'build');
     assert.equal(app.requests.some(request => request.method === 'POST'), false);
+  } finally { app.close(); }
+});
+
+
+const C = '33333333-3333-4333-8333-333333333333', D = '44444444-4444-4444-8444-444444444444', E = '55555555-5555-4555-8555-555555555555', F = '66666666-6666-4666-8666-666666666666';
+const serviceFixture = values => ({ managed: true, restarting: false, hostPid: 10, workerPid: 100, supervisorPid: 5, hostInstanceId: A, workerInstanceId: B, supervisorInstanceId: C, hostRestartAvailable: true, ...values });
+const freshService = () => serviceFixture({ hostPid: 20, workerPid: 200, hostInstanceId: D, workerInstanceId: E });
+const delayTurn = () => new Promise(resolve => setTimeout(resolve, 15));
+
+test('full service reconnect rejects a new worker under the same host and requires final workspace readiness while preserving drafts and view', async () => {
+  const baseline = serviceFixture(), app = await createUI({ runtimeBaseline: baseline });
+  try {
+    app.ui.showView('tasks'); app.nodes.get('question').value = 'An unsent chat draft'; app.nodes.get('work-prompt').value = 'An unsent handoff'; app.nodes.get('new-task').value = 'An unsent task';
+    let phase = 'worker', observations = 0, failedWorkspace = 0, workspaceReady = false, posted = false;
+    app.setIntercept((url, options) => { if (url.endsWith('/runtime/restart')) { posted = true; return response({ ...freshService(), restartScope: 'host', restartRequested: true }); } if (url.endsWith('/runtime')) { if (!posted) return response(baseline); observations++; return response(phase === 'worker' ? serviceFixture({ workerPid: 200, workerInstanceId: E }) : freshService()); } if (url.endsWith('/workspace') && phase === 'fresh' && !workspaceReady) { failedWorkspace++; return response({ error: { code: 'opening', message: 'Workspace is still opening' } }, 503); } return null; });
+    const restart = app.ui.restartCompanionService(); await until(() => observations > 0);
+    assert.equal(app.ui.get().reconnecting, true); assert.equal(app.ui.get().runtimeRetry.baseline.hostInstanceId, A); assert.equal(app.ui.get().runtimeRetry.baseline.workerPid, 100); assert.notEqual(app.ui.get().runtimeNotice.phase, 'ready');
+    phase = 'fresh'; while (!failedWorkspace) await delayTurn(); assert.equal(app.ui.get().reconnecting, true); assert.notEqual(app.ui.get().runtimeNotice.phase, 'ready'); workspaceReady = true;
+    const result = await restart; assert.equal(result.confirmed, true); assert.match(app.nodes.get('runtime-message').textContent, /service restarted and reconnected/);
+    assert.equal(app.nodes.get('question').value, 'An unsent chat draft'); assert.equal(app.nodes.get('work-prompt').value, 'An unsent handoff'); assert.equal(app.nodes.get('new-task').value, 'An unsent task'); assert.equal(app.ui.get().currentView, 'tasks'); assert.equal(app.ui.get().chatOpen, false);
+    const posts = app.requests.filter(request => request.url.endsWith('/runtime/restart')); assert.equal(posts.length, 1); assert.deepEqual(JSON.parse(posts[0].body), { scope: 'host' }); assert.equal(app.nodes.get('restart-runtime').disabled, false); assert.equal(app.nodes.get('connection-label').textContent, 'GPT is ready');
+    assert.doesNotMatch(app.nodes.get('runtime-message').textContent, /desktop|Electron|package/i);
+  } finally { app.close(); }
+});
+
+test('a lost restart acknowledgement observes the frozen baseline, recovers a fresh session and never repeats the restart POST', async () => {
+  const baseline = serviceFixture(), app = await createUI({ runtimeBaseline: baseline });
+  try {
+    let sessionReads = 0, posted = false; app.setIntercept((url, options) => { if (url.endsWith('/runtime/restart')) { posted = true; throw new Error('Synthetic acknowledgement lost'); } if (url.endsWith('/session') && posted && ++sessionReads === 1) return response({ error: { code: 'expired', message: 'Old session expired' } }, 401); if (url.endsWith('/runtime')) return response(posted ? freshService() : baseline); return null; });
+    const result = await app.ui.restartCompanionService(); assert.equal(result.confirmed, true); assert.ok(sessionReads >= 2); assert.equal(app.requests.filter(request => request.url.endsWith('/runtime/restart')).length, 1); assert.equal(app.ui.get().runtimeInfo.hostInstanceId, D);
+  } finally { app.close(); }
+});
+
+test('host timeout and Check again keep the original scope and identities and only perform reads', async () => {
+  const baseline = serviceFixture(), clock = { value: Date.now() }, app = await createUI({ runtimeBaseline: baseline, runtimeClock: clock });
+  try {
+    let changed = false, posted = false; app.nodes.get('question').value = 'Keep this draft through a failed restart';
+    app.setIntercept((url, options) => { if (url.endsWith('/runtime/restart')) { posted = true; return response({ ...baseline, restartScope: 'host', restartRequested: true }); } if (url.endsWith('/runtime')) { if (!posted) return response(baseline); if (!changed) clock.value += 31000; return response(changed ? freshService() : serviceFixture({ workerPid: 200, workerInstanceId: E })); } return null; });
+    const result = await app.ui.restartCompanionService(); assert.equal(result.confirmed, false); assert.match(app.nodes.get('runtime-message').textContent, /not confirmed a new service host and worker/); assert.equal(app.ui.get().runtimeRetry.scope, 'host'); assert.equal(app.ui.get().runtimeRetry.baseline.hostInstanceId, A); assert.equal(app.nodes.get('runtime-retry').hidden, false);
+    const before = app.requests.filter(request => request.method === 'POST').length; changed = true; await app.nodes.get('runtime-retry').dispatch('click'); await until(() => app.ui.get().runtimeNotice.phase === 'ready');
+    assert.equal(app.requests.filter(request => request.method === 'POST').length, before); assert.equal(app.ui.get().runtimeRetry, null); assert.equal(app.nodes.get('question').value, 'Keep this draft through a failed restart'); assert.equal(app.ui.get().chatOpen, false);
+  } finally { app.close(); }
+});
+
+test('legacy worker restart remains compatible and an available worker identity cannot be reused as proof', async () => {
+  const app = await createUI({ runtimeBaseline: { managed: true, restarting: false, workerPid: 100 } });
+  try {
+    let posted = false; app.setIntercept(url => { if (url.endsWith('/runtime/restart')) { posted = true; return response({ managed: true, workerPid: 100, restartScope: 'worker', restartRequested: true }); } return url.endsWith('/runtime') ? response({ managed: true, restarting: false, workerPid: posted ? 101 : 100 }) : null; });
+    const result = await app.ui.restartCompanionService(); assert.equal(result.confirmed, true); const post = app.requests.find(request => request.url.endsWith('/runtime/restart')); assert.deepEqual(JSON.parse(post.body), { scope: 'worker' }); assert.match(app.nodes.get('runtime-message').textContent, /worker restarted/);
+    assert.equal(app.ui.runtimeRestartConfirmed(serviceFixture({ workerPid: 101 }), serviceFixture(), 'worker'), false); assert.equal(app.ui.runtimeRestartConfirmed(serviceFixture({ workerPid: 101, workerInstanceId: E }), serviceFixture(), 'worker'), true);
+  } finally { app.close(); }
+});
+
+test('launcher updates stay manual and Check again requires a new supervisor as well as host and worker', async () => {
+  const baseline = serviceFixture(), clock = { value: Date.now() }, app = await createUI({ runtimeBaseline: baseline, runtimeClock: clock });
+  try {
+    const result = await app.ui.reconnectAfterRestart({ ...baseline, restartScope: 'launcher', requiresManualRestart: true }, { baseline }); assert.equal(result.manual, true); assert.match(app.nodes.get('runtime-message').textContent, /owning Companion launcher/); assert.equal(app.requests.some(request => request.method === 'POST'), false);
+    let relaunched = false; app.setIntercept(url => { if (!url.endsWith('/runtime')) return null; if (!relaunched) clock.value += 31000; return response(relaunched ? freshServiceWithSupervisor() : freshService()); });
+    await app.nodes.get('runtime-retry').dispatch('click'); await until(() => app.ui.get().reconnecting); while (app.ui.get().reconnecting) await delayTurn(); assert.equal(app.ui.get().runtimeNotice.phase, 'failed'); assert.match(app.nodes.get('runtime-message').textContent, /new launcher, service host and worker/);
+    relaunched = true; await app.nodes.get('runtime-retry').dispatch('click'); await until(() => app.ui.get().runtimeNotice.phase === 'ready'); assert.match(app.nodes.get('runtime-message').textContent, /launcher restarted/); assert.equal(app.requests.some(request => request.method === 'POST'), false);
+    const legacy = { managed: true, workerPid: 100, hostPid: 10 }; assert.equal(app.ui.runtimeRestartConfirmed(freshServiceWithSupervisor(), legacy, 'launcher'), true); assert.equal(app.ui.runtimeRestartConfirmed({ ...freshService(), supervisorInstanceId: undefined }, legacy, 'launcher'), false);
+  } finally { app.close(); }
+});
+function freshServiceWithSupervisor(){return { ...freshService(), supervisorPid: 6, supervisorInstanceId: F };}
+
+test('reconnected rollback is reported as restored source and never as activation', async () => {
+  const baseline = serviceFixture(), app = await createUI({ runtimeBaseline: baseline });
+  try {
+    app.setIntercept(url => url.endsWith('/runtime') ? response(freshService()) : url.endsWith('/features/' + C) ? response({ id: C, status: 'rolled_back', prompt: 'Synthetic update', updatedAt: '2026-10-25T12:00:00Z', createdAt: '2026-10-25T12:00:00Z' }) : null);
+    const result = await app.ui.reconnectAfterRestart({ ...baseline, restartScope: 'host', restartRequested: true }, { baseline, jobId: C, action: 'apply' }); assert.equal(result.confirmed, true); assert.equal(app.ui.get().runtimeNotice.phase, 'rolled-back'); assert.match(app.nodes.get('runtime-message').textContent, /restored the previous version/); assert.doesNotMatch(app.nodes.get('runtime-message').textContent, /activated|Electron|desktop app/);
+  } finally { app.close(); }
+});
+
+test('a changed service instance invalidates selected window context even when operating-system PIDs are reused', async () => {
+  const baseline = serviceFixture(), app = await createUI({ runtimeBaseline: baseline, contextWindows: [sourceWindowA] });
+  try {
+    await app.ui.selectWindowContext(sourceWindowA); app.ui.applyRuntime({ ...baseline, hostInstanceId: D, workerInstanceId: E });
+    assert.equal(app.ui.get().selectedWindowContext.status, 'unavailable'); assert.match(app.nodes.get('window-context-status').textContent, /restarted/); assert.equal(app.ui.runtimeRestartConfirmed({ ...baseline, hostInstanceId: D, workerInstanceId: E }, baseline, 'host'), false);
+  } finally { app.close(); }
+});
+
+
+test('a combined launcher and desktop source update retains manual service proof alongside separate desktop instructions', async () => {
+  const baseline = serviceFixture(), job = { id: C, status: 'applied', prompt: 'Synthetic combined update', updatedAt: '2026-10-25T12:00:00Z', createdAt: '2026-10-25T12:00:00Z', files: [{ path: 'server/companion-supervisor.mjs' }, { path: 'electron/productivity-main.cjs' }] }, app = await createUI({ runtimeBaseline: baseline });
+  try {
+    app.setIntercept(url => url.endsWith('/features/' + C + '/apply') ? response({ ...job, runtime: { ...baseline, restartScope: 'launcher', requiresManualRestart: true, restartRequested: false } }) : url.endsWith('/features/' + C) ? response(job) : null);
+    await app.ui.jobAction({ id: C }, 'apply'); assert.equal(app.ui.get().runtimeNotice.phase, 'manual'); assert.match(app.nodes.get('runtime-message').textContent, /owning Companion launcher/); assert.match(app.nodes.get('runtime-message').textContent, /Desktop source changed/); assert.equal(app.ui.get().runtimeRetry.scope, 'launcher'); assert.equal(app.nodes.get('runtime-retry').hidden, false);
+    assert.equal(app.requests.filter(request => request.url.endsWith('/runtime/restart')).length, 0);
+  } finally { app.close(); }
+});
+
+
+test('restart preflight freezes a fresh identity rather than confirming a host that already changed outside this window', async () => {
+  const baseline = serviceFixture(), alreadyChanged = freshService(), latest = serviceFixture({ hostPid: 30, workerPid: 300, hostInstanceId: F, workerInstanceId: '77777777-7777-4777-8777-777777777777' }), app = await createUI({ runtimeBaseline: baseline });
+  try {
+    let posted = false, ready = false, observed = 0;
+    app.setIntercept(url => { if (url.endsWith('/runtime/restart')) { posted = true; return response({ ...alreadyChanged, restartScope: 'host', restartRequested: true }); } if (url.endsWith('/runtime')) { if (posted) observed++; return response(ready ? latest : alreadyChanged); } return null; });
+    const restart = app.ui.restartCompanionService(); await until(() => observed > 0); assert.equal(app.ui.get().reconnecting, true); assert.equal(app.ui.get().runtimeRetry.baseline.hostInstanceId, D); assert.equal(app.ui.get().runtimeRetry.baseline.workerPid, 200); assert.notEqual(app.ui.get().runtimeNotice.phase, 'ready');
+    ready = true; assert.equal((await restart).confirmed, true); assert.equal(app.ui.get().runtimeInfo.hostInstanceId, F); assert.equal(app.requests.filter(request => request.url.endsWith('/runtime/restart')).length, 1);
   } finally { app.close(); }
 });

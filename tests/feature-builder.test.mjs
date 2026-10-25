@@ -129,13 +129,14 @@ test('CAS prevents activation when source changed after the verified snapshot', 
   await absent(path.join(f.root, 'src/features/focus-timer.mjs'));
 });
 
-test('the desktop launcher and public MCP template remain editable protected source', async t => {
-  const f = await fixture(t, { complete: async () => ({ summary: 'Prepare a desktop launcher and public client template.', files: [{ path:'Start Desktop Companion.cmd',content:'@echo off\r\necho Companion desktop\r\n' },{ path:'mcp.example.json',content:'{"mcpServers":{}}\n' }], tests:[] }) });
+test('start and stop launchers and the public MCP template remain editable protected source', async t => {
+  const f = await fixture(t, { complete: async () => ({ summary: 'Prepare desktop launchers and a public client template.', files: [{ path:'Start Desktop Companion.cmd',content:'@echo off\r\necho Companion desktop\r\n' },{ path:'Stop Companion.cmd',content:'@echo off\r\necho Stop Companion\r\n' },{ path:'mcp.example.json',content:'{"mcpServers":{}}\n' }], tests:[] }) });
   const job = await finished(f.builder,(await f.builder.request({prompt:'Prepare the desktop integration source.',providerId:'synthetic',autoApply:true},OWNER)).id);
-  assert.equal(job.status,'review_required'); assert.equal(job.files.length,2); assert.ok(job.files.every(file=>file.protected));
+  assert.equal(job.status,'review_required'); assert.equal(job.files.length,3); assert.ok(job.files.every(file=>file.protected));
   await assert.rejects(readFile(path.join(f.root,'Start Desktop Companion.cmd')),{code:'ENOENT'});
   await f.builder.apply(job.id,OWNER);
   assert.match(await readFile(path.join(f.root,'Start Desktop Companion.cmd'),'utf8'),/Companion desktop/);
+  assert.match(await readFile(path.join(f.root,'Stop Companion.cmd'),'utf8'),/Stop Companion/);
 });
 
 test('external tools submit actual patches with exact base hashes and cannot use outside paths', async t => {

@@ -9,6 +9,7 @@ import { createCompanionHost } from '../server/companion-host.mjs';
 import { getRuntimeStatus, requestRuntimeRestart } from '../server/runtime-control.mjs';
 import { createFeatureBuilder } from '../server/feature-builder.mjs';
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 
 const helper = new URL('../server/runtime-control.mjs', import.meta.url).href;
 const jobId = '8f9ab960-3a65-4258-a433-14f825ec9a3c';
@@ -67,6 +68,27 @@ test('an asynchronous restart IPC error clears pending state without an unhandle
   assert.equal(getRuntimeStatus(runtime).restarting, false);
 });
 
+test('public host lifetimes exclude lock secrets and stronger host requests are not silently downgraded',()=>{
+  const hostInstanceId=randomUUID(),supervisorInstanceId=randomUUID(),privateNonce=randomUUID(),messages=[],callbacks=[];
+  const runtime={pid:103,connected:true,env:{COMPANION_MANAGED_HOST:'1',COMPANION_HOST_INSTANCE:randomUUID(),COMPANION_HOST_PID:'102',COMPANION_HOST_LIFETIME:hostInstanceId,COMPANION_SUPERVISED_HOST:'1',COMPANION_SUPERVISOR_PID:'101',COMPANION_SUPERVISOR_NONCE:privateNonce,COMPANION_SUPERVISOR_INSTANCE:randomUUID(),COMPANION_SUPERVISOR_LIFETIME:supervisorInstanceId},send(message,callback){messages.push(message);callbacks.push(callback);}};
+  const status=getRuntimeStatus(runtime);assert.equal(status.hostInstanceId,hostInstanceId);assert.equal(status.supervisorInstanceId,supervisorInstanceId);assert.equal(status.hostRestartAvailable,true);assert.equal(status.supervisorPid,101);assert.ok(!JSON.stringify(status).includes(privateNonce));
+  requestRuntimeRestart({},runtime);requestRuntimeRestart({scope:'host',jobId},runtime);requestRuntimeRestart({scope:'worker'},runtime);requestRuntimeRestart({scope:'host'},runtime);
+  assert.equal(messages.length,2);assert.equal(messages[1].scope,'host');assert.equal(messages[1].jobId,jobId);callbacks[0](new Error('Late old worker send error'));assert.equal(getRuntimeStatus(runtime).restarting,true);callbacks[1](new Error('Host send error'));assert.equal(getRuntimeStatus(runtime).restarting,false);
+  assert.throws(()=>requestRuntimeRestart({scope:'host'},{pid:1,env:{}}),{code:'manual_host_restart_required',statusCode:409});
+  for(const scope of ['launcher','shell',null])assert.throws(()=>requestRuntimeRestart({scope},runtime),{code:'invalid_restart_request'});
+});
+
+test('an independent host cannot bypass either outer supervisor claim or adopt an unconnected parent',async t=>{
+  const f=await fixture(t),claim={pid:process.pid,nonce:randomUUID(),port:f.port,sourceRoot:f.root},dataClaim=path.join(f.dataDirectory,'runtime-supervisor.lock'),portClaim=path.join(f.root,`.companion-supervisor-${f.port}.lock`);
+  await writeFile(dataClaim,JSON.stringify(claim));await assert.rejects(f.host.start(),{code:'runtime_supervisor_exists'});assert.equal(f.host.status().workerPid,null);
+  await rm(dataClaim);await writeFile(portClaim,JSON.stringify(claim));await assert.rejects(f.host.start(),{code:'runtime_supervisor_exists'});
+  const names=['COMPANION_SUPERVISED_HOST','COMPANION_SUPERVISOR_PID','COMPANION_SUPERVISOR_NONCE','COMPANION_SUPERVISOR_INSTANCE','COMPANION_SUPERVISOR_LIFETIME'],previous=Object.fromEntries(names.map(name=>[name,process.env[name]]));
+  try{
+    process.env.COMPANION_SUPERVISED_HOST='1';process.env.COMPANION_SUPERVISOR_PID=String(process.ppid);process.env.COMPANION_SUPERVISOR_NONCE=claim.nonce;process.env.COMPANION_SUPERVISOR_INSTANCE=randomUUID();process.env.COMPANION_SUPERVISOR_LIFETIME=randomUUID();await writeFile(dataClaim,JSON.stringify({...claim,pid:process.ppid}));await writeFile(portClaim,JSON.stringify({...claim,pid:process.ppid}));
+    await assert.rejects(createCompanionHost({root:f.root,dataDirectory:f.dataDirectory,port:f.port}),{code:'invalid_supervisor'});
+  }finally{for(const name of names){if(previous[name]===undefined)delete process.env[name];else process.env[name]=previous[name];}await rm(dataClaim);await rm(portClaim);}
+});
+
 test('live-child IPC errors do not prove exit or permit replacement before owned-handle termination', async t => {
   const children = [];
   const f = await fixture(t, {
@@ -92,6 +114,7 @@ test('managed restart starts fresh source behavior on the same public port and s
   const oldPid = first.workerPid;
   await writeFile(f.workerPath, workerSource({ version: 'two' }));
   const second = await f.host.restart();
+  assert.equal(second.hostInstanceId,first.hostInstanceId);assert.notEqual(second.instance,first.instance);
   assert.equal(second.port, first.port); assert.notEqual(second.workerPid, oldPid);
   assert.equal((await f.value()).version, 'two');
   assert.throws(() => process.kill(oldPid, 0), { code: 'ESRCH' });

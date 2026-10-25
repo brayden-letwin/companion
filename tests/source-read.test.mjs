@@ -85,9 +85,9 @@ test('sourceFile retains the existing snapshot file/count/byte and UTF-8 bounds'
   await writeFile(target, Buffer.from([0xff])); await assert.rejects(f.builder.sourceFile(OWNER, { path: 'src/fixture.mjs' }), { code: 'invalid_source_text' });
   await writeFile(target, Buffer.from([0])); await assert.rejects(f.builder.sourceFile(OWNER, { path: 'src/fixture.mjs' }), { code: 'source_limit' });
   await writeFile(target, '');
-  for (let index = 0; index < 8; index++) await writeFile(path.join(f.root, 'src', `bounded-${index}.txt`), 'x'.repeat(250000));
+  for (let index = 0; index < 16; index++) await writeFile(path.join(f.root, 'src', `bounded-${index}.txt`), 'x'.repeat(250000));
   await assert.rejects(f.builder.sourceFile(OWNER, { path: 'src/fixture.mjs' }), { code: 'source_limit' });
-  await Promise.all(Array.from({ length: 8 }, (_, index) => rm(path.join(f.root, 'src', `bounded-${index}.txt`))));
+  await Promise.all(Array.from({ length: 16 }, (_, index) => rm(path.join(f.root, 'src', `bounded-${index}.txt`))));
   await Promise.all(Array.from({ length: 300 }, (_, index) => writeFile(path.join(f.root, 'src', `count-${index}.txt`), '')));
   await assert.rejects(f.builder.sourceFile(OWNER, { path: 'src/fixture.mjs' }), { code: 'source_limit' });
 });
