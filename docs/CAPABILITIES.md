@@ -89,13 +89,15 @@ Register this example as `id: "save-summary"`, `module: "./save-summary.mjs"`, `
 }
 ```
 
-The broker allows only `list_tasks`, `list_notes`, `read_note`, `search_notes`, `create_task`, `update_task`, `complete_task`, `save_note`, `start_focus`, `stop_focus`, and `get_time`. Their current argument schemas are available through the tool catalog. There are no desktop, approval, feature-building, memory, workflow-recursion, custom-capability-recursion, credential, arbitrary HTTP, or shell calls in this broker. Calls are serialized and limited to twelve per execution. A pending review result stops further execution.
+The broker allows only `list_tasks`, `read_task`, `summarize_tasks`, `list_notes`, `read_note`, `search_notes`, `create_task`, `update_task`, `complete_task`, `save_note`, `start_focus`, `stop_focus`, and `get_time`. Their current argument schemas are available through the tool catalog. There are no desktop, approval, feature-building, memory, workflow-recursion, custom-capability-recursion, credential, arbitrary HTTP, or shell calls in this broker. Calls are serialized and limited to twelve per execution. A pending review result stops further execution.
+
+Task lists are bounded pages with `total`, `returned`, `nextOffset`, `hasMore`, and `revision`. Repeat the same filters and pin `expectedRevision` when continuing; a stale revision fails instead of mixing states. List details are at most 400 UTF-16 characters, with `detailsLength` and `detailsTruncated`. Read complete text through `read_task` sections and their returned offsets. Use `summarize_tasks` for actual counts over the full matching set instead of counting one list page. It also pages project summaries and gives the `asOf` instant used for overdue counts. Empty project names remain distinct from a literal project named `Unassigned`. Each task-query result is bounded to 48 KiB, within the existing broker response limit. A generated overview must expose partial pages or follow them; it must never imply a page is the complete workspace.
 
 The parent assigns nested IDs such as `host:1`, checkpoints an accepted call before dispatch, and records the actual result. Child output cannot manufacture those receipts. A capability result contains `{capability, value, hostActions}`. On failure or cancellation, actual completed or uncertain nested actions remain in retained receipts; stopping a request does not undo them. Inspect `status` and `outcomeUnknown` before claiming that anything happened or was reversed.
 
 ## Use the same action from every surface
 
-The normal desktop runtime keeps 29 provider tool definitions: 22 workspace tools, including `list_capabilities`, `run_capability`, and read-only `inspect_feature_build`, plus seven desktop tools. Custom capabilities live in the dynamic catalog rather than being appended to every model request. This avoids exceeding the provider router's 32-definition limit.
+The normal desktop runtime keeps 31 provider tool definitions: 24 workspace tools, including `read_task`, `summarize_tasks`, `list_capabilities`, `run_capability`, and read-only `inspect_feature_build`, plus seven desktop tools. Custom capabilities live in the dynamic catalog rather than being appended to every model request. This avoids exceeding the provider router's 32-definition limit.
 
 Chat and voice discover `list_capabilities`, then call:
 
