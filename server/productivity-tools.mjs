@@ -106,7 +106,7 @@ function inspectFeatureBuild(job, requestedId, requestOffset = 0) {
   return report;
 }
 
-export function createProductivityTools({ store, builder, desktop, root, capabilities = [], capabilityStatus = {ready:true}, executeCapability = defaultExecuteCapability, owner = 'local-workspace', now = Date.now } = {}) {
+export function createProductivityTools({ store, builder, desktop, root, work, capabilities = [], capabilityStatus = {ready:true}, executeCapability = defaultExecuteCapability, owner = 'local-workspace', now = Date.now } = {}) {
   if (!store) throw new Error('The productivity store is required.');
   const definitions = [...TOOL_DEFINITIONS, ...(desktop?.definitions || [])];
   const registry = new Map(definitions.map(tool => [tool.name, tool]));
@@ -124,6 +124,21 @@ export function createProductivityTools({ store, builder, desktop, root, capabil
     const budget=executionBudget(context);if(!budget.remaining)throw fail('This request reached its shared action budget. Completed actions are retained.','execution_budget_exceeded');budget.remaining-=1;
     if(typeof name==='string'&&name.startsWith('cap_'))return runCapability(name,raw,context);
     const args = validateArguments(name, raw, registry);
+    if(name==='manage_work'){
+      if(context.allowDelegation===false)throw Object.assign(fail('Independent work cannot delegate or manage other jobs.','delegation_forbidden'),{statusCode:403});
+      if(!work)throw Object.assign(fail('Independent work is unavailable in this runtime.','work_unavailable'),{statusCode:503});
+      const allowed={start:['action','prompt','title'],list:['action','offset','limit'],read:['action','jobId','promptOffset','textOffset','actionOffset'],cancel:['action','jobId']}[args.action];
+      if(!allowed||Object.keys(args).some(key=>!allowed.includes(key)))throw fail('Use only arguments for the selected work operation.');
+      if(args.action==='list')return work.list({offset:args.offset,limit:args.limit});
+      if(typeof args.jobId==='string'&&!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(args.jobId))throw fail('Choose an actual work job UUID.');
+      if(args.action==='read'||args.action==='cancel'){
+        if(!args.jobId)throw fail('Choose an actual work job.');
+        return args.action==='read'?{workJob:await work.get(args.jobId,{modelView:true,promptOffset:args.promptOffset,textOffset:args.textOffset,actionOffset:args.actionOffset})}:{workJob:await work.cancel(args.jobId)};
+      }
+      if(!args.prompt)throw fail('Describe the independent task to hand off.');
+      const created=await work.create({id:operationId(requestId||'local',callId||JSON.stringify([name,args])),prompt:args.prompt,...(args.title?{title:args.title}:{}),providerId,...(context.conversationId?{originConversationId:context.conversationId}:{}),...(context.currentRequestId?{originRequestId:context.currentRequestId}:{}),...(context.contextId?{contextId:context.contextId}:{}),scope:context.scope},{signal});
+      return{workJob:created.job||created,message:'Work was handed off to its own conversation. Accepted does not mean completed; inspect this job for its actual outcome.'};
+    }
     if (desktopNames.has(name)) {
       if (desktopReads.has(name)) return desktop.execute(name, args, { signal, requestId });
       const receiptId = `desktop:${operationId(requestId || 'local', callId || JSON.stringify([name,args]))}`;
@@ -254,5 +269,5 @@ export function createProductivityTools({ store, builder, desktop, root, capabil
     }
     const finished=store.finishExecution({id:receiptId,digest,result:{id:workflowId,status:'completed',steps:results}});return{...finished.result,workspace:store.snapshot()};
   }
-  return { definitions, catalog, execute, runWorkflow };
+  return { definitions, catalog, execute, runWorkflow, setWorkService(service){if(!service||['create','list','get','cancel'].some(name=>typeof service[name]!=='function'))throw new TypeError('Use the actual work service.');work=service;} };
 }

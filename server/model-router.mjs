@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createProviderSettings } from './provider-settings.mjs';
 import { runCodexCompletion, getCodexStatus } from './codex-runner.mjs';
+import { createCompletionQueue } from './completion-queue.mjs';
 
 const fail = (code, message, statusCode = 400) => Object.assign(new Error(message), { code, statusCode });
 const obj = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -77,7 +78,7 @@ const TOOL_ENVELOPE = { type: 'object', properties: { text: { type: 'string' }, 
 export async function createModelRouter({ dataDirectory, fetchImpl = globalThis.fetch, spawnImpl, settings, settingsOptions = {}, timeoutMs = 180000, buildTimeoutMs = 600000 } = {}) {
   for (const [name, value] of [['timeoutMs', timeoutMs], ['buildTimeoutMs', buildTimeoutMs]]) if (!Number.isInteger(value) || value < 1 || value > 600000) throw fail('validation_error', `${name} must be between 1 and 600000 milliseconds.`);
   const storage = settings || await createProviderSettings({ dataDirectory, ...(spawnImpl ? { spawnImpl } : {}), ...settingsOptions });
-  let statusCache = null, statusPending = null, statusGeneration = 0, active = 0;
+  let statusCache = null, statusPending = null, statusGeneration = 0;const completions=createCompletionQueue();
   const invalidate = () => { statusCache = null; statusPending = null; statusGeneration += 1; };
   async function status() {
     if (statusCache && statusCache.until > Date.now()) return structuredClone(statusCache.value);
@@ -117,25 +118,29 @@ export async function createModelRouter({ dataDirectory, fetchImpl = globalThis.
     async configure(value) { const result = await storage.configure(value); invalidate(); return result; },
     async remove(id) { const result = await storage.remove(id); invalidate(); return result; },
     async select(id) { await storage.select(id); invalidate(); return { defaultProviderId: id }; },
-    async complete({ providerId, messages, system = '', tools = [], signal, onEvent, schema } = {}) {
+    async complete({ providerId, messages, system = '', tools = [], signal, onEvent, schema, priority='interactive',expectedProvider } = {}) {
       const history = messagesValue(messages), definitions = toolsValue(tools); system = text(system, 100000, 'system instructions', true); if (schema !== undefined) schema = schemaValue(schema);
       if (schema && definitions.length) throw fail('validation_error', 'Use structured output or tool calls in one completion, not both.');
       // Feature planning/generation supplies an explicit schema. The Codex
       // tool-call envelope alone does not extend an ordinary chat's budget.
       const completionTimeoutMs = schema ? buildTimeoutMs : timeoutMs;
       if (signal?.aborted) throw abortError();
-      if (active >= 2) throw fail('provider_busy', 'Two assistant requests are already running. Stop one before starting another.', 429);
-      active += 1; const controller = new AbortController(); let timedOut = false; const cancelled = () => controller.abort(); signal?.addEventListener('abort', cancelled, { once: true });
+      if(!['interactive','background'].includes(priority))throw fail('validation_error','Choose a supported model request priority.');
+      if(expectedProvider!==undefined&&(!obj(expectedProvider)||['id','type','model'].some(key=>typeof expectedProvider[key]!=='string')||expectedProvider.baseUrl!==undefined&&typeof expectedProvider.baseUrl!=='string'))throw fail('validation_error','Use an actual frozen provider descriptor.');
+      const controller = new AbortController(); let timedOut = false,release,helperPending=false,completionFinished=false; const cancelled = () => controller.abort(); signal?.addEventListener('abort', cancelled, { once: true });if(signal?.aborted)controller.abort();
       const timer = setTimeout(() => { timedOut = true; controller.abort(); }, completionTimeoutMs); timer.unref?.();
       try {
+        release=await completions.acquire({signal:controller.signal,priority,onWait:()=>onEvent?.({type:'queue_waiting'})});
         const id = providerId || (await status()).defaultProviderId; const entry = await storage.get(id);
+        if(controller.signal.aborted)throw abortError();
+        if(expectedProvider&&['id','type','model','baseUrl'].some(key=>(entry[key]??'')!==(expectedProvider[key]??'')))throw fail('provider_changed','The chosen AI connection changed after this work was handed off. Inspect its results and start a new request with the intended connection.',409);
         if (!['codex', 'ollama'].includes(entry.type) && !entry.apiKey) throw fail('provider_key_required', 'Add a key for the selected provider in provider settings.', 409);
         try { onEvent?.({ type: 'progress', message: `Using ${entry.label}.` }); } catch { /* Observers cannot change completion behavior. */ }
         let result;
         if (entry.type === 'codex') {
           const envelope = definitions.length ? TOOL_ENVELOPE : schema;
           const prompt = JSON.stringify({ system, messages: history.map(({ rawContinuation, ...message }) => message), ...(definitions.length ? { availableTools: definitions, responseInstructions: 'Return the JSON envelope. For an action, put its name and a JSON object encoded as argumentsJson into toolCalls; do not claim it ran. If no action is needed, use an empty toolCalls array. Use unique tool call IDs with letters, numbers, underscores, or hyphens.' } : {}) });
-          result = await runCodexCompletion({ prompt, schema: envelope, ...(entry.model ? { model: entry.model } : {}), signal: controller.signal, onEvent, dataDirectory, ...(spawnImpl ? { spawnImpl } : {}), timeoutMs: completionTimeoutMs });
+          result = await runCodexCompletion({ prompt, schema: envelope, ...(entry.model ? { model: entry.model } : {}), signal: controller.signal, onEvent,onHelperStarted(){helperPending=true;},onHelperSettled(){helperPending=false;if(completionFinished)release?.();}, dataDirectory, ...(spawnImpl ? { spawnImpl } : {}), timeoutMs: completionTimeoutMs });
           if (definitions.length) { let value; try { value = JSON.parse(result.text); if (typeof value.text !== 'string' || !Array.isArray(value.toolCalls)) throw new Error(); result = { text: value.text, toolCalls: value.toolCalls.map(call => ({ id: call.id, name: call.name, arguments: JSON.parse(call.argumentsJson) })) }; } catch { throw fail('invalid_provider_response', 'Codex returned an invalid action proposal.', 502); } }
         } else if (entry.type === 'openai') {
           const value = await request(entry, '/responses', { model: entry.model, store: false, include: ['reasoning.encrypted_content'], instructions: system, input: openAiInput(history, id), max_output_tokens: 8192, ...(definitions.length ? { tools: definitions.map(tool => ({ type: 'function', ...tool, strict: false })) } : {}), ...(schema ? { text: { format: { type: 'json_schema', name: 'companion_output', schema, strict: true } } } : {}) }, controller.signal);
@@ -160,7 +165,7 @@ export async function createModelRouter({ dataDirectory, fetchImpl = globalThis.
         if (!result.text.trim() && !result.toolCalls.length) throw fail('invalid_provider_response', 'The provider returned no answer.', 502);
         return result;
       } catch (error) { if (timedOut) throw fail('provider_timeout', 'The selected provider timed out. Try a smaller request.', 504); if (controller.signal.aborted) throw abortError(); if (error.code && error.statusCode) throw error; throw fail('provider_unavailable', 'The selected provider could not complete this request. Check its connection and settings.', 503); }
-      finally { clearTimeout(timer); signal?.removeEventListener('abort', cancelled); active -= 1; }
+      finally { clearTimeout(timer); signal?.removeEventListener('abort', cancelled);completionFinished=true;if(!helperPending)release?.(); }
     },
   };
 }

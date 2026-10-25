@@ -4,6 +4,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { builtinCatalog, validateWorkflowSteps } from './capability-registry.mjs';
 import { windowContextReference } from './window-context.mjs';
+import { installWorkStore } from './work-store.mjs';
 
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const fail = (code, message, statusCode = 400) => Object.assign(new Error(message), { code, statusCode });
@@ -164,7 +165,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
   function minimalResult(source,depth=0){
     if(!source||typeof source!=='object'||depth>5)return{};const result={};
     if(source.windowContext)result.windowContext=windowContextReference(source.windowContext);
-    for(const key of ['task','note','workflow','featureJob','desktopAction','desktopReceipt'])if(source[key]&&typeof source[key]==='object')result[key]={id:source[key].id,...(source[key].status?{status:source[key].status}:{}),...(typeof source[key].outcomeUnknown==='boolean'?{outcomeUnknown:source[key].outcomeUnknown}:{}),...(key==='desktopAction'?{requiresFreshPreview:true}:{})};
+    for(const key of ['task','note','workflow','featureJob','desktopAction','desktopReceipt','workJob'])if(source[key]&&typeof source[key]==='object')result[key]={id:source[key].id,...(source[key].status?{status:source[key].status}:{}),...(key==='workJob'?{conversationId:source[key].conversationId,providerId:source[key].providerId}:{}),...(typeof source[key].outcomeUnknown==='boolean'?{outcomeUnknown:source[key].outcomeUnknown}:{}),...(key==='desktopAction'?{requiresFreshPreview:true}:{})};
     if(source.capability)result.capability={id:source.capability.id,name:source.capability.name,version:source.capability.version,hash:source.capability.hash};
     if(Array.isArray(source.hostActions))result.hostActions=source.hostActions.slice(0,12).map(action=>({id:action.id,tool:action.tool,status:action.status,result:minimalResult(action.result,depth+1)}));
     if(Array.isArray(source.steps))result.steps=source.steps.slice(0,12).map(step=>({tool:step.tool,...(step.status?{status:step.status}:{}),result:minimalResult(step.result,depth+1)}));
@@ -255,7 +256,7 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
       db.prepare('INSERT INTO chat_receipts VALUES(?,?,?,NULL)').run(requestId, digest, 'in_progress');
       db.prepare('INSERT INTO conversation_turns(conversation_id,request_id,digest,message,provider_id,status,started_at,outcome_json,base_bytes,stored_bytes,reserved_bytes) VALUES(?,?,?,?,?,?,?,NULL,?,?,?)').run(conversationId, requestId, digest, message, providerId, 'running', at, baseBytes, baseBytes, reserve);
       const title = conversation.auto_title ? message.replace(/\s+/g, ' ').slice(0, 80) : conversation.title;
-      db.prepare('UPDATE conversations SET title=?,auto_title=0,revision=revision+1,updated_at=?,active_request_id=?,last_status=? WHERE id=?').run(title, at, requestId, 'running', conversationId); activate(conversationId);
+      db.prepare('UPDATE conversations SET title=?,auto_title=0,revision=revision+1,updated_at=?,active_request_id=?,last_status=? WHERE id=?').run(title, at, requestId, 'running', conversationId); if(value.activate!==false)activate(conversationId);
       return { conversation: getConversation(conversationId), replayed: false, receipt: { state: 'in_progress', reply: null } };
     });
   }
@@ -312,5 +313,6 @@ export async function createProductivityStore({ dataDirectory, now = Date.now, c
       db.prepare('UPDATE conversations SET revision=revision+1,updated_at=?,active_request_id=NULL,last_status=? WHERE id=?').run(at, 'interrupted', saved.conversation_id);
     }
   });
-  return { snapshot, apply, configureWorkflowTools, executionReceipt, beginExecution, checkpointExecution, finishExecution, chatReceipt, beginChat, finishChat, listConversations, createConversation, getConversation, beginConversationTurn, recordConversationActions, finishConversationTurn, close() { if (!closed) { closed = true; db.close(); } } };
+  const work=installWorkStore({db,now,conversationLimit:limits.conversations,checkOpen});
+  return { snapshot, apply, configureWorkflowTools, executionReceipt, beginExecution, checkpointExecution, finishExecution, chatReceipt, beginChat, finishChat, listConversations, createConversation, getConversation, beginConversationTurn, recordConversationActions, finishConversationTurn, ...work, close() { if (!closed) { closed = true; db.close(); } } };
 }

@@ -35,7 +35,21 @@ export async function getCodexStatus({ spawnImpl = spawn, signal, timeoutMs = 50
 }
 
 /** Read-only ephemeral completion. Prompts are stdin data, never shell text. */
-export async function runCodexCompletion({ prompt, system = '', messages, schema, model, signal, onEvent, dataDirectory = tmpdir(), spawnImpl = spawn, timeoutMs = 180000, maxOutputBytes = 2 * 1024 * 1024 } = {}) {
+export async function runCodexCompletion({ prompt, system = '', messages, schema, model, signal, onEvent, onHelperStarted, onHelperSettled, dataDirectory = tmpdir(), spawnImpl = spawn, timeoutMs = 180000, maxOutputBytes = 2 * 1024 * 1024 } = {}) {
+  let directory, registered = false, launched = false, helperSettled = false, cleanupPromise;
+  function releaseHelper() {
+    if (helperSettled) return cleanupPromise;
+    helperSettled = true;
+    if (registered) { registered = false; activeJobs -= 1; }
+    cleanupPromise = (async () => {
+      if (directory) { const resolved = path.resolve(directory), parent = path.resolve(dataDirectory); if (resolved.startsWith(parent + path.sep) && path.basename(resolved).startsWith('codex-job-')) await rm(resolved, { recursive: true, force: true, maxRetries: 2 }).catch(() => {}); }
+      // No credentials, prompt, output or process identity leave this observer.
+      // An observer cannot prevent resource release or change the turn result.
+      try { const result = onHelperSettled?.(); result?.catch?.(() => {}); } catch { /* Optional observer only. */ }
+    })();
+    return cleanupPromise;
+  }
+  try {
   if (typeof prompt !== 'string') {
     if (!Array.isArray(messages)) throw fail('validation_error', 'A completion prompt is required.', 400);
     prompt = JSON.stringify({ system, messages });
@@ -45,9 +59,7 @@ export async function runCodexCompletion({ prompt, system = '', messages, schema
   if (model !== undefined && model !== '' && (typeof model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/.test(model))) throw fail('validation_error', 'Invalid Codex model.', 400);
   if (signal?.aborted) throw abortError();
   if (activeJobs >= 2) throw fail('provider_busy', 'Two Codex requests are already running. Stop one before starting another.', 429);
-  activeJobs += 1;
-  let directory;
-  try {
+  activeJobs += 1; registered = true;
     dataDirectory = await privateDataDirectory(dataDirectory); directory = await mkdtemp(path.join(dataDirectory, 'codex-job-'));
     const args = ['exec', '--json', '--ephemeral', '--sandbox', 'read-only', '--skip-git-repo-check', '--color', 'never', '-c', 'mcp_servers={}', '-c', 'features.apps=false', '-c', 'features.plugins=false'];
     if (model) args.push('--model', model);
@@ -59,12 +71,15 @@ export async function runCodexCompletion({ prompt, system = '', messages, schema
       const decoder = new StringDecoder('utf8');
       const emit = event => { try { onEvent?.(event); } catch { /* Observers cannot interrupt process cleanup. */ } };
       const done = (err, value) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(killTimer); signal?.removeEventListener('abort', cancel); err ? reject(err) : resolve(value); };
-      const stop = err => { if (settled || terminalError) return; terminalError = err; terminate(child, spawnImpl); killTimer = setTimeout(() => done(err), 1500); killTimer.unref?.(); };
+      // Keep a bounded caller-facing cancellation, but neither release the
+      // process lease nor remove its cwd until the owned helper truly closes.
+      const stop = err => { if (settled || terminalError) return; terminalError = err; killTimer = setTimeout(() => done(err), 1500); killTimer.unref?.(); try { terminate(child, spawnImpl); } catch { /* Retain ownership until close. */ } };
       const cancel = () => stop(abortError());
       const timer = setTimeout(() => stop(fail('provider_timeout', 'Codex took too long. Try a smaller request.', 504)), timeoutMs); timer.unref?.();
       signal?.addEventListener('abort', cancel, { once: true });
       if (signal?.aborted) { clearTimeout(timer); signal?.removeEventListener('abort', cancel); done(abortError()); return; }
       function line(value) {
+        if (settled || terminalError) return;
         let event; try { event = JSON.parse(value); } catch { if (value.trim()) stop(fail('invalid_provider_response', 'Codex returned unreadable event data.', 502)); return; }
         if (event.type === 'thread.started' || event.type === 'turn.started') emit({ type: 'progress', message: 'Codex is working.' });
         if (event.type === 'item.completed' && ['agent_message', 'assistant_message'].includes(event.item?.type)) {
@@ -75,19 +90,28 @@ export async function runCodexCompletion({ prompt, system = '', messages, schema
         if (event.type === 'turn.failed' || event.type === 'error') stop(fail('provider_unavailable', 'Codex could not complete the request. Check its sign-in and account limits, then retry.'));
         if (['item.started', 'item.completed'].includes(event.type) && ['command_execution', 'mcp_tool_call', 'web_search', 'file_change'].includes(event.item?.type)) stop(fail('unexpected_provider_action', 'Codex attempted an action outside the completion request.', 502));
       }
-      try { child = spawnImpl(command, args, { cwd: directory, stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true }); }
+      try { child = spawnImpl(command, args, { cwd: directory, stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true }); launched = true; }
       catch { done(fail('provider_unavailable', 'Codex could not start. Install its CLI and sign in, then refresh.')); return; }
       child.stdout.on('data', chunk => {
+        if (settled || terminalError) return;
         bytes += chunk.length;
         if (bytes > maxOutputBytes) return stop(fail('provider_output_limit', 'Codex returned too much output. Try a smaller request.', 502));
         buffer += decoder.write(chunk);
         let newline; while ((newline = buffer.indexOf('\n')) >= 0) { const value = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); line(value); }
         if (Buffer.byteLength(buffer) > 1024 * 1024) stop(fail('provider_output_limit', 'Codex returned an oversized event.', 502));
       });
-      child.stderr.on('data', chunk => { stderrBytes += chunk.length; if (stderrBytes > 65536) stop(fail('provider_output_limit', 'Codex returned too much diagnostic output.', 502)); });
+      child.stderr.on('data', chunk => { if (settled || terminalError) return; stderrBytes += chunk.length; if (stderrBytes > 65536) stop(fail('provider_output_limit', 'Codex returned too much diagnostic output.', 502)); });
       child.stdin.on('error', () => { if (!terminalError) stop(fail('provider_unavailable', 'Codex could not receive the request.')); });
-      child.on('error', () => done(terminalError || fail('provider_unavailable', 'Codex could not start. Install its CLI and sign in, then refresh.')));
+      child.on('error', () => {
+        const error = terminalError || fail('provider_unavailable', 'Codex could not start. Install its CLI and sign in, then refresh.');
+        // A live ChildProcess can emit errors for IPC/kill failures. Only an
+        // absent PID confirms a spawn failure; otherwise await actual close.
+        if (child.pid) stop(error);
+        else { void releaseHelper(); done(error); }
+      });
       child.on('close', code => {
+        void releaseHelper();
+        if (terminalError) return done(terminalError);
         buffer += decoder.end();
         if (buffer.trim()) line(buffer);
         if (terminalError) return done(terminalError);
@@ -95,10 +119,12 @@ export async function runCodexCompletion({ prompt, system = '', messages, schema
         if (code !== 0 || !turnCompleted || !finalText.trim()) return done(fail('provider_unavailable', 'Codex did not finish an answer. Check its sign-in and account limits, then retry.'));
         emit({ type: 'progress', message: 'Codex finished.' }); done(null, { text: finalText.trim(), toolCalls: [] });
       });
-      emit({ type: 'progress', message: 'Starting Codex with your existing sign-in.' }); child.stdin.end(safePrompt);
+      try { const result = onHelperStarted?.(); result?.catch?.(() => {}); } catch { /* Optional observer cannot change ownership. */ }
+      emit({ type: 'progress', message: 'Starting Codex with your existing sign-in.' });
+      try { child.stdin.end(safePrompt); } catch { stop(fail('provider_unavailable', 'Codex could not receive the request.')); }
     });
   } finally {
-    activeJobs -= 1;
-    if (directory) { const resolved = path.resolve(directory), parent = path.resolve(dataDirectory); if (resolved.startsWith(parent + path.sep) && path.basename(resolved).startsWith('codex-job-')) await rm(resolved, { recursive: true, force: true, maxRetries: 2 }).catch(() => {}); }
+    if (!launched) await releaseHelper();
+    else if (helperSettled) await cleanupPromise;
   }
 }
