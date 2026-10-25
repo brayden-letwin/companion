@@ -10,6 +10,7 @@ import { loadCapabilities } from './capability-registry.mjs';
 import { windowContextReference } from './window-context.mjs';
 import { normalizeAssistantBody, runAssistantTurn } from './assistant-turn.mjs';
 import { createWorkService } from './work-service.mjs';
+import { validateSourceReadOptions } from './source-read.mjs';
 
 const OWNER = 'local-workspace';
 const BASE = '/api/assistant';
@@ -18,6 +19,7 @@ const fail = (statusCode, code, message) => Object.assign(new Error(message), { 
 function fields(body, allowed) { if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !allowed.includes(key))) throw fail(400, 'invalid_input', 'The request contains unsupported fields.'); }
 function text(value, limit, label, empty = false) { if (typeof value !== 'string' || value.length > limit || (!empty && !value.trim())) throw fail(400, 'invalid_input', `${label} must contain ${empty ? '0' : '1'}–${limit} characters.`); return value.trim(); }
 function workQuery(req,detail=false){const query=new URL(req.url,'http://localhost').searchParams,allowed=detail?['textOffset','textLimit','actionOffset','actionLimit']:['offset','limit'],result={};for(const key of query.keys()){const value=query.get(key);if(!allowed.includes(key)||query.getAll(key).length!==1||!/^\d{1,7}$/.test(value))throw fail(400,'invalid_work_query','Use the returned work paging offsets and bounded limits.');result[key]=Number(value);}return result;}
+function sourceFileQuery(req){const query=new URL(req.url,'http://localhost').searchParams,result={};for(const key of query.keys()){const value=query.get(key);if(!['path','expectedHash','offset','limit'].includes(key)||query.getAll(key).length!==1)throw fail(400,'invalid_source_query','Use one source path and its returned paging fields.');if(['offset','limit'].includes(key)){if(!/^\d{1,6}$/.test(value))throw fail(400,'invalid_source_query','Use bounded source paging integers.');result[key]=Number(value);}else result[key]=value;}return validateSourceReadOptions(result);}
 function conversationPage(conversation, before) {
   let end = conversation.turns.length;
   if (before !== undefined) {
@@ -43,7 +45,7 @@ async function readJson(req, limit = 2 * 1024 * 1024) {
   let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw fail(400, 'invalid_json', 'Provide a JSON object.'); }
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw fail(400, 'invalid_json', 'Provide a JSON object.'); return body;
 }
-const routeMatches = route => ['/chat','/work','/context','/conversations','/providers','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/features','/features/source','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
+const routeMatches = route => ['/chat','/work','/context','/conversations','/providers','/providers/configure','/providers/select','/providers/remove','/workspace','/workspace/operations','/tools/run','/features','/features/source','/features/source/file','/features/patch','/integrations','/runtime','/runtime/restart','/desktop','/desktop/actions','/desktop/stop','/stop'].some(suffix => route === BASE + suffix)
   || /^\/api\/assistant\/(?:work\/[a-f\d-]+(?:\/cancel)?|context\/[a-f\d-]+\/clear|conversations\/[a-f\d-]+|features\/[a-f\d-]+(?:\/(?:apply|rollback|cancel))?|workspace\/workflows\/[a-f\d-]+\/run|desktop\/actions\/[a-f\d-]+\/(?:approve|cancel))$/i.test(route);
 
 /** Lazy initialization keeps the legacy reader and protocol tests independent. */
@@ -191,6 +193,7 @@ export function createProductivityApi({ root, dataDirectory, createRuntime } = {
           if (route === BASE + '/providers') { json(res, 200, await providerStatus(services.router)); return true; }
           if (route === BASE + '/features') { json(res, 200, { jobs: await services.builder.list(OWNER) }); return true; }
           if (route === BASE + '/features/source') { json(res, 200, await services.builder.source(OWNER, { includeContent: new URL(req.url, 'http://localhost').searchParams.get('content') === '1' })); return true; }
+          if(route===BASE+'/features/source/file'){const options=sourceFileQuery(req);if(typeof services.builder.sourceFile!=='function')throw fail(503,'source_read_unavailable','Targeted source reads are unavailable in this runtime.');json(res,200,await services.builder.sourceFile(OWNER,options));return true;}
           if (route === BASE + '/integrations') { json(res, 200, { mcp: { command: process.execPath, args: [path.join(root, 'server', 'mcp-server.mjs')], env: { COMPANION_URL: `http://127.0.0.1:${req.socket.localPort}` } }, tools: services.tools.catalog?.() || services.tools.definitions.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })), capabilityStatus: services.capabilityStatus || { ready: true } }); return true; }
           const match = /^\/api\/assistant\/features\/([a-f\d-]+)$/i.exec(route);
           if (match) { json(res, 200, await services.builder.get(match[1], OWNER)); return true; }

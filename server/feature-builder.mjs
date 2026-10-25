@@ -4,6 +4,7 @@ import { mkdir, readdir, readFile, writeFile, rename, unlink, lstat, realpath, o
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { verifyCapabilityBehavior, verifyPanelCapabilityLinks } from './capability-verification.mjs';
+import { formatSourceFile, validateSourceReadOptions } from './source-read.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const fail = (statusCode, code, message) => Object.assign(new Error(message), { statusCode, code });
@@ -11,7 +12,7 @@ const clone = value => structuredClone(value);
 const SOURCE_DIRS = new Set(['src', 'server', 'electron', 'scripts', 'tests', 'docs']);
 const SOURCE_TYPES = new Set(['.mjs', '.cjs', '.js', '.css', '.html', '.json', '.md', '.ps1', '.cmd', '.txt']);
 const ROOT_DOCS = new Set(['README.md', 'DESIGN.md', 'CONTRIBUTING.md', 'ROADMAP.md', 'DISCUSSION_FLOW.md', 'QA.md', 'START_HERE.txt', 'AGENTS.md', 'Start Companion.cmd', 'Start Desktop Companion.cmd', 'mcp.example.json', 'package.json']);
-const TRUSTED_TESTS = ['math.test.mjs', 'tutor.test.mjs', 'discussion.test.mjs', 'shared-discussion.test.mjs', 'assistant.test.mjs', 'provider.test.cjs', 'local-provider.test.cjs', 'training-data.test.mjs', 'productivity-store.test.mjs', 'task-queries.test.mjs', 'productivity-conversations-ui.test.mjs', 'voice-session.test.mjs','assistant-turn.test.mjs','completion-queue.test.mjs','work-output.test.mjs','work-service.test.mjs','codex-runner.test.mjs','model-router.test.mjs','window-context.test.mjs'];
+const TRUSTED_TESTS = ['math.test.mjs', 'tutor.test.mjs', 'discussion.test.mjs', 'shared-discussion.test.mjs', 'assistant.test.mjs', 'provider.test.cjs', 'local-provider.test.cjs', 'training-data.test.mjs', 'productivity-store.test.mjs', 'task-queries.test.mjs', 'productivity-conversations-ui.test.mjs', 'voice-session.test.mjs','assistant-turn.test.mjs','completion-queue.test.mjs','work-output.test.mjs','work-service.test.mjs','codex-runner.test.mjs','model-router.test.mjs','window-context.test.mjs','source-read.test.mjs'];
 const LIMITS = Object.freeze({ files: 24, fileBytes: 250000, patchBytes: 1000000, snapshotBytes: 2000000, sourceFiles: 300, jobs: 100, prompt: 12000, output: 64000, verificationMs: 30000 });
 const TERMINAL = new Set(['applied', 'failed', 'cancelled', 'conflict', 'rolled_back', 'interrupted', 'recovery_required']);
 
@@ -536,6 +537,12 @@ export async function createFeatureBuilder({ root, dataDirectory, complete, veri
       return createJob(input, sessionId, { ...patch, baseHashes: clone(input.baseHashes) });
     },
     async source(sessionId, { includeContent = false } = {}) { owner(sessionId); const source = await snapshot(); return { revision: source.revision, files: source.files.map(({ content, ...file }) => ({ ...file, ...(includeContent ? { content } : {}) })) }; },
+    async sourceFile(sessionId, options) {
+      owner(sessionId); const query = validateSourceReadOptions(options); validPath(query.path);
+      const source = await snapshot(), file = source.files.find(entry => entry.path === query.path);
+      if (!file) throw fail(404, 'source_not_found', 'That exact application source path was not found in the current inventory.');
+      return formatSourceFile(file, query);
+    },
     async list(sessionId) { const key = owner(sessionId); return [...jobs.values()].filter(job => job.ownerHash === key).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(jobSummary); },
     async get(id, sessionId) { return publicJob(owned(id, sessionId)); },
     async apply(id, sessionId) { return applyJob(owned(id, sessionId)); },
